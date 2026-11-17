@@ -1,6 +1,7 @@
 """A random-weight stand-in for Checkpoint with the real Gemma 4 26B-A4B shapes."""
 
 import copy
+import zlib
 
 import torch
 from transformers import AutoConfig
@@ -54,7 +55,9 @@ class FakeCheckpoint:
     def get(self, name: str) -> torch.Tensor:
         if name not in self._cache:
             shape, std = self._shape(name)
-            g = torch.Generator().manual_seed(hash((self.seed, name)) % (2**31))
+            # crc32, not hash(): str hashes change per process, and tensors read without the
+            # weight cache must match the cached ones a previous process built.
+            g = torch.Generator().manual_seed(zlib.crc32(f"{self.seed}:{name}".encode()))
             t = torch.randn(shape, generator=g) * std
             if name.endswith("norm.weight") or name.endswith("layernorm.weight") or "layernorm_" in name or name.endswith("scale"):
                 t = 1.0 + t
