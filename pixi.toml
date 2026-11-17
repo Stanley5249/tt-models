@@ -1,0 +1,56 @@
+[workspace]
+name = "tt-vllm"
+channels = ["conda-forge"]
+requires-pixi = ">=0.81"
+# The ttnn wheel needs glibc 2.34; Ubuntu 22.04 has 2.35.
+platforms = [{ platform = "linux-64", glibc = "2.34" }]
+
+# Conda supplies Python and the native libraries the ttnn wheel loads:
+# libhwloc, libnuma, and a GLIBCXX_3.4.32 libstdc++ for tt-metal, mpc and zstd
+# for the bundled SFPI compiler. Every Python package comes from PyPI.
+[dependencies]
+python = "3.12.*"
+libstdcxx = ">=13"
+libhwloc = "*"
+libnuma = "*"
+mpc = "*"
+zstd = "*"
+
+[activation.env]
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
+# tt-metal's fabric, inspector, and watcher logs; without it they land in
+# generated/ under the working directory.
+TT_METAL_LOGS_PATH = "$PIXI_PROJECT_ROOT/logs/tt-metal"
+# Selects the build target vLLM's setup.py declares requirements for.
+VLLM_TARGET_DEVICE = "empty"
+
+[pypi-dependencies]
+# Stanley5249/tt-metal release: ttnn with SFPI and tt_transformers' models/.
+ttnn = { url = "https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.5/ttnn-0.81.1%2Bconda.5-cp312-cp312-linux_x86_64.whl" }
+# The torch pair tt-metal 0.81 is tested with, as CPU builds: PyPI's Linux
+# torch is the CUDA build.
+torch = { version = "==2.11.*", index = "https://download.pytorch.org/whl/cpu" }
+torchvision = { version = "==0.26.*", index = "https://download.pytorch.org/whl/cpu" }
+# PyPI's vLLM wheels are CUDA builds, its CPU wheels since 0.30 need glibc 2.39,
+# and its sdist states the CUDA requirements statically. A git checkout makes
+# the resolver build the metadata, which lists requirements/common.txt.
+vllm = { git = "https://github.com/vllm-project/vllm.git", tag = "v0.31.0" }
+# Follows plugin main; pixi.lock holds the commit until `pixi update vllm-tt-plugin`.
+vllm-tt-plugin = { git = "https://github.com/tenstorrent/vllm-tt-plugin.git", branch = "main" }
+
+# No numpy override: an override replaces every package's numpy requirement,
+# so the resolver could then pick packages that need numpy 2. Without one,
+# ttnn's numpy<2 holds and the rest resolve to releases that accept numpy 1.
+[pypi-options.dependency-overrides]
+# vLLM asks for >=4.13, which needs numpy 2 (vllm-tt-plugin docs/vllm-overrides.txt).
+opencv-python-headless = "==4.11.*"
+# vllm-tt-plugin's supported range; vLLM alone allows up to 5.18.
+transformers = ">=5.10.4,<5.15"
+
+[tasks.serve-qwen3-8b]
+cmd = """vllm serve Qwen/Qwen3-8B --host 127.0.0.1 --port 8000 \
+  --block-size 64 --max-num-seqs 32 --max-model-len 32768 \
+  --enable-auto-tool-choice --tool-call-parser hermes \
+  --reasoning-parser qwen3"""
+# tt_transformers reads HF_MODEL, not vLLM's --model.
+env = { MESH_DEVICE = "N300", HF_MODEL = "Qwen/Qwen3-8B", TT_CACHE_PATH = "$PIXI_PROJECT_ROOT/cache/Qwen3-8B" }

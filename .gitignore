@@ -1,0 +1,4 @@
+.pixi/
+cache/
+logs/
+build/
