@@ -22,7 +22,7 @@ from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_redu
 GELU_TANH = ttnn.UnaryOpType.GELU_TANH
 
 
-def _matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8)):
+def _matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8), in0_block_w: int | None = None):
     n_tiles = n // TILE
     # The 1D mcast kernel needs every core of a full rectangle to own work.
     for per_core_n in range(1, n_tiles + 1):
@@ -35,7 +35,7 @@ def _matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8)):
     # scripts/bench_sparse_matmul.py, down (K=11 tiles) took 154 us at
     # in0_block_w=1 and 92 us at 11; gate_up (K=88) 194 us at 8 and 184 us at 22.
     k_tiles = k // TILE
-    in0_block_w = next(w for w in (22, 11, 8, 4, 2, 1) if k_tiles % w == 0)
+    in0_block_w = in0_block_w or next(w for w in (22, 11, 8, 4, 2, 1) if k_tiles % w == 0)
     return ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
         compute_with_storage_grid_size=ttnn.CoreCoord(gx, gy),
         in0_block_w=in0_block_w,
@@ -65,6 +65,11 @@ class FeedForward:
         self.eps = cfg.rms_norm_eps
         self.mlp_local = cfg.intermediate_size // tp
         self.expert_local = cfg.moe_intermediate_size // tp
+        # Each per-chip gate and up half is zero-padded to a multiple of 4 tiles
+        # (352 -> 384 columns), so the gate_up sparse matmul has 24 output tiles and
+        # runs on a full 8x3 grid: 172 us -> 127 us per decode layer, versus 8
+        # cores for 22 tiles. The padding columns are sliced off before the down.
+        self.expert_pad = -(-self.expert_local // (4 * TILE)) * 4 * TILE
         p = f"layers.{layer_idx}."
         put = loader.put
         rm = ttnn.ROW_MAJOR_LAYOUT
@@ -106,13 +111,15 @@ class FeedForward:
             gu = ckpt.get(p + "experts.gate_up_proj")  # [E, 2I, H], gate rows first
             inter = cfg.moe_intermediate_size
             g, u = gu[:, :inter].transpose(1, 2), gu[:, inter:].transpose(1, 2)  # [E, H, I]
-            n = self.expert_local
-            return torch.cat([torch.cat([g[..., c * n : (c + 1) * n], u[..., c * n : (c + 1) * n]], -1) for c in range(tp)], -1)[None]
+            n, pad = self.expert_local, self.expert_pad - self.expert_local
+            zeros = g.new_zeros(E, H, pad)
+            parts = [torch.cat([g[..., c * n : (c + 1) * n], zeros, u[..., c * n : (c + 1) * n], zeros], -1) for c in range(tp)]
+            return torch.cat(parts, -1)[None]
 
         def experts_down():
             return ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous()[None]  # [1, E, I, H]
 
-        self.exp_gate_up = put(f"L{layer_idx}.exp_gate_up", experts_gate_up, expert_dtype, shard_dim=-1)
+        self.exp_gate_up = put(f"L{layer_idx}.exp_gate_up_p{self.expert_pad}", experts_gate_up, expert_dtype, shard_dim=-1)
         # per_expert_scale is applied to the routing weights: folding it into the BFP4
         # down weights changes their block rounding and measurably hurt accuracy.
         self.exp_down = put(f"L{layer_idx}.exp_down", experts_down, expert_dtype, shard_dim=-2)
@@ -127,8 +134,21 @@ class FeedForward:
             mesh_mapper=ttnn.ReplicateTensorToMesh(loader.mesh),
         )  # required operand in indexed mode, not read
         self.mesh = loader.mesh
+        rep = ttnn.ReplicateTensorToMesh(loader.mesh)
+        # Decode routing: topk_router_gpt does matmul -> top-k -> softmax over the k
+        # logits, which equals Gemma's softmax -> top-k -> renormalize.
+        self.router_2d = ttnn.reshape(self.router, (H, E))
+        # per_expert_scale per slot comes from an embedding lookup of the expert id.
+        self.scale_table = ttnn.from_torch(
+            ckpt.get(p + "router.per_expert_scale").float()[:, None].expand(E, TILE).contiguous(),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            device=loader.mesh,
+            mesh_mapper=rep,
+        )
+        self._zero_bias = {}
         self._combine_masks = {}
-        self.gate_up_cfg = _matmul_1d_config(1, 2 * self.expert_local, H)
+        self.gate_up_cfg = _matmul_1d_config(1, 2 * self.expert_pad, H, in0_block_w=44)
         self.down_cfg = _matmul_1d_config(1, H, self.expert_local)
 
     def _rms(self, x, w):
@@ -174,21 +194,46 @@ class FeedForward:
             )
         return self._combine_masks[tokens]
 
-    def _experts_decode(self, x: ttnn.Tensor, weights: ttnn.Tensor, ids: ttnn.Tensor) -> ttnn.Tensor:
-        """Decode experts for T <= 32 tokens with compact (indexed) sparse matmuls.
+    def _bias(self, tokens: int) -> ttnn.Tensor:
+        if tokens not in self._zero_bias:
+            self._zero_bias[tokens] = ttnn.from_torch(
+                torch.zeros(tokens, self.n_experts),
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.mesh,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh),
+            )
+        return self._zero_bias[tokens]
 
-        Slot s = 8 * token + j computes expert ids[token, j] for every token row;
-        the combine weights keep only the row of the slot's own token.
+    def _experts_decode(self, x: ttnn.Tensor, normed: ttnn.Tensor) -> ttnn.Tensor:
+        """Route and run the experts for T <= 32 tokens with compact (indexed) sparse matmuls.
+
+        Slot s = 8 * token + j computes expert ids[token, j] for every token row.
+        The slot weight (routing weight times per_expert_scale, and zero on rows
+        of other tokens) scales the down input, so the combine is a plain sum.
         """
         tokens = x.shape[2]
         slots = tokens * self.top_k
         n = self.expert_local
+        ids, weights = ttnn.experimental.topk_router_gpt(
+            ttnn.reshape(normed, (tokens, self.hidden)),
+            weight_tensor=self.router_2d,
+            bias_tensor=self._bias(tokens),
+            k=self.top_k,
+            num_experts=self.n_experts,
+        )  # row-major [T, k]: uint16 ids, bf16 softmax over the k logits
         if tokens == 1:
-            idx = ttnn.reshape(ttnn.to_layout(ids, ttnn.ROW_MAJOR_LAYOUT), (1, slots))
-        else:  # reshape only moves uint16 as a view, so flatten in uint32
-            wide = ttnn.to_layout(ttnn.typecast(ids, ttnn.uint32), ttnn.ROW_MAJOR_LAYOUT)
-            idx = ttnn.typecast(ttnn.reshape(wide, (1, slots)), ttnn.uint16)
-            wide.deallocate(True)
+            idx = ttnn.reshape(ids, (1, slots))
+            idx32 = ttnn.typecast(idx, ttnn.uint32)
+        else:  # a uint16 reshape that moves rows is unsupported, so flatten in uint32
+            idx32 = ttnn.reshape(ttnn.typecast(ids, ttnn.uint32), (1, slots))
+            idx = ttnn.typecast(idx32, ttnn.uint16)
+        scale = ttnn.embedding(idx32, self.scale_table, layout=ttnn.TILE_LAYOUT)  # [1, S, 32]
+        w = ttnn.to_layout(ttnn.reshape(weights, (1, slots, 1)), ttnn.TILE_LAYOUT)  # [1, S, 1]
+        w = ttnn.mul(scale, w)  # [1, S, 32], every column the slot weight
+        w = ttnn.slice(ttnn.reshape(w, (1, slots, 1, TILE)), [0, 0, 0, 0], [1, slots, 1, 1])  # [1, S, 1, 1]
+        if tokens > 1:
+            w = ttnn.mul(w, self._combine_mask(tokens))  # [1, S, T, 1]
         gu = ttnn.sparse_matmul(
             x,
             self.exp_gate_up,
@@ -199,15 +244,19 @@ class FeedForward:
             memory_config=DRAM,
             dtype=ttnn.bfloat16,
         )  # [1, 1, 1, S, T, 2n]
-        gu = ttnn.reshape(gu, (1, slots, tokens, 2 * n))
+        p = self.expert_pad
+        gu = ttnn.reshape(gu, (1, slots, tokens, 2 * p))
         gate = ttnn.slice(gu, [0, 0, 0, 0], [1, slots, tokens, n])
-        up = ttnn.slice(gu, [0, 0, 0, n], [1, slots, tokens, 2 * n])
+        up = ttnn.slice(gu, [0, 0, 0, p], [1, slots, tokens, p + n])
         gu.deallocate(True)
         h = ttnn.mul(gate, up, input_tensor_a_activations=[GELU_TANH])
         gate.deallocate(True)
         up.deallocate(True)
+        hw = ttnn.mul(h, w)
+        h.deallocate(True)
+        w.deallocate(True)
         down = ttnn.sparse_matmul(
-            h,
+            hw,
             self.exp_down,
             sparsity=self.all_experts,
             indices=idx,
@@ -218,17 +267,9 @@ class FeedForward:
             is_input_b_sparse=True,
             dtype=ttnn.bfloat16,
         )  # [1, S, T, H]
-        h.deallocate(True)
-        w = ttnn.permute(ttnn.reshape(weights, (1, 1, 1, slots)), (0, 3, 1, 2))  # [1, S, 1, 1]
-        if tokens > 1:
-            w2 = ttnn.mul(w, self._combine_mask(tokens))  # [1, S, T, 1]
-            w.deallocate(True)
-            w = w2
-        weighted = ttnn.mul(down, w)
+        hw.deallocate(True)
+        out = ttnn.experimental.fast_reduce_nc(down, dims=[1], compute_kernel_config=HIFI4, memory_config=DRAM)  # [1, 1, T, H]
         down.deallocate(True)
-        w.deallocate(True)
-        out = ttnn.sum(weighted, dim=1, keepdim=True)  # [1, 1, T, H]
-        weighted.deallocate(True)
         return out
 
     def _mlp(self, x):
@@ -262,9 +303,10 @@ class FeedForward:
             memory_config=DRAM,
             dtype=ttnn.bfloat16,
         )  # [1, G, 1, E, M, 2n]
-        gu = ttnn.reshape(gu, (groups, E, m, 2 * n))
+        p = self.expert_pad
+        gu = ttnn.reshape(gu, (groups, E, m, 2 * p))
         gate = ttnn.slice(gu, [0, 0, 0, 0], [groups, E, m, n])
-        up = ttnn.slice(gu, [0, 0, 0, n], [groups, E, m, 2 * n])
+        up = ttnn.slice(gu, [0, 0, 0, p], [groups, E, m, p + n])
         gu.deallocate(True)
         h = ttnn.mul(gate, up, input_tensor_a_activations=[GELU_TANH])
         gate.deallocate(True)
@@ -316,10 +358,7 @@ class FeedForward:
 
         exp_in = ttnn.mul(normed, self.pre_ff2)
         if t <= TILE:
-            weights, ids = self.topk_route(normed)
-            experts = self._experts_decode(exp_in, weights, ids)
-            weights.deallocate(True)
-            ids.deallocate(True)
+            experts = self._experts_decode(exp_in, normed)
         else:
             routing = self.route(normed)
             experts = self._experts(exp_in, routing, chunk_tokens)
