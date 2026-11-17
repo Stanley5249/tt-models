@@ -130,12 +130,13 @@ class Gemma4TT:
     # -- host-side tables ----------------------------------------------------
 
     def _rope_tables(self, n: int) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+        """float32 [n, hd] cos/sin per layer type; prefill uploads them as BF16, decode as fp32."""
         rotary = hf.Gemma4TextRotaryEmbedding(self.cfg)
         pos = torch.arange(n)[None]
         out = {}
         for kind in ("sliding_attention", "full_attention"):
             cos, sin = rotary(torch.zeros(1, dtype=torch.float32), pos, kind)
-            out[kind] = (cos[0].to(torch.bfloat16), sin[0].to(torch.bfloat16))  # [n, hd]
+            out[kind] = (cos[0], sin[0])
         return out
 
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
@@ -296,7 +297,7 @@ class Gemma4TT:
             for name, table, fill in (("cos", cos, 1.0), ("sin", sin, 0.0)):
                 rows = torch.full((batch, attn.heads, attn.shape.head_dim), fill, dtype=table.dtype)
                 rows[:, :roped] = table[pos][:, None, :]
-                inputs[f"{kind}.{name}"] = self._host(rows.reshape(1, 1, batch * attn.heads, -1))
+                inputs[f"{kind}.{name}"] = self._host(rows.reshape(1, 1, batch * attn.heads, -1), ttnn.float32)
         return inputs
 
     def _decode_device(self, dev: dict[str, ttnn.Tensor]) -> ttnn.Tensor:

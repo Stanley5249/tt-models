@@ -72,15 +72,18 @@ def rotate_half(x: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:
         _ROTATE[key] = ttnn.from_torch(
             r[None, None], dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)
         )
-    return ttnn.matmul(x, _ROTATE[key], compute_kernel_config=HIFI4, memory_config=memory_config)
+    return ttnn.matmul(x, _ROTATE[key], compute_kernel_config=HIFI4, memory_config=memory_config, dtype=x.dtype)
 
 
-def apply_rope(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:
+def apply_rope(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor, memory_config=DRAM, dtype=None) -> ttnn.Tensor:
+    """x * cos + rotate_half(x) * sin; intermediates keep x's dtype, the sum is `dtype`."""
     rot = rotate_half(x, memory_config)
     a = ttnn.mul(x, cos, memory_config=memory_config)
-    out = ttnn.addcmul(a, rot, sin, memory_config=memory_config)  # x * cos + rot * sin
+    b = ttnn.mul(rot, sin, memory_config=memory_config)
     rot.deallocate(True)
+    out = ttnn.add(a, b, memory_config=memory_config, dtype=dtype)
     a.deallocate(True)
+    b.deallocate(True)
     return out
 
 
@@ -195,7 +198,7 @@ class Attention:
             per_user = torch.cat([q.expand(s.n_q, -1), k.expand(s.n_kv, -1), torch.ones(s.n_kv, s.head_dim)])
             self._head_w_dev[batch] = ttnn.from_torch(
                 per_user.repeat(batch, 1)[None, None],
-                dtype=ttnn.bfloat16,
+                dtype=ttnn.float32,
                 layout=ttnn.TILE_LAYOUT,
                 device=self.mesh,
                 mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh),
@@ -214,13 +217,16 @@ class Attention:
         s = self.shape
         batch = x.shape[2]
         width = self.heads * s.head_dim
-        xqkv = ttnn.linear(x, self.wqkv, compute_kernel_config=HIFI2, memory_config=ttnn.L1_MEMORY_CONFIG)
+        # Gemma 4 attention uses scale 1 on normalized q and k, so its logits are
+        # large and sensitive to q/k rounding: norm, weight and RoPE run in fp32 and
+        # round to BF16 once, before the head split (BF16 here raised decode KL by 30%).
+        xqkv = ttnn.linear(x, self.wqkv, compute_kernel_config=HIFI2, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.float32)
         rows = ttnn.reshape(xqkv, (1, 1, batch * self.heads, s.head_dim))
         normed = ttnn.rms_norm(rows, epsilon=self.eps, memory_config=ttnn.L1_MEMORY_CONFIG, compute_kernel_config=HIFI4)
         xqkv.deallocate(True)
         weighted = ttnn.mul(normed, self.head_weights(batch), memory_config=ttnn.L1_MEMORY_CONFIG)
         normed.deallocate(True)
-        roped = apply_rope(weighted, *rope, memory_config=ttnn.L1_MEMORY_CONFIG)
+        roped = apply_rope(weighted, *rope, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.bfloat16)
         weighted.deallocate(True)
         fused = ttnn.reshape(roped, (1, 1, batch, width))
         q, k, v = ttnn.experimental.nlp_create_qkv_heads_decode(
