@@ -129,7 +129,10 @@ class Gemma4ForCausalLM:
             if start != 0:
                 raise NotImplementedError(f"prefill must start at position 0, got {start}")
             slot = int(empty_slots[i]) if empty_slots is not None else i
+            t0 = time.perf_counter()
             rows.append(self.model.prefill(tokens[i, :end], page_table[i], slot=slot))
+            if self.timing:
+                logger.info(f"Gemma4 prefill: {end} tokens in slot {slot}, {(time.perf_counter() - t0) * 1e3:.0f} ms")
         return torch.stack(rows)[:, None, :]
 
     def decode_forward(
