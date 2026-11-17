@@ -1,0 +1,4 @@
+RESULT {"label": "final", "seed": 1, "ppl": 20.3287, "top1_vs_fp32": 0.8622, "kl_mean": 0.19398, "kl_p95": 0.83421}
+RESULT {"label": "final", "seed": 2, "ppl": 18.4066, "top1_vs_fp32": 0.8505, "kl_mean": 0.23817, "kl_p95": 1.06005}
+RESULT {"label": "base", "seed": 1, "ppl": 21.0563, "top1_vs_fp32": 0.8642, "kl_mean": 0.20017, "kl_p95": 0.78348}
+RESULT {"label": "base", "seed": 2, "ppl": 19.7161, "top1_vs_fp32": 0.8339, "kl_mean": 0.27333, "kl_p95": 1.11769}

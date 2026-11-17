@@ -1,6 +1,6 @@
-"""Prefill KL vs fp32 for 512 tokens under tiny embedding perturbations (noise floor).
+"""Prefill KL vs fp32 under tiny embedding perturbations (noise floor).
 
-    pixi run [env PYTHONPATH=<code root>] python scripts/noise_floor.py <label> <seed> [<seed> ...]
+    pixi run [env PYTHONPATH=<code root>] python scripts/noise_floor.py [--tokens 512] <label> <seed> [<seed> ...]
 
 A single 512-token run moves by about +-0.04 KL when the input moves by one
 BF16 ulp (top-8 routing flips propagate through attention), so compare
@@ -8,6 +8,7 @@ means over a few seeds, not single runs.
 Seed 0 means no perturbation.
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -22,8 +23,12 @@ from gemma4_tt.checkpoint import Checkpoint  # noqa: E402
 from gemma4_tt.mesh import open_n300  # noqa: E402
 from gemma4_tt.tt.model import Gemma4TT  # noqa: E402
 
-N = 512
-label, seeds = sys.argv[1], [int(s) for s in sys.argv[2:]]
+ap = argparse.ArgumentParser()
+ap.add_argument("--tokens", type=int, default=512)
+ap.add_argument("label")
+ap.add_argument("seeds", type=int, nargs="+")
+args = ap.parse_args()
+N, label, seeds = args.tokens, args.label, args.seeds
 ckpt = Checkpoint()
 ids = tokens(ckpt, N)
 base = torch.load(ROOT / "cache" / "ref" / f"readme-{N}-fp32-logits.pt")
