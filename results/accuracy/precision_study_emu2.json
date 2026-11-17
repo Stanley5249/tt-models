@@ -1,0 +1,20 @@
+{
+ "emu:experts_gate_up=bfp4,experts_down=bfp8,attention=bfp8,mlp=bfp8,lm_head=bfp8@512": {
+  "ppl": 24.33,
+  "top1_vs_fp32": 0.8454,
+  "kl_mean": 0.33194,
+  "kl_p95": 1.52744
+ },
+ "emu:experts_gate_up=bfp8,experts_down=bfp4,attention=bfp8,mlp=bfp8,lm_head=bfp8@512": {
+  "ppl": 22.5303,
+  "top1_vs_fp32": 0.8728,
+  "kl_mean": 0.32241,
+  "kl_p95": 1.64735
+ },
+ "emu:experts=bfp8,attention=bfp8,mlp=bfp8,lm_head=bfp8@512": {
+  "ppl": 23.1781,
+  "top1_vs_fp32": 0.9022,
+  "kl_mean": 0.13051,
+  "kl_p95": 0.7111
+ }
+}

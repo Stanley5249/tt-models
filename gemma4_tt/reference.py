@@ -47,6 +47,8 @@ QUANT_GROUPS = {
     "attention": ("self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight"),
     "mlp": ("mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight"),
     "experts": ("experts.gate_up_proj", "experts.down_proj"),
+    "experts_gate_up": ("experts.gate_up_proj",),
+    "experts_down": ("experts.down_proj",),
 }
 
 
