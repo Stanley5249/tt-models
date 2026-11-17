@@ -246,10 +246,24 @@ class Gemma4TT:
     def decode(self, tokens: torch.Tensor, positions: torch.Tensor, page_table: torch.Tensor, trace: bool = False) -> torch.Tensor:
         """One decode step for B rows (row i is slot i). positions -1 marks inactive rows.
 
-        With `trace`, the first call per batch size captures a metal trace and
+        Inactive rows are dropped before the device step: vLLM pads decode to
+        max_num_seqs rows, and every row costs 8 expert slots, so one user in a
+        4-row batch would otherwise pay for four. Their logits come back as zeros.
+        With `trace`, the first call per active row count captures a metal trace and
         later calls only copy the inputs and replay it. Returns float logits [B, V].
         """
-        host = self._decode_inputs(tokens, positions, page_table)
+        rows = tokens.shape[0]
+        active = torch.nonzero(positions >= 0).flatten()
+        if len(active) == rows:
+            return self._decode_rows(tokens, positions, page_table, torch.arange(rows), trace)
+        logits = torch.zeros(rows, self.vocab)
+        if len(active):
+            logits[active] = self._decode_rows(tokens[active], positions[active], page_table[active], active, trace)
+        return logits
+
+    def _decode_rows(self, tokens, positions, page_table, slots, trace) -> torch.Tensor:
+        """Decode rows that are all active; row i belongs to batch slot slots[i]."""
+        host = self._decode_inputs(tokens, positions, page_table, slots)
         if not trace:
             dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
             out = self._decode_device(dev)
@@ -259,6 +273,8 @@ class Gemma4TT:
                 t.deallocate(True)
             return logits
         key = tokens.shape[0]
+        if not self.traces:
+            self._decode_constants()
         if key not in self.traces:
             dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
             self._decode_device(dev).deallocate(True)  # compile outside the capture
@@ -272,10 +288,22 @@ class Gemma4TT:
         ttnn.execute_trace(self.mesh, tid, cq_id=0, blocking=False)
         return self._read_logits(out)
 
+    def _decode_constants(self):
+        """Create every batch size's decode constants before the first trace capture.
+
+        A buffer allocated after a capture can overlap that trace's intermediates,
+        and replaying the trace then overwrites it. Per-step inputs are rewritten
+        before each replay, but these constants are not.
+        """
+        for batch in range(1, self.max_batch + 1):
+            for layer in self.layers:
+                layer.attn.head_weights(batch)
+                layer.ff.decode_constants(batch)
+
     def _host(self, t: torch.Tensor, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT) -> ttnn.Tensor:
         return ttnn.from_torch(t, dtype=dtype, layout=layout, mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
 
-    def _decode_inputs(self, tokens, positions, page_table) -> dict[str, ttnn.Tensor]:
+    def _decode_inputs(self, tokens, positions, page_table, slots) -> dict[str, ttnn.Tensor]:
         """Host tensors for one decode step; shapes depend only on the batch size."""
         batch = tokens.shape[0]
         # paged ops need fewer blocks per sequence than blocks in the pool
@@ -288,7 +316,7 @@ class Gemma4TT:
             "x": self._host(self.embed(tokens.long()).reshape(1, 1, batch, self.hidden)),
             "cur_pos": self._host(positions.to(torch.int32), ttnn.int32, rm),
             "global_pt": self._host(pt, ttnn.int32, rm),
-            "ring_pt": self._host(self.slot_blocks[:batch].contiguous(), ttnn.int32, rm),
+            "ring_pt": self._host(self.slot_blocks[slots].contiguous(), ttnn.int32, rm),
         }
         pos = positions.clamp(min=0).long()
         for kind, (cos, sin) in self.rope.items():

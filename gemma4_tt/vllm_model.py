@@ -94,10 +94,14 @@ class Gemma4ForCausalLM:
         self.model.prefill(torch.zeros(32, dtype=torch.long), blocks, slot=0)
 
     def warmup_model_decode(self, kv_cache, max_batch_size, num_blocks, can_sample_on_device, enable_trace, **_):
+        """Compile (and capture) one decode program per active row count, since
+        decode drops inactive rows; position 0 of slot 0 is rewritten by any prefill."""
         tokens = torch.zeros(max_batch_size, dtype=torch.long)
-        positions = torch.full((max_batch_size,), -1, dtype=torch.long)
-        positions[0] = 0
-        self.model.decode(tokens, positions, torch.zeros(max_batch_size, num_blocks, dtype=torch.int32), trace=enable_trace)
+        page_table = torch.zeros(max_batch_size, num_blocks, dtype=torch.int32)
+        for active in range(1, max_batch_size + 1):
+            positions = torch.full((max_batch_size,), -1, dtype=torch.long)
+            positions[:active] = 0
+            self.model.decode(tokens, positions, page_table, trace=enable_trace)
 
     def release_request(self, slot):
         pass  # the slot's sliding ring is rewritten by the next prefill into it
