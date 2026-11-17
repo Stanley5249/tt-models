@@ -64,6 +64,10 @@ class FeedForward:
         self.top_k = cfg.top_k_experts
         self.eps = cfg.rms_norm_eps
         self.mlp_local = cfg.intermediate_size // tp
+        # The per-chip MLP gate and up halves are zero-padded 1056 -> 1152 columns
+        # (and the down weight's K with zero rows), so the down matmul's K is 36
+        # tiles: 44 -> 31 us per layer with the default program config.
+        self.mlp_pad = -(-self.mlp_local // (4 * TILE)) * 4 * TILE
         self.expert_local = cfg.moe_intermediate_size // tp
         # Each per-chip gate and up half is zero-padded to a multiple of 4 tiles
         # (352 -> 384 columns), so the gate_up sparse matmul has 24 output tiles and
@@ -91,13 +95,17 @@ class FeedForward:
         def mlp_gate_up():
             g = ckpt.get(p + "mlp.gate_proj.weight").T  # [H, I]
             u = ckpt.get(p + "mlp.up_proj.weight").T
-            n = self.mlp_local
-            return torch.cat([torch.cat([g[:, c * n : (c + 1) * n], u[:, c * n : (c + 1) * n]], -1) for c in range(tp)], -1)[None, None]
+            n, zeros = self.mlp_local, g.new_zeros(H, self.mlp_pad - self.mlp_local)
+            parts = [torch.cat([g[:, c * n : (c + 1) * n], zeros, u[:, c * n : (c + 1) * n], zeros], -1) for c in range(tp)]
+            return torch.cat(parts, -1)[None, None]
 
-        self.mlp_gate_up = put(f"L{layer_idx}.mlp_gate_up", mlp_gate_up, mlp_dtype, shard_dim=-1)
-        self.mlp_down = put(
-            f"L{layer_idx}.mlp_down", lambda: ckpt.get(p + "mlp.down_proj.weight").T.contiguous()[None, None], mlp_dtype, shard_dim=-2
-        )
+        def mlp_down():
+            d = ckpt.get(p + "mlp.down_proj.weight").T  # [I, H]
+            n, zeros = self.mlp_local, d.new_zeros(self.mlp_pad - self.mlp_local, H)
+            return torch.cat([torch.cat([d[c * n : (c + 1) * n], zeros]) for c in range(tp)]).contiguous()[None, None]
+
+        self.mlp_gate_up = put(f"L{layer_idx}.mlp_gate_up_p{self.mlp_pad}", mlp_gate_up, mlp_dtype, shard_dim=-1)
+        self.mlp_down = put(f"L{layer_idx}.mlp_down_p{self.mlp_pad}", mlp_down, mlp_dtype, shard_dim=-2)
 
         def router():
             # HF: softmax((rmsnorm(x) * scale * H^-0.5) @ proj.T); fold scale and H^-0.5 into proj.
@@ -272,7 +280,7 @@ class FeedForward:
 
     def _mlp(self, x):
         gu = ttnn.linear(x, self.mlp_gate_up, compute_kernel_config=HIFI2, memory_config=DRAM)
-        n = self.mlp_local
+        n = self.mlp_pad  # padding columns are zero in gate and up, so h carries zeros there
         t = gu.shape[2]
         gate = ttnn.slice(gu, [0, 0, 0, 0], [1, 1, t, n])
         up = ttnn.slice(gu, [0, 0, 0, n], [1, 1, t, 2 * n])

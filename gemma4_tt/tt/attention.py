@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, norm_weight
+from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, dram_sharded, norm_weight, width_sharded_l1
 
 
 @dataclass(frozen=True)
@@ -116,6 +116,16 @@ class Attention:
 
         self.wqkv = loader.put(f"L{layer_idx}.wqkv", wqkv, dtype, shard_dim=-1)
         self.wo = loader.put(f"L{layer_idx}.wo", wo, dtype, shard_dim=-2)
+        # Decode reads wo DRAM-sharded, fed by the concat-heads output, which is
+        # already width-sharded one head per core: 47 -> 34 us (sliding), 86 -> 62 us
+        # (global) in scripts/bench_dram_sharded.py. Prefill keeps the interleaved copy.
+        k_local, hidden = s.n_q * s.head_dim, cfg.hidden_size
+        # A cached tensor keeps the memory layout it was saved with, so the copy has its own name.
+        self.wo_dram = loader.put(f"L{layer_idx}.wo_dram", wo, dtype, shard_dim=-2, memory_config=dram_sharded(loader.mesh, k_local, hidden))
+        self.wo_cfg = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
+            in0_block_w=k_local // TILE // s.n_q, per_core_M=1, per_core_N=hidden // TILE // s.n_q, fused_activation=None
+        )
+        self.wo_out = width_sharded_l1(hidden, s.n_q)
         rm = ttnn.ROW_MAJOR_LAYOUT
         self.q_norm = loader.put(f"L{layer_idx}.q_norm", lambda: norm_weight(ckpt.get(p + "q_norm.weight")), layout=rm)
         self.k_norm = loader.put(f"L{layer_idx}.k_norm", lambda: norm_weight(ckpt.get(p + "k_norm.weight")), layout=rm)
@@ -258,10 +268,14 @@ class Attention:
             **modulo,
         )
         q.deallocate(True)
-        out = self._concat_heads_decode(attn, batch)
-        out2 = ttnn.linear(out, self.wo, compute_kernel_config=HIFI2, memory_config=DRAM)
-        out.deallocate(True)
-        return all_reduce(out2)
+        heads = self._concat_heads_decode(attn, batch)  # [1, 1, 32, n_q * hd], one head per core
+        out_sh = ttnn.linear(heads, self.wo_dram, program_config=self.wo_cfg, compute_kernel_config=HIFI2, memory_config=self.wo_out)
+        heads.deallocate(True)
+        out = ttnn.sharded_to_interleaved(out_sh, DRAM)
+        out_sh.deallocate(True)
+        if out.shape[2] != batch:
+            out = ttnn.slice(out, [0, 0, 0, 0], [1, 1, batch, out.shape[3]])
+        return all_reduce(out)
 
     def _concat_heads_decode(self, attn, batch):
         s = self.shape
@@ -278,10 +292,6 @@ class Attention:
         )
         attn_sh = ttnn.to_memory_config(attn, shard)
         attn.deallocate(True)
-        out_sh = ttnn.experimental.nlp_concat_heads_decode(attn_sh, num_heads=s.n_q)
+        out = ttnn.experimental.nlp_concat_heads_decode(attn_sh, num_heads=s.n_q)
         attn_sh.deallocate(True)
-        out = ttnn.sharded_to_interleaved(out_sh, DRAM)
-        out_sh.deallocate(True)
-        if out.shape[2] != batch:
-            out = ttnn.slice(out, [0, 0, 0, 0], [1, 1, batch, out.shape[3]])
         return out
