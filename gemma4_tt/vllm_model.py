@@ -83,7 +83,7 @@ class Gemma4ForCausalLM:
     def decode_forward(self, tokens, start_pos, page_table, kv_cache, enable_trace=False, read_from_device=True, slot_remap=None, **_):
         if slot_remap is not None:
             self.model.remap_slots(slot_remap)
-        logits = self.model.decode(tokens[:, 0], start_pos, page_table)
+        logits = self.model.decode(tokens[:, 0], start_pos, page_table, trace=enable_trace)
         return logits[:, None, :]
 
     # -- lifecycle -------------------------------------------------------------
@@ -97,7 +97,7 @@ class Gemma4ForCausalLM:
         tokens = torch.zeros(max_batch_size, dtype=torch.long)
         positions = torch.full((max_batch_size,), -1, dtype=torch.long)
         positions[0] = 0
-        self.model.decode(tokens, positions, torch.zeros(max_batch_size, num_blocks, dtype=torch.int32))
+        self.model.decode(tokens, positions, torch.zeros(max_batch_size, num_blocks, dtype=torch.int32), trace=enable_trace)
 
     def release_request(self, slot):
         pass  # the slot's sliding ring is rewritten by the next prefill into it

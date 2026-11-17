@@ -91,9 +91,6 @@ class FeedForward:
             return (w * scale[None, :]).T.contiguous()[None, None]
 
         self.router = put(f"L{layer_idx}.router", router, ttnn.bfloat16)
-        self.per_expert_scale = put(
-            f"L{layer_idx}.per_expert_scale", lambda: ckpt.get(p + "router.per_expert_scale").float().reshape(1, 1, 1, E)
-        )
 
         def experts_gate_up():
             gu = ckpt.get(p + "experts.gate_up_proj")  # [E, 2I, H], gate rows first
@@ -106,28 +103,122 @@ class FeedForward:
             return ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous()[None]  # [1, E, I, H]
 
         self.exp_gate_up = put(f"L{layer_idx}.exp_gate_up", experts_gate_up, expert_dtype, shard_dim=-1)
+        # per_expert_scale is applied to the routing weights: folding it into the BFP4
+        # down weights changes their block rounding and measurably hurt accuracy.
         self.exp_down = put(f"L{layer_idx}.exp_down", experts_down, expert_dtype, shard_dim=-2)
+        self.per_expert_scale = put(
+            f"L{layer_idx}.per_expert_scale", lambda: ckpt.get(p + "router.per_expert_scale").float().reshape(1, 1, 1, E)
+        )
+        self.all_experts = ttnn.from_torch(
+            torch.ones(1, 1, 1, E),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            device=loader.mesh,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(loader.mesh),
+        )  # required operand in indexed mode, not read
+        self.mesh = loader.mesh
+        self._combine_masks = {}
         self.gate_up_cfg = _matmul_1d_config(1, 2 * self.expert_local, H)
         self.down_cfg = _matmul_1d_config(1, H, self.expert_local)
 
     def _rms(self, x, w):
         return ttnn.rms_norm(x, weight=w, epsilon=self.eps, memory_config=DRAM, compute_kernel_config=HIFI4)
 
-    def route(self, residual: ttnn.Tensor) -> ttnn.Tensor:
-        """Dense routing weights [1, 1, T, E]: top-k renormalized probabilities, zeros elsewhere."""
+    def topk_route(self, residual: ttnn.Tensor):
+        """Top-k routing: renormalized weights [1, 1, T, k] and expert ids [1, 1, T, k] (uint16)."""
         normed = ttnn.rms_norm(residual, epsilon=self.eps, memory_config=DRAM, compute_kernel_config=HIFI4)
         logits = ttnn.linear(normed, self.router, compute_kernel_config=HIFI4, memory_config=DRAM)
         normed.deallocate(True)
         probs = ttnn.softmax(logits, dim=-1, compute_kernel_config=HIFI4)
         logits.deallocate(True)
         top_v, top_i = ttnn.topk(probs, k=self.top_k, dim=-1)
+        scaled = ttnn.mul(probs, self.per_expert_scale)
+        probs.deallocate(True)
+        scaled_v = ttnn.gather(scaled, dim=-1, index=top_i)  # p[e] * per_expert_scale[e] for the chosen e
+        scaled.deallocate(True)
         top_sum = ttnn.sum(top_v, dim=-1, keepdim=True)
-        top_v2 = ttnn.div(top_v, top_sum)
-        dense = ttnn.scatter(ttnn.zeros_like(probs), dim=-1, index=top_i, src=top_v2)
-        for t in (probs, top_v, top_i, top_sum, top_v2):
+        weights = ttnn.div(scaled_v, top_sum)
+        for t in (top_v, scaled_v, top_sum):
             t.deallocate(True)
-        out = ttnn.mul(dense, self.per_expert_scale)
-        dense.deallocate(True)
+        return weights, top_i
+
+    def route(self, residual: ttnn.Tensor) -> ttnn.Tensor:
+        """Dense routing weights [1, 1, T, E]: top-k renormalized probabilities, zeros elsewhere."""
+        weights, top_i = self.topk_route(residual)
+        zeros = ttnn.zeros([1, 1, residual.shape[2], self.n_experts], dtype=weights.dtype, layout=ttnn.TILE_LAYOUT, device=self.mesh)
+        dense = ttnn.scatter(zeros, dim=-1, index=top_i, src=weights)
+        for t in (weights, top_i, zeros):
+            t.deallocate(True)
+        return dense
+
+    def _combine_mask(self, tokens: int) -> ttnn.Tensor:
+        """[1, S, T, 1] with 1 where slot s belongs to token s // k."""
+        if tokens not in self._combine_masks:
+            slots = tokens * self.top_k
+            mask = torch.zeros(1, slots, tokens, 1)
+            for slot in range(slots):
+                mask[0, slot, slot // self.top_k, 0] = 1.0
+            self._combine_masks[tokens] = ttnn.from_torch(
+                mask, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.mesh, mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh)
+            )
+        return self._combine_masks[tokens]
+
+    def _experts_decode(self, x: ttnn.Tensor, weights: ttnn.Tensor, ids: ttnn.Tensor) -> ttnn.Tensor:
+        """Decode experts for T <= 32 tokens with compact (indexed) sparse matmuls.
+
+        Slot s = 8 * token + j computes expert ids[token, j] for every token row;
+        the combine weights keep only the row of the slot's own token.
+        """
+        tokens = x.shape[2]
+        slots = tokens * self.top_k
+        n = self.expert_local
+        if tokens == 1:
+            idx = ttnn.reshape(ttnn.to_layout(ids, ttnn.ROW_MAJOR_LAYOUT), (1, slots))
+        else:  # reshape only moves uint16 as a view, so flatten in uint32
+            wide = ttnn.to_layout(ttnn.typecast(ids, ttnn.uint32), ttnn.ROW_MAJOR_LAYOUT)
+            idx = ttnn.typecast(ttnn.reshape(wide, (1, slots)), ttnn.uint16)
+            wide.deallocate(True)
+        gu = ttnn.sparse_matmul(
+            x,
+            self.exp_gate_up,
+            sparsity=self.all_experts,
+            indices=idx,
+            program_config=self.gate_up_cfg,
+            compute_kernel_config=self.expert_compute,
+            memory_config=DRAM,
+            dtype=ttnn.bfloat16,
+        )  # [1, 1, 1, S, T, 2n]
+        gu = ttnn.reshape(gu, (1, slots, tokens, 2 * n))
+        gate = ttnn.slice(gu, [0, 0, 0, 0], [1, slots, tokens, n])
+        up = ttnn.slice(gu, [0, 0, 0, n], [1, slots, tokens, 2 * n])
+        gu.deallocate(True)
+        act = ttnn.gelu(gate, fast_and_approximate_mode=True)
+        h = ttnn.mul(act, up)
+        for t in (gate, up, act):
+            t.deallocate(True)
+        down = ttnn.sparse_matmul(
+            h,
+            self.exp_down,
+            sparsity=self.all_experts,
+            indices=idx,
+            program_config=self.down_cfg,
+            compute_kernel_config=self.expert_compute,
+            memory_config=DRAM,
+            is_input_a_sparse=True,
+            is_input_b_sparse=True,
+            dtype=ttnn.bfloat16,
+        )  # [1, S, T, H]
+        h.deallocate(True)
+        w = ttnn.permute(ttnn.reshape(weights, (1, 1, 1, slots)), (0, 3, 1, 2))  # [1, S, 1, 1]
+        if tokens > 1:
+            w2 = ttnn.mul(w, self._combine_mask(tokens))  # [1, S, T, 1]
+            w.deallocate(True)
+            w = w2
+        weighted = ttnn.mul(down, w)
+        down.deallocate(True)
+        w.deallocate(True)
+        out = ttnn.sum(weighted, dim=1, keepdim=True)  # [1, 1, T, H]
+        weighted.deallocate(True)
         return out
 
     def _mlp(self, x):
@@ -214,11 +305,17 @@ class FeedForward:
         mlp = self._mlp(mlp_in)
         mlp_in.deallocate(True)
 
-        routing = self.route(residual)
         exp_in = self._rms(residual, self.pre_ff2)
-        experts = self._experts(exp_in, routing, chunk_tokens)
+        if t <= TILE:
+            weights, ids = self.topk_route(residual)
+            experts = self._experts_decode(exp_in, weights, ids)
+            weights.deallocate(True)
+            ids.deallocate(True)
+        else:
+            routing = self.route(residual)
+            experts = self._experts(exp_in, routing, chunk_tokens)
+            routing.deallocate(True)
         exp_in.deallocate(True)
-        routing.deallocate(True)
         if experts.shape[2] != t:
             experts = ttnn.slice(experts, [0, 0, 0, 0], [1, 1, t, self.hidden])
 

@@ -46,7 +46,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.10.23-hbd8a1cb_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2026e-h5d301ff_0.conda
-      - pypi: direct+https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.5/ttnn-0.81.1%2Bconda.5-cp312-cp312-linux_x86_64.whl
+      - pypi: direct+https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.8/ttnn-0.81.1%2Bconda.8-cp312-cp312-linux_x86_64.whl
+      - pypi: git+https://github.com/Stanley5249/tt-scope.git?tag=v0.4.0#e9f5941038b81d7feea387d771ce193b44861b82
       - pypi: git+https://github.com/tenstorrent/vllm-tt-plugin.git?branch=main#042a94863ad27d88207bcf71abdf67122c6f4c27
       - pypi: git+https://github.com/vllm-project/vllm.git?tag=v0.31.0#db9527a46873454610df6dbedf79a36d6bf1a7f6
       - pypi: https://download-r2.pytorch.org/whl/cpu/torch-2.11.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
@@ -675,9 +676,9 @@ packages:
   run_exports: {}
   size: 119208
   timestamp: 1792758382821
-- pypi: direct+https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.5/ttnn-0.81.1%2Bconda.5-cp312-cp312-linux_x86_64.whl
+- pypi: direct+https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.8/ttnn-0.81.1%2Bconda.8-cp312-cp312-linux_x86_64.whl
   name: ttnn
-  version: 0.81.1+conda.5
+  version: 0.81.1+conda.8
   requires_dist:
   - numpy>=1.24.4,<2
   - loguru>=0.6.0
@@ -689,6 +690,14 @@ packages:
   - seaborn>=0.13.2
   - ml-dtypes
   requires_python: '>=3.10'
+- pypi: git+https://github.com/Stanley5249/tt-scope.git?tag=v0.4.0#e9f5941038b81d7feea387d771ce193b44861b82
+  name: tt-scope
+  version: 0.4.0
+  requires_dist:
+  - pydantic>=2,<3
+  - ttnn
+  - vllm-tt-plugin ; extra == 'vllm'
+  requires_python: '>=3.12,<3.13'
 - pypi: git+https://github.com/tenstorrent/vllm-tt-plugin.git?branch=main#042a94863ad27d88207bcf71abdf67122c6f4c27
   name: vllm-tt-plugin
   version: 0.1.0

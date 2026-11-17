@@ -73,6 +73,7 @@ def main():
     ap.add_argument("--prompt-len", type=int, default=128)
     ap.add_argument("--decode-steps", type=int, default=8)
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--trace", action="store_true")
     args = ap.parse_args()
 
     ckpt = Checkpoint()
@@ -86,7 +87,7 @@ def main():
     from gemma4_tt.tt.model import Gemma4TT
 
     rows = []
-    with open_n300() as mesh:
+    with open_n300(trace_region_size=200_000_000 if args.trace else 0) as mesh:
         t0 = time.time()
         model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, num_layers=args.layers)
         print(f"model loaded in {time.time() - t0:.0f}s", flush=True)
@@ -100,7 +101,7 @@ def main():
         for step in range(args.decode_steps):
             pos = args.prompt_len + step
             t0 = time.time()
-            logits = model.decode(ids[pos : pos + 1], torch.tensor([pos]), pt[None])
+            logits = model.decode(ids[pos : pos + 1], torch.tensor([pos]), pt[None], trace=args.trace)
             dt = time.time() - t0
             rows.append({"pos": pos, "sec": round(dt, 3), **metrics(logits[0], ref[step + 1])})
         ttnn.synchronize_device(mesh)

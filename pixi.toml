@@ -23,12 +23,16 @@ LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
 TT_METAL_LOGS_PATH = "$PIXI_PROJECT_ROOT/logs/tt-metal"
 # Selects the build target vLLM's setup.py declares requirements for.
 VLLM_TARGET_DEVICE = "empty"
+# The wheel's kernels, firmware, and Tracy tools; tt-scope reads these.
+TT_METAL_RUNTIME_ROOT = "$CONDA_PREFIX/lib/python3.12/site-packages/ttnn/"
+TT_METAL_HOME = "$CONDA_PREFIX/lib/python3.12/site-packages/ttnn"
+TT_METAL_PROFILER_DIR = "$PIXI_PROJECT_ROOT/artifacts/profiler"
 # Makes the gemma4_tt package importable from scripts and vLLM workers.
 PYTHONPATH = "$PIXI_PROJECT_ROOT"
 
 [pypi-dependencies]
-# Stanley5249/tt-metal release: ttnn with SFPI and tt_transformers' models/.
-ttnn = { url = "https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.5/ttnn-0.81.1%2Bconda.5-cp312-cp312-linux_x86_64.whl" }
+# Stanley5249/tt-metal release: Tracy-enabled ttnn with SFPI and tt_transformers' models/.
+ttnn = { url = "https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.8/ttnn-0.81.1%2Bconda.8-cp312-cp312-linux_x86_64.whl" }
 # The torch pair tt-metal 0.81 is tested with, as CPU builds: PyPI's Linux
 # torch is the CUDA build.
 torch = { version = "==2.11.*", index = "https://download.pytorch.org/whl/cpu" }
@@ -37,6 +41,8 @@ torchvision = { version = "==0.26.*", index = "https://download.pytorch.org/whl/
 # and its sdist states the CUDA requirements statically. A git checkout makes
 # the resolver build the metadata, which lists requirements/common.txt.
 vllm = { git = "https://github.com/vllm-project/vllm.git", tag = "v0.31.0" }
+# Profiling front end (tracy, memory, noc, serve captures); same fork ttnn as above.
+tt-scope = { git = "https://github.com/Stanley5249/tt-scope.git", tag = "v0.4.0" }
 # Follows plugin main; pixi.lock holds the commit until `pixi update vllm-tt-plugin`.
 vllm-tt-plugin = { git = "https://github.com/tenstorrent/vllm-tt-plugin.git", branch = "main" }
 
@@ -56,3 +62,9 @@ cmd = """vllm serve Qwen/Qwen3-8B --host 127.0.0.1 --port 8000 \
   --reasoning-parser qwen3"""
 # tt_transformers reads HF_MODEL, not vLLM's --model.
 env = { MESH_DEVICE = "N300", HF_MODEL = "Qwen/Qwen3-8B", TT_CACHE_PATH = "$PIXI_PROJECT_ROOT/cache/Qwen3-8B" }
+
+[tasks.serve-gemma4]
+cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized --host 127.0.0.1 --port 8000 \
+  --served-model-name gemma4 --block-size 64 --max-num-seqs 4 --max-model-len 32768 \
+  --limit-mm-per-prompt '{"image": 0, "audio": 0, "video": 0}'"""
+env = { MESH_DEVICE = "N300", TT_MODEL_CLASS_OVERRIDES = "TTGemma4ForConditionalGeneration=gemma4_tt.vllm_model:Gemma4ForCausalLM" }

@@ -125,7 +125,7 @@ class Gemma4TT:
         self.embed_scale = torch.tensor(embed_scale(self.hidden), dtype=torch.bfloat16)
         self.rope = self._rope_tables(max_seq_len)
         self.kv_caches = None
-        self.sliding_pt = None
+        self.traces = {}
 
     # -- host-side tables ----------------------------------------------------
 
@@ -151,6 +151,7 @@ class Gemma4TT:
     def allocate_kv_cache(self, num_blocks: int):
         """Global layers: [num_blocks, kv/chip, block, 512]. Sliding layers: one ring of `window` per slot."""
         bs = self.block_size
+        self.num_blocks = num_blocks
         ring_blocks = self.window // bs
         caches = []
         for layer in self.layers:
@@ -164,16 +165,11 @@ class Gemma4TT:
             caches.append(pair)
         self.kv_caches = caches
         self.slot_blocks = torch.arange(self.max_batch * ring_blocks, dtype=torch.int32).reshape(self.max_batch, ring_blocks)
-        self._upload_sliding_pt()
         return caches
-
-    def _upload_sliding_pt(self):
-        self.sliding_pt = self._to_device(self.slot_blocks, ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
 
     def remap_slots(self, slot_remap):
         """Destination slot i takes the sliding ring of old slot slot_remap[i] (host-side only)."""
         self.slot_blocks = self.slot_blocks[torch.as_tensor(slot_remap, dtype=torch.long)]
-        self._upload_sliding_pt()
 
     # -- prefill -------------------------------------------------------------
 
@@ -246,45 +242,73 @@ class Gemma4TT:
 
     # -- decode --------------------------------------------------------------
 
-    def decode(self, tokens: torch.Tensor, positions: torch.Tensor, page_table: torch.Tensor) -> torch.Tensor:
+    def decode(self, tokens: torch.Tensor, positions: torch.Tensor, page_table: torch.Tensor, trace: bool = False) -> torch.Tensor:
         """One decode step for B rows (row i is slot i). positions -1 marks inactive rows.
 
-        Returns float logits [B, V].
+        With `trace`, the first call per batch size captures a metal trace and
+        later calls only copy the inputs and replay it. Returns float logits [B, V].
         """
-        batch = tokens.shape[0]
-        x = self._to_device(self.embed(tokens.long()).reshape(1, 1, batch, self.hidden))
-        cur_pos = self._to_device(positions.to(torch.int32), ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
-        global_pt = self._to_device(page_table.to(torch.int32), ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
-        ring_pt = self.sliding_pt
-        if batch != self.max_batch:
-            ring_pt = self._to_device(self.slot_blocks[:batch], ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
-        pos = positions.clamp(min=0).long()
-        ropes = {}
-        for kind, (cos, sin) in self.rope.items():
-            ropes[kind] = self._decode_rope(cos[pos], sin[pos], kind)
+        host = self._decode_inputs(tokens, positions, page_table)
+        if not trace:
+            dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
+            out = self._decode_device(dev)
+            logits = self._read_logits(out)
+            out.deallocate(True)
+            for t in dev.values():
+                t.deallocate(True)
+            return logits
+        key = tokens.shape[0]
+        if key not in self.traces:
+            dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
+            self._decode_device(dev).deallocate(True)  # compile outside the capture
+            tid = ttnn.begin_trace_capture(self.mesh, cq_id=0)
+            out = self._decode_device(dev)
+            ttnn.end_trace_capture(self.mesh, tid, cq_id=0)
+            self.traces[key] = (tid, dev, out)
+        tid, dev, out = self.traces[key]
+        for k, v in host.items():
+            ttnn.copy_host_to_device_tensor(v, dev[k])
+        ttnn.execute_trace(self.mesh, tid, cq_id=0, blocking=False)
+        return self._read_logits(out)
 
+    def _host(self, t: torch.Tensor, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT) -> ttnn.Tensor:
+        return ttnn.from_torch(t, dtype=dtype, layout=layout, mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
+
+    def _decode_inputs(self, tokens, positions, page_table) -> dict[str, ttnn.Tensor]:
+        """Host tensors for one decode step; shapes depend only on the batch size."""
+        batch = tokens.shape[0]
+        # paged ops need fewer blocks per sequence than blocks in the pool
+        width = min(self.max_seq_len // self.block_size, self.num_blocks - 1)
+        pt = torch.zeros(batch, width, dtype=torch.int32)
+        n = min(width, page_table.shape[1])
+        pt[:, :n] = page_table[:, :n].to(torch.int32)
+        rm = ttnn.ROW_MAJOR_LAYOUT
+        inputs = {
+            "x": self._host(self.embed(tokens.long()).reshape(1, 1, batch, self.hidden)),
+            "cur_pos": self._host(positions.to(torch.int32), ttnn.int32, rm),
+            "global_pt": self._host(pt, ttnn.int32, rm),
+            "ring_pt": self._host(self.slot_blocks[:batch].contiguous(), ttnn.int32, rm),
+        }
+        pos = positions.clamp(min=0).long()
+        for kind, (cos, sin) in self.rope.items():
+            attn = next(layer.attn.shape for layer in self.layers if layer.sliding == (kind == "sliding_attention"))
+            for role, heads in (("q", attn.n_q), ("k", attn.n_kv)):
+                for name, table in (("cos", cos), ("sin", sin)):
+                    rows = table[pos][None, :, None, :].expand(1, -1, heads, -1).contiguous()
+                    inputs[f"{kind}.{role}.{name}"] = self._host(rows)
+        return inputs
+
+    def _decode_device(self, dev: dict[str, ttnn.Tensor]) -> ttnn.Tensor:
+        """Device decode graph. Never frees its inputs, so it can be traced."""
+        x = ttnn.clone(dev["x"])
         for layer, cache in zip(self.layers, self.kv_caches):
             kind = "sliding_attention" if layer.sliding else "full_attention"
-            rq, rk = ropes[kind]
-            pt = ring_pt if layer.sliding else global_pt
-            x = layer.decode(x, rq, rk, cache, pt, cur_pos)
-
-        logits = self._logits(x)
+            rq = (dev[f"{kind}.q.cos"], dev[f"{kind}.q.sin"])
+            rk = (dev[f"{kind}.k.cos"], dev[f"{kind}.k.sin"])
+            pt = dev["ring_pt"] if layer.sliding else dev["global_pt"]
+            x = layer.decode(x, rq, rk, cache, pt, dev["cur_pos"])
+        out = self._logits_device(x)
         x.deallocate(True)
-        for t in (cur_pos, global_pt, *[r for pair in ropes.values() for half in pair for r in half]):
-            t.deallocate(True)
-        if ring_pt is not self.sliding_pt:
-            ring_pt.deallocate(True)
-        return logits
-
-    def _decode_rope(self, cos, sin, kind):
-        """Per-user (cos, sin) for Q and K heads as [1, B, heads, hd]."""
-        attn = next(layer.attn.shape for layer in self.layers if (layer.sliding == (kind == "sliding_attention")))
-        out = []
-        for heads in (attn.n_q, attn.n_kv):
-            c = cos[None, :, None, :].expand(1, -1, heads, -1).contiguous()
-            s = sin[None, :, None, :].expand(1, -1, heads, -1).contiguous()
-            out.append((self._to_device(c), self._to_device(s)))
         return out
 
     # -- head ----------------------------------------------------------------
@@ -299,6 +323,12 @@ class Gemma4TT:
                 part = ttnn.slice(x, [0, 0, start, 0], [1, 1, min(start + TILE, rows), self.hidden])
                 parts.append(self._logits(part))  # row slices are views of x; do not free them
             return torch.cat(parts)
+        out = self._logits_device(x)
+        logits = self._read_logits(out)
+        out.deallocate(True)
+        return logits
+
+    def _logits_device(self, x: ttnn.Tensor) -> ttnn.Tensor:
         h = ttnn.rms_norm(x, weight=self.final_norm, epsilon=self.cfg.rms_norm_eps, memory_config=DRAM, compute_kernel_config=HIFI4)
         logits = ttnn.linear(h, self.lm_head, compute_kernel_config=HIFI2, memory_config=DRAM, dtype=ttnn.float32)
         h.deallocate(True)
@@ -309,9 +339,13 @@ class Gemma4TT:
         scaled.deallocate(True)
         capped = ttnn.mul(t, cap)
         t.deallocate(True)
-        out = ttnn.to_torch(capped, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float()
-        capped.deallocate(True)
-        return out.reshape(-1, self.vocab)
+        return capped
+
+    def _read_logits(self, out: ttnn.Tensor) -> torch.Tensor:
+        logits = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float()
+        return logits.reshape(-1, self.vocab)
 
     def release_traces(self):
-        """Release captured traces (none yet in the eager path)."""
+        for tid, dev, out in self.traces.values():
+            ttnn.release_trace(self.mesh, tid)
+        self.traces = {}

@@ -1,0 +1,146 @@
+{
+ "args": {
+  "layers": 30,
+  "prompt_len": 128,
+  "decode_steps": 16,
+  "out": "results/accuracy/compare-L30-p128-d16-trace.json",
+  "trace": true
+ },
+ "rows": [
+  {
+   "pos": 127,
+   "pcc": 0.9041,
+   "top1": true,
+   "top5_overlap": 4,
+   "kl": 0.00041
+  },
+  {
+   "pos": 128,
+   "sec": 2.026,
+   "pcc": 0.8619,
+   "top1": false,
+   "top5_overlap": 1,
+   "kl": 1.53534
+  },
+  {
+   "pos": 129,
+   "sec": 0.1,
+   "pcc": 0.85536,
+   "top1": true,
+   "top5_overlap": 3,
+   "kl": 0.5971
+  },
+  {
+   "pos": 130,
+   "sec": 0.098,
+   "pcc": 0.86558,
+   "top1": true,
+   "top5_overlap": 4,
+   "kl": 0.23335
+  },
+  {
+   "pos": 131,
+   "sec": 0.093,
+   "pcc": 0.89725,
+   "top1": true,
+   "top5_overlap": 4,
+   "kl": 0.00054
+  },
+  {
+   "pos": 132,
+   "sec": 0.093,
+   "pcc": 0.88594,
+   "top1": true,
+   "top5_overlap": 3,
+   "kl": 0.01874
+  },
+  {
+   "pos": 133,
+   "sec": 0.093,
+   "pcc": 0.83642,
+   "top1": true,
+   "top5_overlap": 2,
+   "kl": 0.00082
+  },
+  {
+   "pos": 134,
+   "sec": 0.093,
+   "pcc": 0.86766,
+   "top1": true,
+   "top5_overlap": 3,
+   "kl": 0.44953
+  },
+  {
+   "pos": 135,
+   "sec": 0.093,
+   "pcc": 0.84214,
+   "top1": true,
+   "top5_overlap": 5,
+   "kl": 0.00067
+  },
+  {
+   "pos": 136,
+   "sec": 0.093,
+   "pcc": 0.90426,
+   "top1": true,
+   "top5_overlap": 2,
+   "kl": 0.15427
+  },
+  {
+   "pos": 137,
+   "sec": 0.093,
+   "pcc": 0.9025,
+   "top1": true,
+   "top5_overlap": 4,
+   "kl": 0.33694
+  },
+  {
+   "pos": 138,
+   "sec": 0.093,
+   "pcc": 0.87951,
+   "top1": true,
+   "top5_overlap": 1,
+   "kl": 0.20527
+  },
+  {
+   "pos": 139,
+   "sec": 0.093,
+   "pcc": 0.926,
+   "top1": true,
+   "top5_overlap": 4,
+   "kl": 0.0023
+  },
+  {
+   "pos": 140,
+   "sec": 0.094,
+   "pcc": 0.84049,
+   "top1": false,
+   "top5_overlap": 5,
+   "kl": 0.97057
+  },
+  {
+   "pos": 141,
+   "sec": 0.093,
+   "pcc": 0.88455,
+   "top1": true,
+   "top5_overlap": 4,
+   "kl": 0.4934
+  },
+  {
+   "pos": 142,
+   "sec": 0.093,
+   "pcc": 0.91365,
+   "top1": true,
+   "top5_overlap": 5,
+   "kl": 0.09804
+  },
+  {
+   "pos": 143,
+   "sec": 0.093,
+   "pcc": 0.90845,
+   "top1": true,
+   "top5_overlap": 3,
+   "kl": 0.25358
+  }
+ ]
+}
