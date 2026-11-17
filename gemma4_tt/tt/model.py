@@ -339,7 +339,11 @@ class Gemma4TT:
         scaled.deallocate(True)
         capped = ttnn.mul(t, cap)
         t.deallocate(True)
-        return capped
+        # Row-major drops the tile padding, so the host reads B rows instead of
+        # 32 (9 ms -> under 1 ms for one user's 131072 fp32 logits).
+        out = ttnn.to_layout(capped, ttnn.ROW_MAJOR_LAYOUT, memory_config=DRAM)
+        capped.deallocate(True)
+        return out
 
     def _read_logits(self, out: ttnn.Tensor) -> torch.Tensor:
         logits = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float()
