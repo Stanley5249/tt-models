@@ -82,9 +82,9 @@ class DecoderLayer:
         h.deallocate(True)
         return self._finish(x, a)
 
-    def decode(self, x, rope_q, rope_k, kv_cache, page_table, cur_pos):
+    def decode(self, x, rope, kv_cache, page_table, cur_pos):
         h = self._rms(x, self.input_ln)
-        a = self.attn.decode(h, rope_q, rope_k, kv_cache, page_table, cur_pos)
+        a = self.attn.decode(h, rope, kv_cache, page_table, cur_pos)
         h.deallocate(True)
         return self._finish(x, a)
 
@@ -291,11 +291,12 @@ class Gemma4TT:
         }
         pos = positions.clamp(min=0).long()
         for kind, (cos, sin) in self.rope.items():
-            attn = next(layer.attn.shape for layer in self.layers if layer.sliding == (kind == "sliding_attention"))
-            for role, heads in (("q", attn.n_q), ("k", attn.n_kv)):
-                for name, table in (("cos", cos), ("sin", sin)):
-                    rows = table[pos][None, :, None, :].expand(1, -1, heads, -1).contiguous()
-                    inputs[f"{kind}.{role}.{name}"] = self._host(rows)
+            attn = next(layer.attn for layer in self.layers if layer.sliding == (kind == "sliding_attention"))
+            roped = attn.shape.n_q + attn.shape.n_kv  # Q and K rows; V rows keep cos 1, sin 0
+            for name, table, fill in (("cos", cos, 1.0), ("sin", sin, 0.0)):
+                rows = torch.full((batch, attn.heads, attn.shape.head_dim), fill, dtype=table.dtype)
+                rows[:, :roped] = table[pos][:, None, :]
+                inputs[f"{kind}.{name}"] = self._host(rows.reshape(1, 1, batch * attn.heads, -1))
         return inputs
 
     def _decode_device(self, dev: dict[str, ttnn.Tensor]) -> ttnn.Tensor:
@@ -303,10 +304,9 @@ class Gemma4TT:
         x = ttnn.clone(dev["x"])
         for layer, cache in zip(self.layers, self.kv_caches):
             kind = "sliding_attention" if layer.sliding else "full_attention"
-            rq = (dev[f"{kind}.q.cos"], dev[f"{kind}.q.sin"])
-            rk = (dev[f"{kind}.k.cos"], dev[f"{kind}.k.sin"])
+            rope = (dev[f"{kind}.cos"], dev[f"{kind}.sin"])
             pt = dev["ring_pt"] if layer.sliding else dev["global_pt"]
-            x = layer.decode(x, rq, rk, cache, pt, dev["cur_pos"])
+            x = layer.decode(x, rope, cache, pt, dev["cur_pos"])
         out = self._logits_device(x)
         x.deallocate(True)
         return out

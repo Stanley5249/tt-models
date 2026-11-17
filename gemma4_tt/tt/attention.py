@@ -59,7 +59,7 @@ def ring_selection(seq_len: int, padded_len: int, window: int) -> tuple[int, tor
 _ROTATE = {}
 
 
-def rotate_half(x: ttnn.Tensor) -> ttnn.Tensor:
+def rotate_half(x: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:
     """cat(-x2, x1) as one matmul with a constant +-1 matrix (exact in BF16 with fp32 accumulation)."""
     hd = x.shape[-1]
     key = (hd, id(x.device()))
@@ -72,17 +72,15 @@ def rotate_half(x: ttnn.Tensor) -> ttnn.Tensor:
         _ROTATE[key] = ttnn.from_torch(
             r[None, None], dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)
         )
-    return ttnn.matmul(x, _ROTATE[key], compute_kernel_config=HIFI4, memory_config=DRAM)
+    return ttnn.matmul(x, _ROTATE[key], compute_kernel_config=HIFI4, memory_config=memory_config)
 
 
-def apply_rope(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor) -> ttnn.Tensor:
-    rot = rotate_half(x)
-    a = ttnn.mul(x, cos)
-    b = ttnn.mul(rot, sin)
+def apply_rope(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:
+    rot = rotate_half(x, memory_config)
+    a = ttnn.mul(x, cos, memory_config=memory_config)
+    out = ttnn.addcmul(a, rot, sin, memory_config=memory_config)  # x * cos + rot * sin
     rot.deallocate(True)
-    out = ttnn.add(a, b)
     a.deallocate(True)
-    b.deallocate(True)
     return out
 
 
@@ -118,6 +116,12 @@ class Attention:
         rm = ttnn.ROW_MAJOR_LAYOUT
         self.q_norm = loader.put(f"L{layer_idx}.q_norm", lambda: norm_weight(ckpt.get(p + "q_norm.weight")), layout=rm)
         self.k_norm = loader.put(f"L{layer_idx}.k_norm", lambda: norm_weight(ckpt.get(p + "k_norm.weight")), layout=rm)
+        # Decode normalizes all heads of the fused QKV row at once, so the head
+        # weights become one [B * heads, hd] multiplier: q_norm rows, k_norm rows,
+        # and ones for V (weightless norm). Built per batch size on first use.
+        self._head_w = (ckpt.get(p + "q_norm.weight").float(), ckpt.get(p + "k_norm.weight").float())
+        self._head_w_dev = {}
+        self.mesh = loader.mesh
 
     # -- prefill -----------------------------------------------------------
 
@@ -179,38 +183,57 @@ class Attention:
 
     # -- decode ------------------------------------------------------------
 
-    def decode(self, x: ttnn.Tensor, rope_q, rope_k, kv_cache, page_table, cur_pos) -> ttnn.Tensor:
+    @property
+    def heads(self) -> int:
+        """Heads per chip in the fused QKV row: Q, then K, then V."""
+        return self.shape.n_q + 2 * self.shape.n_kv
+
+    def head_weights(self, batch: int) -> ttnn.Tensor:
+        if batch not in self._head_w_dev:
+            q, k = self._head_w
+            s = self.shape
+            per_user = torch.cat([q.expand(s.n_q, -1), k.expand(s.n_kv, -1), torch.ones(s.n_kv, s.head_dim)])
+            self._head_w_dev[batch] = ttnn.from_torch(
+                per_user.repeat(batch, 1)[None, None],
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.mesh,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh),
+                memory_config=DRAM,
+            )
+        return self._head_w_dev[batch]
+
+    def decode(self, x: ttnn.Tensor, rope, kv_cache, page_table, cur_pos) -> ttnn.Tensor:
         """x [1, 1, B, H] replicated. Returns all-reduced attention output [1, 1, B, H].
 
-        rope_q / rope_k: (cos, sin) [1, B, n_heads, hd] per-user tables.
+        rope: (cos, sin) [1, 1, B * heads, hd] in fused QKV row order, cos 1 and
+        sin 0 on the V rows, so one rotation covers Q and K and leaves V alone.
         page_table: global layers get the vLLM table, sliding layers the ring table.
         cur_pos: int32 [B] absolute positions, -1 for inactive rows.
         """
         s = self.shape
         batch = x.shape[2]
+        width = self.heads * s.head_dim
         xqkv = ttnn.linear(x, self.wqkv, compute_kernel_config=HIFI2, memory_config=ttnn.L1_MEMORY_CONFIG)
-        q, k, v = ttnn.experimental.nlp_create_qkv_heads_decode(
-            xqkv, num_heads=s.n_q, num_kv_heads=s.n_kv, memory_config=ttnn.L1_HEIGHT_SHARDED_MEMORY_CONFIG
-        )
+        rows = ttnn.reshape(xqkv, (1, 1, batch * self.heads, s.head_dim))
+        normed = ttnn.rms_norm(rows, epsilon=self.eps, memory_config=ttnn.L1_MEMORY_CONFIG, compute_kernel_config=HIFI4)
         xqkv.deallocate(True)
-        sharded = k.memory_config()
-        q = self._decode_norm_rope(q, self.q_norm, rope_q)
-        k = self._decode_norm_rope(k, self.k_norm, rope_k)
-        v_dram = ttnn.to_memory_config(v, DRAM)
-        v.deallocate(True)
-        v = head_norm(v_dram, None, self.eps)
-        v_dram.deallocate(True)
+        weighted = ttnn.mul(normed, self.head_weights(batch), memory_config=ttnn.L1_MEMORY_CONFIG)
+        normed.deallocate(True)
+        roped = apply_rope(weighted, *rope, memory_config=ttnn.L1_MEMORY_CONFIG)
+        weighted.deallocate(True)
+        fused = ttnn.reshape(roped, (1, 1, batch, width))
+        q, k, v = ttnn.experimental.nlp_create_qkv_heads_decode(
+            fused, num_heads=s.n_q, num_kv_heads=s.n_kv, memory_config=ttnn.L1_HEIGHT_SHARDED_MEMORY_CONFIG
+        )
+        roped.deallocate(True)
 
         k_cache, v_cache = kv_cache
         modulo = {"cache_position_modulo": s.window} if s.sliding else {}
-        k_sh = ttnn.to_memory_config(k, sharded)
-        v_sh = ttnn.to_memory_config(v, sharded)
+        ttnn.experimental.paged_update_cache(k_cache, k, update_idxs_tensor=cur_pos, page_table=page_table, **modulo)
+        ttnn.experimental.paged_update_cache(v_cache, v, update_idxs_tensor=cur_pos, page_table=page_table, **modulo)
         k.deallocate(True)
         v.deallocate(True)
-        ttnn.experimental.paged_update_cache(k_cache, k_sh, update_idxs_tensor=cur_pos, page_table=page_table, **modulo)
-        ttnn.experimental.paged_update_cache(v_cache, v_sh, update_idxs_tensor=cur_pos, page_table=page_table, **modulo)
-        k_sh.deallocate(True)
-        v_sh.deallocate(True)
 
         grid = (8, 4) if s.head_dim >= 512 and batch == 1 else (8, 8)
         attn = ttnn.transformer.paged_scaled_dot_product_attention_decode(
@@ -233,11 +256,6 @@ class Attention:
         out2 = ttnn.linear(out, self.wo, compute_kernel_config=HIFI2, memory_config=DRAM)
         out.deallocate(True)
         return all_reduce(out2)
-
-    def _decode_norm_rope(self, x, weight, rope):
-        dram = ttnn.to_memory_config(x, DRAM)
-        x.deallocate(True)
-        return self._norm_rope(dram, weight, rope)
 
     def _concat_heads_decode(self, attn, batch):
         s = self.shape
