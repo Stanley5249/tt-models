@@ -6,9 +6,9 @@ every selected expert and the load is always balanced. The two partial sums
 are reduced with one all-reduce on a [.., 2*H] concatenation, because each
 branch has its own post-norm that needs the full sum.
 
-Experts use `sparse_matmul`. Tokens are packed in groups of 32 rows; a group
-computes the union of the experts its tokens selected, and routing weights of
-zero cancel the unselected (token, expert) pairs, so the result is exact.
+Experts use indexed `sparse_matmul`. Decode (T <= 16) gives each (token,
+slot) pair its own matmul slot. Prefill is expert-major: the host groups every
+expert's tokens into chunks, so each chunk reads one expert's weights once.
 """
 
 import torch
@@ -148,6 +148,7 @@ class FeedForward:
         )
         self._zero_bias = {}
         self._combine_masks = {}
+        self._chunk_cfgs = {}
         self.gate_up_cfg = _matmul_1d_config(1, 2 * self.expert_pad, H, in0_block_w=44)
         self.down_cfg = _matmul_1d_config(1, H, self.expert_local)
 
@@ -172,15 +173,6 @@ class FeedForward:
         for t in (top_v, scaled_v, top_sum):
             t.deallocate(True)
         return weights, top_i
-
-    def route(self, normed: ttnn.Tensor) -> ttnn.Tensor:
-        """Dense routing weights [1, 1, T, E]: top-k renormalized probabilities, zeros elsewhere."""
-        weights, top_i = self.topk_route(normed)
-        zeros = ttnn.zeros([1, 1, normed.shape[2], self.n_experts], dtype=weights.dtype, layout=ttnn.TILE_LAYOUT, device=self.mesh)
-        dense = ttnn.scatter(zeros, dim=-1, index=top_i, src=weights)
-        for t in (weights, top_i, zeros):
-            t.deallocate(True)
-        return dense
 
     def _combine_mask(self, tokens: int) -> ttnn.Tensor:
         """[1, S, T, 1] with 1 where slot s belongs to token s // k."""
@@ -286,69 +278,166 @@ class FeedForward:
         h.deallocate(True)
         return out
 
-    def _experts_group(self, x, routing, groups):
-        """x [1, G, M, H], routing [1, G, M, E] with M <= 32. Returns partial expert output [G, 1, M, H]."""
-        E, n = self.n_experts, self.expert_local
-        m = x.shape[2]
-        hit = ttnn.sum(routing, dim=2, keepdim=True)  # [1, G, 1, E], > 0 where any token uses the expert
-        hit = ttnn.gtz(hit)
-        sparsity = ttnn.to_layout(hit, ttnn.ROW_MAJOR_LAYOUT)
-        hit.deallocate(True)
-        gu = ttnn.sparse_matmul(
-            x,
-            self.exp_gate_up,
-            sparsity=sparsity,
-            program_config=self.gate_up_cfg,
-            compute_kernel_config=self.expert_compute,
-            memory_config=DRAM,
-            dtype=ttnn.bfloat16,
-        )  # [1, G, 1, E, M, 2n]
-        p = self.expert_pad
-        gu = ttnn.reshape(gu, (groups, E, m, 2 * p))
-        gate = ttnn.slice(gu, [0, 0, 0, 0], [groups, E, m, n])
-        up = ttnn.slice(gu, [0, 0, 0, p], [groups, E, m, p + n])
-        gu.deallocate(True)
-        h = ttnn.mul(gate, up, input_tensor_a_activations=[GELU_TANH])
-        gate.deallocate(True)
-        up.deallocate(True)
-        sparsity2 = ttnn.reshape(sparsity, (1, 1, groups, E))
-        down = ttnn.sparse_matmul(
-            h,
-            self.exp_down,
-            sparsity=sparsity2,
-            program_config=self.down_cfg,
-            compute_kernel_config=self.expert_compute,
-            memory_config=DRAM,
-            is_input_a_sparse=True,
-            is_input_b_sparse=False,
-            dtype=ttnn.bfloat16,
-        )  # [G, E, M, H]
-        h.deallocate(True)
-        sparsity.deallocate(True)
-        w = ttnn.permute(routing, (1, 3, 2, 0))  # [G, E, M, 1]
-        weighted = ttnn.mul(down, w)
+    def _chunk_config(self, rows: int):
+        """Sparse matmul configs for prefill chunks of `rows` token rows."""
+        if rows not in self._chunk_cfgs:
+            m = rows // TILE
+            # Few K blocks: with packer L1 accumulation every block boundary rounds the
+            # partial sum to the BF16 output (in0_block_w=8 raised prefill KL 0.32 -> 0.36).
+            self._chunk_cfgs[rows] = (
+                _matmul_1d_config(m, 2 * self.expert_pad, self.hidden, in0_block_w=44 if m <= 2 else 22),
+                _matmul_1d_config(m, self.hidden, self.expert_local),
+            )
+        return self._chunk_cfgs[rows]
+
+    def _plan_chunks(self, ids: torch.Tensor, weights: torch.Tensor, rows: int):
+        """Host layout of expert-major prefill for top-k ids/weights [T, k].
+
+        Each expert's (token, slot) pairs fill chunks of `rows` rows; padding rows
+        gather token T (a zero row) and get weight 0. Returns the gather index into
+        the token rows [C * rows], the row weights [C * rows], the expert of every
+        chunk [C], and for each (slot j, token t) in slot-major order the row that
+        holds its result [k * T].
+        """
+        tokens, k = ids.shape
+        flat = ids.flatten()
+        order = torch.argsort(flat, stable=True)
+        counts = torch.bincount(flat, minlength=self.n_experts)
+        chunks = (counts + rows - 1) // rows
+        chunk_expert = torch.repeat_interleave(torch.arange(self.n_experts), chunks)
+        # first row of each expert's region, then the row of every sorted pair
+        region = torch.cumsum(chunks * rows, 0) - chunks * rows
+        sorted_e = flat[order]
+        rank = torch.arange(flat.numel()) - (torch.cumsum(counts, 0) - counts)[sorted_e]
+        row_of_sorted = region[sorted_e] + rank
+        total = int(chunks.sum()) * rows
+        gather = torch.full((total,), tokens, dtype=torch.int32)
+        row_w = torch.zeros(total)
+        gather[row_of_sorted] = (order // k).int()
+        row_w[row_of_sorted] = weights.flatten()[order].float()
+        row_of_pair = torch.empty(flat.numel(), dtype=torch.int32)
+        row_of_pair[order] = row_of_sorted.int()
+        back = row_of_pair.reshape(tokens, k).T.contiguous().flatten()  # slot-major
+        return gather, row_w, chunk_expert, back
+
+    def _experts_prefill(self, x: ttnn.Tensor, normed: ttnn.Tensor) -> ttnn.Tensor:
+        """Expert-major experts for a prompt chunk x [1, 1, T, H].
+
+        The host reads the top-k routing back, groups every expert's (token, slot)
+        pairs into chunks of rows, and the device gathers those token rows, runs one
+        indexed sparse matmul pair over the chunks (each expert's weights are read
+        once per chunk, not once per 32-token group as with the union of experts),
+        and gathers each token's k result rows back into a sum.
+        """
+        tokens = x.shape[2]
+        k, n, p = self.top_k, self.expert_local, self.expert_pad
+        weights, ids = self.topk_route(normed)
+        w_host = ttnn.to_torch(ttnn.get_device_tensors(weights)[0]).reshape(-1, k)[:tokens]
+        id_host = ttnn.to_torch(ttnn.get_device_tensors(ids)[0]).reshape(-1, k)[:tokens].long()
+        weights.deallocate(True)
+        ids.deallocate(True)
+        per_expert = tokens * k / self.n_experts
+        rows = 32 if per_expert <= 48 else 64 if per_expert <= 96 else 128
+        gather, row_w, chunk_expert, back = self._plan_chunks(id_host, w_host, rows)
+        n_chunks = chunk_expert.numel()
+
+        rep = ttnn.ReplicateTensorToMesh(self.mesh)
+
+        def up(t, dtype, layout=ttnn.ROW_MAJOR_LAYOUT):
+            return ttnn.from_torch(t, dtype=dtype, layout=layout, device=self.mesh, mesh_mapper=rep, memory_config=DRAM)
+
+        zero = ttnn.zeros([1, 1, TILE, self.hidden], dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.mesh, memory_config=DRAM)
+        padded = ttnn.concat([x, zero], dim=2)  # row `tokens` is zero (x rows past it are never gathered)
+        zero.deallocate(True)
+        table = ttnn.to_layout(ttnn.reshape(padded, (tokens + TILE, self.hidden)), ttnn.ROW_MAJOR_LAYOUT)
+        padded.deallocate(True)
+        g = up(gather[None], ttnn.uint32)
+        xs = ttnn.embedding(g, table, layout=ttnn.TILE_LAYOUT)  # [1, C * rows, H]
+        g.deallocate(True)
+        table.deallocate(True)
+        xs = ttnn.reshape(xs, (1, n_chunks, rows, self.hidden))
+        w_dev = up(row_w.reshape(1, n_chunks, rows, 1), ttnn.bfloat16, ttnn.TILE_LAYOUT)
+        gate_up_cfg, down_cfg = self._chunk_config(rows)
+
+        outs = []
+        for c0 in range(0, n_chunks, self.n_experts):  # indexed mode takes at most E slots per call
+            c1 = min(c0 + self.n_experts, n_chunks)
+            idx = up(chunk_expert[c0:c1][None].int(), ttnn.uint16)
+            xc = xs if (c0, c1) == (0, n_chunks) else ttnn.slice(xs, [0, c0, 0, 0], [1, c1, rows, self.hidden])
+            wc = w_dev if (c0, c1) == (0, n_chunks) else ttnn.slice(w_dev, [0, c0, 0, 0], [1, c1, rows, 1])
+            gu = ttnn.sparse_matmul(
+                xc,
+                self.exp_gate_up,
+                sparsity=self.all_experts,
+                indices=idx,
+                program_config=gate_up_cfg,
+                compute_kernel_config=self.expert_compute,
+                memory_config=DRAM,
+                is_input_a_sparse=True,
+                is_input_b_sparse=True,
+                dtype=ttnn.bfloat16,
+            )  # [1, c, rows, 2p]
+            gate = ttnn.slice(gu, [0, 0, 0, 0], [1, c1 - c0, rows, n])
+            up_ = ttnn.slice(gu, [0, 0, 0, p], [1, c1 - c0, rows, p + n])
+            gu.deallocate(True)
+            h = ttnn.mul(gate, up_, input_tensor_a_activations=[GELU_TANH])
+            gate.deallocate(True)
+            up_.deallocate(True)
+            hw = ttnn.mul(h, wc)
+            h.deallocate(True)
+            outs.append(
+                ttnn.sparse_matmul(
+                    hw,
+                    self.exp_down,
+                    sparsity=self.all_experts,
+                    indices=idx,
+                    program_config=down_cfg,
+                    compute_kernel_config=self.expert_compute,
+                    memory_config=DRAM,
+                    is_input_a_sparse=True,
+                    is_input_b_sparse=True,
+                    dtype=ttnn.bfloat16,
+                )
+            )  # [1, c, rows, H]
+            hw.deallocate(True)
+            idx.deallocate(True)
+        xs.deallocate(True)
+        w_dev.deallocate(True)
+        down = outs[0] if len(outs) == 1 else ttnn.concat(outs, dim=1)
+        if len(outs) > 1:
+            for o in outs:
+                o.deallocate(True)
+        flat = ttnn.to_layout(ttnn.reshape(down, (n_chunks * rows, self.hidden)), ttnn.ROW_MAJOR_LAYOUT)
         down.deallocate(True)
-        w.deallocate(True)
-        out = ttnn.sum(weighted, dim=1, keepdim=True)  # [G, 1, M, H]
-        weighted.deallocate(True)
+        b = up(back[None], ttnn.uint32)
+        pairs = ttnn.embedding(b, flat, layout=ttnn.TILE_LAYOUT)  # [1, k * T, H], slot-major
+        b.deallocate(True)
+        flat.deallocate(True)
+        out = ttnn.experimental.fast_reduce_nc(
+            ttnn.reshape(pairs, (1, k, tokens, self.hidden)), dims=[1], compute_kernel_config=HIFI4, memory_config=DRAM
+        )
+        pairs.deallocate(True)
         return out
 
-    def _experts(self, x, routing, chunk_tokens: int):
+    def _experts(self, x, normed, chunk_tokens: int = 4096):
+        """Prefill experts in token chunks, which bound the gathered-row buffers."""
         t = x.shape[2]
-        if t <= TILE:
-            return self._experts_group(x, routing, 1)
+        if t <= chunk_tokens:
+            return self._experts_prefill(x, normed)
         outs = []
         for start in range(0, t, chunk_tokens):
             end = min(start + chunk_tokens, t)
-            g = (end - start) // TILE
-            xs = ttnn.reshape(ttnn.slice(x, [0, 0, start, 0], [1, 1, end, self.hidden]), (1, g, TILE, self.hidden))
-            rs = ttnn.reshape(ttnn.slice(routing, [0, 0, start, 0], [1, 1, end, self.n_experts]), (1, g, TILE, self.n_experts))
-            o = self._experts_group(xs, rs, g)
-            outs.append(ttnn.reshape(o, (1, 1, end - start, self.hidden)))
-        out = outs[0] if len(outs) == 1 else ttnn.concat(outs, dim=2)
+            xs = ttnn.slice(x, [0, 0, start, 0], [1, 1, end, self.hidden])
+            ns = ttnn.slice(normed, [0, 0, start, 0], [1, 1, end, self.hidden])
+            outs.append(self._experts_prefill(xs, ns))
+            xs.deallocate(True)
+            ns.deallocate(True)
+        out = ttnn.concat(outs, dim=2)
+        for o in outs:
+            o.deallocate(True)
         return out
 
-    def __call__(self, residual: ttnn.Tensor, chunk_tokens: int = 128) -> ttnn.Tensor:
+    def __call__(self, residual: ttnn.Tensor) -> ttnn.Tensor:
         """residual [1, 1, T, H] replicated. Returns the block output to add to the residual."""
         t = residual.shape[2]
         normed = rms_norm(residual, None, self.eps)
@@ -357,12 +446,12 @@ class FeedForward:
         mlp_in.deallocate(True)
 
         exp_in = ttnn.mul(normed, self.pre_ff2)
-        if t <= TILE:
+        # Indexed mode allows at most one slot per expert (T * k <= E, so T <= 16);
+        # longer inputs, such as the 32-token prefill warmup, take the grouped path.
+        if t * self.top_k <= self.n_experts:
             experts = self._experts_decode(exp_in, normed)
         else:
-            routing = self.route(normed)
-            experts = self._experts(exp_in, routing, chunk_tokens)
-            routing.deallocate(True)
+            experts = self._experts(exp_in, normed)
         exp_in.deallocate(True)
         normed.deallocate(True)
         if experts.shape[2] != t:

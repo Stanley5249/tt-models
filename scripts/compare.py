@@ -3,8 +3,11 @@
 The TT side prefills `--prompt-len` tokens and then decodes the following
 `--decode-steps` reference tokens one at a time, so every compared row has the
 same context on both sides. Reference logits are cached under cache/ref/.
+With several `--offsets`, each one starts a text segment at that token of the
+README and the rows of all segments are pooled (one model load).
 
     pixi run python scripts/compare.py --layers 6 --prompt-len 128 --decode-steps 8
+    pixi run python scripts/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace
 """
 
 import argparse
@@ -29,8 +32,9 @@ def prompt_tokens(ckpt: Checkpoint, n: int) -> torch.Tensor:
     return ids[:n]
 
 
-def reference_logits(ckpt, ids, first, layers) -> torch.Tensor:
-    path = ROOT / "cache" / "ref" / f"readme-n{ids.shape[0]}-from{first}-L{layers}.pt"
+def reference_logits(ckpt, ids, first, layers, offset=0) -> torch.Tensor:
+    tag = f"-at{offset}" if offset else ""
+    path = ROOT / "cache" / "ref" / f"readme{tag}-n{ids.shape[0]}-from{first}-L{layers}.pt"
     if path.exists():
         return torch.load(path)
     from gemma4_tt.reference import Reference
@@ -74,12 +78,16 @@ def main():
     ap.add_argument("--decode-steps", type=int, default=8)
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--trace", action="store_true")
+    ap.add_argument("--offsets", type=int, nargs="+", default=[0])
     args = ap.parse_args()
 
     ckpt = Checkpoint()
     total = args.prompt_len + args.decode_steps
-    ids = prompt_tokens(ckpt, total + 1)
-    ref = reference_logits(ckpt, ids[:total], args.prompt_len - 1, args.layers)
+    text = prompt_tokens(ckpt, max(args.offsets) + total + 1)
+    segments = []
+    for offset in args.offsets:
+        ids = text[offset : offset + total + 1]
+        segments.append((offset, ids, reference_logits(ckpt, ids[:total], args.prompt_len - 1, args.layers, offset)))
 
     import ttnn
 
@@ -94,16 +102,17 @@ def main():
         blocks = -(-(total + 64) // model.block_size)
         model.allocate_kv_cache(blocks)
         pt = torch.arange(blocks, dtype=torch.int32)
-        t0 = time.time()
-        logits = model.prefill(ids[: args.prompt_len], pt, slot=0)
-        print(f"prefill {args.prompt_len} tokens: {time.time() - t0:.2f}s", flush=True)
-        rows.append({"pos": args.prompt_len - 1, **metrics(logits, ref[0])})
-        for step in range(args.decode_steps):
-            pos = args.prompt_len + step
+        for offset, ids, ref in segments:
             t0 = time.time()
-            logits = model.decode(ids[pos : pos + 1], torch.tensor([pos]), pt[None], trace=args.trace)
-            dt = time.time() - t0
-            rows.append({"pos": pos, "sec": round(dt, 3), **metrics(logits[0], ref[step + 1])})
+            logits = model.prefill(ids[: args.prompt_len], pt, slot=0)
+            print(f"prefill {args.prompt_len} tokens at {offset}: {time.time() - t0:.2f}s", flush=True)
+            rows.append({"offset": offset, "pos": args.prompt_len - 1, **metrics(logits, ref[0])})
+            for step in range(args.decode_steps):
+                pos = args.prompt_len + step
+                t0 = time.time()
+                logits = model.decode(ids[pos : pos + 1], torch.tensor([pos]), pt[None], trace=args.trace)
+                dt = time.time() - t0
+                rows.append({"offset": offset, "pos": pos, "sec": round(dt, 3), **metrics(logits[0], ref[step + 1])})
         ttnn.synchronize_device(mesh)
     for r in rows:
         print(json.dumps(r))

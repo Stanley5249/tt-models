@@ -7,7 +7,7 @@ import json
 import sys
 
 for path in sys.argv[1:]:
-    rows = json.load(open(path))["rows"][1:]  # row 0 is the prefill logit
+    rows = [r for r in json.load(open(path))["rows"] if "sec" in r]  # decode rows only (prefill rows lack "sec")
     top1 = sum(r["top1"] for r in rows) / len(rows)
     kl = sum(r["kl"] for r in rows) / len(rows)
     top5 = sum(r["top5_overlap"] for r in rows) / len(rows)
