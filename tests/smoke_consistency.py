@@ -27,29 +27,35 @@ def main():
     ap.add_argument("--prompt-len", type=int, default=64)
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--steps", type=int, default=2)
+    ap.add_argument("--batch", type=int, default=1)
     args = ap.parse_args()
 
     ckpt = FakeCheckpoint(["sliding_attention", "full_attention"])
     torch.manual_seed(0)
-    ids = torch.randint(10, 20000, (args.prompt_len + args.steps,))
+    lens = [args.prompt_len + 37 * i for i in range(args.batch)]  # different lengths per user
+    seqs = [torch.randint(10, 20000, (n + args.steps,)) for n in lens]
     cache_root = Path(__file__).resolve().parents[1] / "cache" / "fake"
     with open_n300() as mesh:
         t0 = time.time()
-        model = Gemma4TT(mesh, ckpt, cache_root=cache_root, max_batch=1, num_layers=args.layers)
+        model = Gemma4TT(mesh, ckpt, cache_root=cache_root, max_batch=args.batch, num_layers=args.layers)
         print(f"load {time.time() - t0:.0f}s", flush=True)
-        blocks = -(-(ids.shape[0] + 64) // model.block_size)
-        model.allocate_kv_cache(blocks)
-        pt = torch.arange(blocks, dtype=torch.int32)
-        n = args.prompt_len
-        model.prefill(ids[:n], pt, slot=0)
+        per_user = -(-(max(lens) + args.steps + 64) // model.block_size)
+        model.allocate_kv_cache(per_user * args.batch)
+        pts = torch.arange(per_user * args.batch, dtype=torch.int32).reshape(args.batch, per_user)
+        for b in range(args.batch):
+            model.prefill(seqs[b][: lens[b]], pts[b], slot=b)
         decoded = []
         for i in range(args.steps):
+            toks = torch.stack([seqs[b][lens[b] + i] for b in range(args.batch)])
+            pos = torch.tensor([lens[b] + i for b in range(args.batch)])
             t0 = time.time()
-            decoded.append(model.decode(ids[n + i : n + i + 1], torch.tensor([n + i]), pt[None])[0])
+            decoded.append(model.decode(toks, pos, pts))
             print(f"decode step {i}: {time.time() - t0:.2f}s", flush=True)
-        for i in range(args.steps):
-            ref = model.prefill(ids[: n + i + 1], pt, slot=0)
-            print(f"pos {n + i}: decode vs prefill pcc={pcc(decoded[i], ref):.5f} top1 {decoded[i].argmax().item()} {ref.argmax().item()}")
+        for b in range(args.batch):
+            for i in range(args.steps):
+                ref = model.prefill(seqs[b][: lens[b] + i + 1], pts[b], slot=b)
+                got = decoded[i][b]
+                print(f"user {b} pos {lens[b] + i}: decode vs prefill pcc={pcc(got, ref):.5f} top1 {got.argmax().item()} {ref.argmax().item()}")
 
 
 if __name__ == "__main__":

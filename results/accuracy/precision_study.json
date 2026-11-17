@@ -1,0 +1,38 @@
+{
+ "tt@512": {
+  "ppl": 23.5938,
+  "top1_vs_fp32": 0.8141,
+  "kl_mean": 0.45719,
+  "kl_p95": 2.10129
+ },
+ "tt[expert_fidelity=HiFi2]@512": {
+  "ppl": 23.5938,
+  "top1_vs_fp32": 0.8141,
+  "kl_mean": 0.45719,
+  "kl_p95": 2.10129
+ },
+ "emu:experts=bfp4@512": {
+  "ppl": 23.7118,
+  "top1_vs_fp32": 0.8611,
+  "kl_mean": 0.341,
+  "kl_p95": 1.56961
+ },
+ "emu:experts=bfp4,attention=bfp8,mlp=bfp8,lm_head=bfp8@512": {
+  "ppl": 24.0486,
+  "top1_vs_fp32": 0.8474,
+  "kl_mean": 0.3485,
+  "kl_p95": 1.58326
+ },
+ "bf16@512": {
+  "ppl": 24.5053,
+  "top1_vs_fp32": 0.9139,
+  "kl_mean": 0.1626,
+  "kl_p95": 0.87092
+ },
+ "fp32@512": {
+  "ppl": 24.1669,
+  "top1_vs_fp32": 1.0,
+  "kl_mean": 0.0,
+  "kl_p95": 0.0
+ }
+}

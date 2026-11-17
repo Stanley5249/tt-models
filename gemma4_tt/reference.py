@@ -31,10 +31,49 @@ def attention_masks(seq_len: int, sliding_window: int) -> dict[str, torch.Tensor
     return {"full_attention": additive(causal), "sliding_attention": additive(sliding)}
 
 
+def roundtrip(w: torch.Tensor, ttnn_dtype) -> torch.Tensor:
+    """Quantize-dequantize `w` exactly as a TILE upload in `ttnn_dtype` would (host only)."""
+    import ttnn
+
+    shape = w.shape
+    w4 = w.reshape(-1, shape[-2], shape[-1]) if w.dim() != 4 else w
+    t = ttnn.from_torch(w4.to(torch.bfloat16), dtype=ttnn_dtype, layout=ttnn.TILE_LAYOUT)
+    return ttnn.to_torch(t).to(w.dtype).reshape(shape)
+
+
+# Device orientation of each quantized weight: blocks of 16 run along the last dim
+# of the uploaded [in, out] matrix, so quantize the transpose and transpose back.
+QUANT_GROUPS = {
+    "attention": ("self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight"),
+    "mlp": ("mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight"),
+    "experts": ("experts.gate_up_proj", "experts.down_proj"),
+}
+
+
+def quantize_layer(state: dict, quant: dict) -> dict:
+    out = dict(state)
+    for group, dtype in quant.items():
+        for key in QUANT_GROUPS.get(group, ()):
+            if key not in out:
+                continue
+            w = out[key]
+            if key == "experts.gate_up_proj":
+                inter = w.shape[1] // 2  # [E, 2I, H] -> device [E, H, I] per half
+                halves = [roundtrip(h.transpose(1, 2).contiguous(), dtype).transpose(1, 2) for h in (w[:, :inter], w[:, inter:])]
+                out[key] = torch.cat(halves, 1)
+            elif key == "experts.down_proj":
+                out[key] = roundtrip(w.transpose(1, 2).contiguous(), dtype).transpose(1, 2).contiguous()
+            else:
+                out[key] = roundtrip(w.T.contiguous(), dtype).T.contiguous()
+    return out
+
+
 class Reference:
-    def __init__(self, ckpt: Checkpoint | None = None, dtype=torch.float32):
+    def __init__(self, ckpt: Checkpoint | None = None, dtype=torch.float32, quant: dict | None = None):
+        """quant: optional {"attention"|"mlp"|"experts"|"lm_head": ttnn dtype} weight emulation."""
         self.ckpt = ckpt or Checkpoint()
         self.dtype = dtype
+        self.quant = quant or {}
         config = self.ckpt.config
         config._attn_implementation = "sdpa"
         self.config = config
@@ -43,7 +82,8 @@ class Reference:
     def load_layer(self, idx: int) -> hf.Gemma4TextDecoderLayer:
         with torch.device("meta"):
             layer = hf.Gemma4TextDecoderLayer(self.config, idx)
-        state = {k: v.to(self.dtype) for k, v in self.ckpt.layer(idx).items()}
+        state = quantize_layer(self.ckpt.layer(idx), self.quant)
+        state = {k: v.to(self.dtype) for k, v in state.items()}
         layer.load_state_dict(state, strict=True, assign=True)
         return layer.eval()
 
@@ -68,7 +108,10 @@ class Reference:
         norm = hf.Gemma4RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
         norm.weight.data = self.ckpt.get("norm.weight").to(self.dtype)
         h = norm(x)
-        head = self.ckpt.get("embed_tokens.weight").to(self.dtype)
+        head = self.ckpt.get("embed_tokens.weight")
+        if "lm_head" in self.quant:
+            head = roundtrip(head.T.contiguous(), self.quant["lm_head"]).T
+        head = head.to(self.dtype)
         logits = h[0] @ head.T
         cap = self.config.final_logit_softcapping
         return torch.tanh(logits / cap) * cap

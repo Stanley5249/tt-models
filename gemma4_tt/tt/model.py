@@ -25,6 +25,17 @@ class Precision:
     experts: ttnn.DataType = ttnn.bfloat4_b
     lm_head: ttnn.DataType = ttnn.bfloat8_b
     kv_cache: ttnn.DataType = ttnn.bfloat8_b
+    expert_fidelity: str = "LoFi"  # compute fidelity of the expert sparse matmuls
+
+    @classmethod
+    def parse(cls, spec: str) -> "Precision":
+        """From "experts=bfp4,expert_fidelity=HiFi2"-style overrides."""
+        names = {"bf16": ttnn.bfloat16, "bfp8": ttnn.bfloat8_b, "bfp4": ttnn.bfloat4_b}
+        kwargs = {}
+        for item in filter(None, spec.split(",")):
+            key, value = item.split("=")
+            kwargs[key] = value if key.endswith("fidelity") else names[value]
+        return cls(**kwargs)
 
     def tag(self) -> str:
         names = {ttnn.bfloat16: "bf16", ttnn.bfloat8_b: "bfp8", ttnn.bfloat4_b: "bfp4"}
@@ -39,7 +50,7 @@ class DecoderLayer:
         self.sliding = cfg.layer_types[idx] == "sliding_attention"
         self.eps = cfg.rms_norm_eps
         self.attn = Attention(loader, ckpt, cfg, idx, precision.attention)
-        self.ff = FeedForward(loader, ckpt, cfg, idx, precision.mlp, precision.experts)
+        self.ff = FeedForward(loader, ckpt, cfg, idx, precision.mlp, precision.experts, precision.expert_fidelity)
         self.input_ln = loader.put(f"L{idx}.input_ln", lambda: norm_weight(ckpt.get(p + "input_layernorm.weight")), layout=rm)
         self.post_attn_ln = loader.put(
             f"L{idx}.post_attn_ln", lambda: norm_weight(ckpt.get(p + "post_attention_layernorm.weight")), layout=rm
@@ -166,8 +177,9 @@ class Gemma4TT:
 
     # -- prefill -------------------------------------------------------------
 
-    def prefill(self, tokens: torch.Tensor, page_table: torch.Tensor, slot: int) -> torch.Tensor:
-        """Prefill one request from position 0. Returns float logits [V] of the last token.
+    def prefill(self, tokens: torch.Tensor, page_table: torch.Tensor, slot: int, all_logits: bool = False) -> torch.Tensor:
+        """Prefill one request from position 0. Returns float logits [V] of the last token
+        (or [S, V] for every position with `all_logits`, used by accuracy studies).
 
         page_table: int32 [num_blocks_for_request] vLLM block ids for the global layers.
         slot: the batch slot whose sliding ring receives this request.
@@ -222,14 +234,15 @@ class Gemma4TT:
             fill = fill_sliding if layer.sliding else fill_global
             x = layer.prefill(x, ropes[kind], cache, fill)
 
-        last = ttnn.slice(x, [0, 0, seq_len - 1, 0], [1, 1, seq_len, self.hidden])
-        x.deallocate(True)
+        first = 0 if all_logits else seq_len - 1
+        last = ttnn.slice(x, [0, 0, first, 0], [1, 1, seq_len, self.hidden])
         logits = self._logits(last)
+        x.deallocate(True)  # `last` can be x itself or a view of it
         for t in (global_pt, ring_pt, *[r for pair in ropes.values() for r in pair]):
             t.deallocate(True)
         if sel_tt is not None:
             sel_tt[1].deallocate(True)
-        return logits[0]
+        return logits if all_logits else logits[0]
 
     # -- decode --------------------------------------------------------------
 
@@ -277,6 +290,15 @@ class Gemma4TT:
     # -- head ----------------------------------------------------------------
 
     def _logits(self, x: ttnn.Tensor) -> torch.Tensor:
+        rows = x.shape[2]
+        if rows > TILE:
+            # ttnn.linear segfaults on the host for M > 32 against the 131072-wide
+            # LM head shard (ttnn 0.81), so multi-row logits go one tile at a time.
+            parts = []
+            for start in range(0, rows, TILE):
+                part = ttnn.slice(x, [0, 0, start, 0], [1, 1, min(start + TILE, rows), self.hidden])
+                parts.append(self._logits(part))  # row slices are views of x; do not free them
+            return torch.cat(parts)
         h = ttnn.rms_norm(x, weight=self.final_norm, epsilon=self.cfg.rms_norm_eps, memory_config=DRAM, compute_kernel_config=HIFI4)
         logits = ttnn.linear(h, self.lm_head, compute_kernel_config=HIFI2, memory_config=DRAM, dtype=ttnn.float32)
         h.deallocate(True)
@@ -290,3 +312,6 @@ class Gemma4TT:
         out = ttnn.to_torch(capped, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float()
         capped.deallocate(True)
         return out.reshape(-1, self.vocab)
+
+    def release_traces(self):
+        """Release captured traces (none yet in the eager path)."""

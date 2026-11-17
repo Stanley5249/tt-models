@@ -14,7 +14,7 @@ zero cancel the unselected (token, expert) pairs, so the result is exact.
 import torch
 import ttnn
 
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, LOFI, TILE, WeightLoader, all_reduce, norm_weight
+from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, compute_config, norm_weight
 
 
 def _matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8)):
@@ -47,9 +47,12 @@ def _matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8)):
 
 
 class FeedForward:
-    def __init__(self, loader: WeightLoader, ckpt, cfg, layer_idx: int, mlp_dtype=ttnn.bfloat8_b, expert_dtype=ttnn.bfloat4_b):
+    def __init__(
+        self, loader: WeightLoader, ckpt, cfg, layer_idx: int, mlp_dtype=ttnn.bfloat8_b, expert_dtype=ttnn.bfloat4_b, expert_fidelity="LoFi"
+    ):
         tp = loader.tp
         self.tp = tp
+        self.expert_compute = compute_config(getattr(ttnn.MathFidelity, expert_fidelity))
         self.cfg = cfg
         self.hidden = H = cfg.hidden_size
         self.n_experts = E = cfg.num_experts
@@ -155,7 +158,7 @@ class FeedForward:
             self.exp_gate_up,
             sparsity=sparsity,
             program_config=self.gate_up_cfg,
-            compute_kernel_config=LOFI,
+            compute_kernel_config=self.expert_compute,
             memory_config=DRAM,
             dtype=ttnn.bfloat16,
         )  # [1, G, 1, E, M, 2n]
@@ -173,7 +176,7 @@ class FeedForward:
             self.exp_down,
             sparsity=sparsity2,
             program_config=self.down_cfg,
-            compute_kernel_config=LOFI,
+            compute_kernel_config=self.expert_compute,
             memory_config=DRAM,
             is_input_a_sparse=True,
             is_input_b_sparse=False,

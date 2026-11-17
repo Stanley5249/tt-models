@@ -23,6 +23,8 @@ LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
 TT_METAL_LOGS_PATH = "$PIXI_PROJECT_ROOT/logs/tt-metal"
 # Selects the build target vLLM's setup.py declares requirements for.
 VLLM_TARGET_DEVICE = "empty"
+# Makes the gemma4_tt package importable from scripts and vLLM workers.
+PYTHONPATH = "$PIXI_PROJECT_ROOT"
 
 [pypi-dependencies]
 # Stanley5249/tt-metal release: ttnn with SFPI and tt_transformers' models/.
