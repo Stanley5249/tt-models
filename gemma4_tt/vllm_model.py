@@ -9,12 +9,56 @@ per-slot ring of 1024 tokens that the adapter owns, so the KV spec announced
 to vLLM describes one global layer (2 KV heads of 512) without a window.
 """
 
+import os
+import time
+
 import torch
-import ttnn
 from loguru import logger
 
 from gemma4_tt.checkpoint import Checkpoint
 from gemma4_tt.tt.model import Gemma4TT
+
+# Largest top-k the model-side sampler takes; requests with no top-k (or a
+# larger one) and a temperature fall back to vLLM's host sampler.
+MAX_TOP_K = 1024
+LOGPROBS_K = 32
+
+
+def sample(logits: torch.Tensor, params, positions: torch.Tensor):
+    """Sample one token per row from float logits [B, V] with vLLM's semantics.
+
+    vLLM's CPU sampler sorts the whole 262k vocabulary whenever top-p is set
+    (14 ms per row on one thread, which vLLM's worker uses). Top-k first and
+    top-p inside the k candidates gives the same distribution for k <= MAX_TOP_K
+    in about 0.5 ms. Temperature 0 is greedy. A seeded row draws from a
+    generator seeded by (seed, position), so it is reproducible.
+
+    Returns token ids [B, 1] and, when any row asked for logprobs, the
+    (top logprobs, token ids) pair of the raw logits for the plugin to pack.
+    """
+    rows = logits.shape[0]
+    temps = [float(t) for t in params.temperature[:rows]]
+    top_ks = [int(k) if int(k) > 0 else MAX_TOP_K for k in params.top_k[:rows]]
+    k_max = min(max(top_ks + [1]), MAX_TOP_K)
+    vals, ids = logits.topk(k_max, dim=-1)  # sorted, largest first
+    out = ids[:, :1].clone()
+    for i in range(rows):
+        if temps[i] == 0.0:
+            continue
+        k = min(top_ks[i], k_max)
+        probs = torch.softmax(vals[i, :k] / temps[i], dim=-1)
+        top_p = float(params.top_p[i])
+        if top_p < 1.0:
+            before = torch.cumsum(probs, 0) - probs  # mass of the better candidates
+            probs = torch.where(before < top_p, probs, torch.zeros_like(probs))
+        seed = params.seed[i] if params.seed is not None else None
+        gen = None if seed is None else torch.Generator().manual_seed((int(seed) * 1_000_003 + int(positions[i])) % 2**63)
+        out[i, 0] = ids[i, torch.multinomial(probs, 1, generator=gen)]
+    log_probs = None
+    if params.enable_log_probs is not None and any(params.enable_log_probs[:rows]):
+        lp, lp_ids = torch.log_softmax(logits, dim=-1).topk(LOGPROBS_K, dim=-1)
+        log_probs = (lp, lp_ids)
+    return out, log_probs
 
 
 class Gemma4ForCausalLM:
@@ -22,12 +66,20 @@ class Gemma4ForCausalLM:
         "supports_prefix_caching": False,
         "supports_chunked_prefill": False,
         "supports_async_decode": False,
-        "supports_sample_on_device": False,
+        # "Device" sampling here is the host-side top-k sampler above, which the
+        # plugin calls through decode_forward(sampling_params=...).
+        "supports_sample_on_device": True,
+        "max_device_top_k": MAX_TOP_K,
+        "supports_device_penalties": False,
+        "supports_device_grammar": False,
     }
 
     def __init__(self, model: Gemma4TT):
         self.model = model
         self.model_capabilities = dict(type(self).model_capabilities)
+        # GEMMA4_TIMING=1 logs the model's share of every step, to separate it from vLLM's.
+        self.timing = os.environ.get("GEMMA4_TIMING") == "1"
+        self._last_return = None
 
     # -- setup ---------------------------------------------------------------
 
@@ -80,10 +132,22 @@ class Gemma4ForCausalLM:
             rows.append(self.model.prefill(tokens[i, :end], page_table[i], slot=slot))
         return torch.stack(rows)[:, None, :]
 
-    def decode_forward(self, tokens, start_pos, page_table, kv_cache, enable_trace=False, read_from_device=True, slot_remap=None, **_):
+    def decode_forward(
+        self, tokens, start_pos, page_table, kv_cache, enable_trace=False, read_from_device=True, slot_remap=None, sampling_params=None, **_
+    ):
         if slot_remap is not None:
             self.model.remap_slots(slot_remap)
+        t0 = time.perf_counter()
         logits = self.model.decode(tokens[:, 0], start_pos, page_table, trace=enable_trace)
+        if self.timing:
+            t1 = time.perf_counter()
+            outside = (t0 - self._last_return) * 1e3 if self._last_return else float("nan")
+            active = int((start_pos >= 0).sum())
+            logger.info(f"Gemma4 decode: {active} active, model {(t1 - t0) * 1e3:.1f} ms, outside since last {outside:.1f} ms")
+            self._last_return = t1
+        if sampling_params is not None:
+            ids, log_probs = sample(logits, sampling_params, start_pos)
+            return ids if log_probs is None else (ids, log_probs)
         return logits[:, None, :]
 
     # -- lifecycle -------------------------------------------------------------

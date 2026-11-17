@@ -67,7 +67,8 @@ env = { MESH_DEVICE = "N300", HF_MODEL = "Qwen/Qwen3-8B", TT_CACHE_PATH = "$PIXI
 cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized --host 127.0.0.1 --port 8000 \
   --served-model-name gemma4 --block-size 64 --max-num-seqs 4 --max-model-len 32768 \
   --limit-mm-per-prompt '{"image": 0, "audio": 0, "video": 0}' \
-  --additional-config '{"tt": {"trace_region_size": 200000000}}'"""
+  --additional-config '{"tt": {"trace_region_size": 200000000, "sample_on_device_mode": "decode_only"}}'"""
 # Decode captures one trace per active row count (1-4); the plugin's default
-# 50 MB trace region is sized for one.
+# 50 MB trace region is sized for one. "Device" sampling routes decode sampling
+# through the model's top-k sampler (gemma4_tt/vllm_model.py:sample).
 env = { MESH_DEVICE = "N300", TT_MODEL_CLASS_OVERRIDES = "TTGemma4ForConditionalGeneration=gemma4_tt.vllm_model:Gemma4ForCausalLM" }
