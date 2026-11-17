@@ -14,7 +14,7 @@ from transformers.models.gemma4 import modeling_gemma4 as hf
 from gemma4_tt.checkpoint import Checkpoint
 from gemma4_tt.reference import embed_scale
 from gemma4_tt.tt.attention import Attention, ring_selection
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, norm_weight
+from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, norm_weight, rms_norm
 from gemma4_tt.tt.moe import FeedForward
 
 
@@ -58,7 +58,7 @@ class DecoderLayer:
         self.scalar = float(ckpt.get(p + "layer_scalar").float().item())
 
     def _rms(self, x, w):
-        return ttnn.rms_norm(x, weight=w, epsilon=self.eps, memory_config=DRAM, compute_kernel_config=HIFI4)
+        return rms_norm(x, w, self.eps)
 
     def _finish(self, x, attn_out):
         a = self._rms(attn_out, self.post_attn_ln)
@@ -329,7 +329,7 @@ class Gemma4TT:
         return logits
 
     def _logits_device(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        h = ttnn.rms_norm(x, weight=self.final_norm, epsilon=self.cfg.rms_norm_eps, memory_config=DRAM, compute_kernel_config=HIFI4)
+        h = rms_norm(x, self.final_norm, self.cfg.rms_norm_eps)
         logits = ttnn.linear(h, self.lm_head, compute_kernel_config=HIFI2, memory_config=DRAM, dtype=ttnn.float32)
         h.deallocate(True)
         cap = self.cfg.final_logit_softcapping

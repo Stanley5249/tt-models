@@ -14,7 +14,12 @@ zero cancel the unselected (token, expert) pairs, so the result is exact.
 import torch
 import ttnn
 
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, compute_config, norm_weight
+from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, compute_config, norm_weight, rms_norm
+
+
+# HF uses gelu_pytorch_tanh. Fusing GELU_TANH into the multiply halves the mean
+# error of ttnn.gelu(fast_and_approximate_mode=True) and saves one op.
+GELU_TANH = ttnn.UnaryOpType.GELU_TANH
 
 
 def _matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8)):
@@ -26,11 +31,11 @@ def _matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8)):
         if shape:
             gx, gy = shape
             break
-    in0_block_w = 1
-    for w in (8, 4, 2, 1):
-        if (k // TILE) % w == 0:
-            in0_block_w = w
-            break
+    # Large K blocks matter for these DRAM-bound decode shapes: measured in
+    # scripts/bench_sparse_matmul.py, down (K=11 tiles) took 154 us at
+    # in0_block_w=1 and 92 us at 11; gate_up (K=88) 194 us at 8 and 184 us at 22.
+    k_tiles = k // TILE
+    in0_block_w = next(w for w in (22, 11, 8, 4, 2, 1) if k_tiles % w == 0)
     return ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
         compute_with_storage_grid_size=ttnn.CoreCoord(gx, gy),
         in0_block_w=in0_block_w,
@@ -67,8 +72,13 @@ class FeedForward:
         def norm(name):
             return put(f"L{layer_idx}.{name}", lambda: norm_weight(ckpt.get(p + name + ".weight")), layout=rm)
 
-        self.pre_ff = norm("pre_feedforward_layernorm")
-        self.pre_ff2 = norm("pre_feedforward_layernorm_2")
+        # The router norm, pre_ff and pre_ff2 all normalize the same residual, so
+        # one weightless RMSNorm feeds three weight multiplies (TILE row vectors).
+        def row(name):
+            return put(f"L{layer_idx}.{name}.row", lambda: ckpt.get(p + name + ".weight").float().reshape(1, 1, 1, H))
+
+        self.pre_ff = row("pre_feedforward_layernorm")
+        self.pre_ff2 = row("pre_feedforward_layernorm_2")
         self.post_ff1 = norm("post_feedforward_layernorm_1")
         self.post_ff2 = norm("post_feedforward_layernorm_2")
         self.post_ff = norm("post_feedforward_layernorm")
@@ -122,13 +132,14 @@ class FeedForward:
         self.down_cfg = _matmul_1d_config(1, H, self.expert_local)
 
     def _rms(self, x, w):
-        return ttnn.rms_norm(x, weight=w, epsilon=self.eps, memory_config=DRAM, compute_kernel_config=HIFI4)
+        return rms_norm(x, w, self.eps)
 
-    def topk_route(self, residual: ttnn.Tensor):
-        """Top-k routing: renormalized weights [1, 1, T, k] and expert ids [1, 1, T, k] (uint16)."""
-        normed = ttnn.rms_norm(residual, epsilon=self.eps, memory_config=DRAM, compute_kernel_config=HIFI4)
+    def topk_route(self, normed: ttnn.Tensor):
+        """Top-k routing from the weightless RMSNorm of the residual.
+
+        Returns renormalized weights [1, 1, T, k] and expert ids [1, 1, T, k] (uint16).
+        """
         logits = ttnn.linear(normed, self.router, compute_kernel_config=HIFI4, memory_config=DRAM)
-        normed.deallocate(True)
         probs = ttnn.softmax(logits, dim=-1, compute_kernel_config=HIFI4)
         logits.deallocate(True)
         top_v, top_i = ttnn.topk(probs, k=self.top_k, dim=-1)
@@ -142,10 +153,10 @@ class FeedForward:
             t.deallocate(True)
         return weights, top_i
 
-    def route(self, residual: ttnn.Tensor) -> ttnn.Tensor:
+    def route(self, normed: ttnn.Tensor) -> ttnn.Tensor:
         """Dense routing weights [1, 1, T, E]: top-k renormalized probabilities, zeros elsewhere."""
-        weights, top_i = self.topk_route(residual)
-        zeros = ttnn.zeros([1, 1, residual.shape[2], self.n_experts], dtype=weights.dtype, layout=ttnn.TILE_LAYOUT, device=self.mesh)
+        weights, top_i = self.topk_route(normed)
+        zeros = ttnn.zeros([1, 1, normed.shape[2], self.n_experts], dtype=weights.dtype, layout=ttnn.TILE_LAYOUT, device=self.mesh)
         dense = ttnn.scatter(zeros, dim=-1, index=top_i, src=weights)
         for t in (weights, top_i, zeros):
             t.deallocate(True)
@@ -192,10 +203,9 @@ class FeedForward:
         gate = ttnn.slice(gu, [0, 0, 0, 0], [1, slots, tokens, n])
         up = ttnn.slice(gu, [0, 0, 0, n], [1, slots, tokens, 2 * n])
         gu.deallocate(True)
-        act = ttnn.gelu(gate, fast_and_approximate_mode=True)
-        h = ttnn.mul(act, up)
-        for t in (gate, up, act):
-            t.deallocate(True)
+        h = ttnn.mul(gate, up, input_tensor_a_activations=[GELU_TANH])
+        gate.deallocate(True)
+        up.deallocate(True)
         down = ttnn.sparse_matmul(
             h,
             self.exp_down,
@@ -228,10 +238,9 @@ class FeedForward:
         gate = ttnn.slice(gu, [0, 0, 0, 0], [1, 1, t, n])
         up = ttnn.slice(gu, [0, 0, 0, n], [1, 1, t, 2 * n])
         gu.deallocate(True)
-        act = ttnn.gelu(gate, fast_and_approximate_mode=True)
-        h = ttnn.mul(act, up)
-        for x_ in (gate, up, act):
-            x_.deallocate(True)
+        h = ttnn.mul(gate, up, input_tensor_a_activations=[GELU_TANH])
+        gate.deallocate(True)
+        up.deallocate(True)
         out = ttnn.linear(h, self.mlp_down, compute_kernel_config=HIFI2, memory_config=DRAM)
         h.deallocate(True)
         return out
@@ -257,10 +266,9 @@ class FeedForward:
         gate = ttnn.slice(gu, [0, 0, 0, 0], [groups, E, m, n])
         up = ttnn.slice(gu, [0, 0, 0, n], [groups, E, m, 2 * n])
         gu.deallocate(True)
-        act = ttnn.gelu(gate, fast_and_approximate_mode=True)
-        h = ttnn.mul(act, up)
-        for t in (gate, up, act):
-            t.deallocate(True)
+        h = ttnn.mul(gate, up, input_tensor_a_activations=[GELU_TANH])
+        gate.deallocate(True)
+        up.deallocate(True)
         sparsity2 = ttnn.reshape(sparsity, (1, 1, groups, E))
         down = ttnn.sparse_matmul(
             h,
@@ -301,21 +309,23 @@ class FeedForward:
     def __call__(self, residual: ttnn.Tensor, chunk_tokens: int = 128) -> ttnn.Tensor:
         """residual [1, 1, T, H] replicated. Returns the block output to add to the residual."""
         t = residual.shape[2]
-        mlp_in = self._rms(residual, self.pre_ff)
+        normed = rms_norm(residual, None, self.eps)
+        mlp_in = ttnn.mul(normed, self.pre_ff)
         mlp = self._mlp(mlp_in)
         mlp_in.deallocate(True)
 
-        exp_in = self._rms(residual, self.pre_ff2)
+        exp_in = ttnn.mul(normed, self.pre_ff2)
         if t <= TILE:
-            weights, ids = self.topk_route(residual)
+            weights, ids = self.topk_route(normed)
             experts = self._experts_decode(exp_in, weights, ids)
             weights.deallocate(True)
             ids.deallocate(True)
         else:
-            routing = self.route(residual)
+            routing = self.route(normed)
             experts = self._experts(exp_in, routing, chunk_tokens)
             routing.deallocate(True)
         exp_in.deallocate(True)
+        normed.deallocate(True)
         if experts.shape[2] != t:
             experts = ttnn.slice(experts, [0, 0, 0, 0], [1, 1, t, self.hidden])
 

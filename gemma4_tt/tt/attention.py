@@ -56,16 +56,23 @@ def ring_selection(seq_len: int, padded_len: int, window: int) -> tuple[int, tor
     return tail_start, sel[None, None]
 
 
+_ROTATE = {}
+
+
 def rotate_half(x: ttnn.Tensor) -> ttnn.Tensor:
-    half = x.shape[-1] // 2
-    shape = list(x.shape)
-    x1 = ttnn.slice(x, [0, 0, 0, 0], shape[:-1] + [half])
-    x2 = ttnn.slice(x, [0, 0, 0, half], shape)
-    neg = ttnn.neg(x2)
-    out = ttnn.concat([neg, x1], dim=-1)
-    for t in (x1, x2, neg):
-        t.deallocate(True)
-    return out
+    """cat(-x2, x1) as one matmul with a constant +-1 matrix (exact in BF16 with fp32 accumulation)."""
+    hd = x.shape[-1]
+    key = (hd, id(x.device()))
+    if key not in _ROTATE:
+        half = hd // 2
+        r = torch.zeros(hd, hd)
+        r[torch.arange(half) + half, torch.arange(half)] = -1.0
+        r[torch.arange(half), torch.arange(half) + half] = 1.0
+        mesh = x.device()
+        _ROTATE[key] = ttnn.from_torch(
+            r[None, None], dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)
+        )
+    return ttnn.matmul(x, _ROTATE[key], compute_kernel_config=HIFI4, memory_config=DRAM)
 
 
 def apply_rope(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor) -> ttnn.Tensor:
