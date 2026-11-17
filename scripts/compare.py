@@ -79,6 +79,9 @@ def main():
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--trace", action="store_true")
     ap.add_argument("--offsets", type=int, nargs="+", default=[0])
+    ap.add_argument(
+        "--perturb", type=int, default=0, help="seed of a 2^-9 relative noise on the embeddings (0: none), to sample the noise floor"
+    )
     args = ap.parse_args()
 
     ckpt = Checkpoint()
@@ -99,6 +102,14 @@ def main():
         t0 = time.time()
         model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, num_layers=args.layers)
         print(f"model loaded in {time.time() - t0:.0f}s", flush=True)
+        if args.perturb:
+            plain, gen = model.embed, torch.Generator().manual_seed(args.perturb)
+
+            def embed(t):
+                x = plain(t)
+                return (x.float() * (1 + 2**-9 * torch.randn(x.shape, generator=gen))).to(x.dtype)
+
+            model.embed = embed
         blocks = -(-(total + 64) // model.block_size)
         model.allocate_kv_cache(blocks)
         pt = torch.arange(blocks, dtype=torch.int32)
