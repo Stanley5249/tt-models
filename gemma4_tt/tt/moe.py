@@ -19,7 +19,7 @@ import ttnn
 
 from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, L1, TILE, WeightLoader, all_reduce, compute_config, norm_weight, rms_norm
 from gemma4_tt.tt.boundary import Router
-from gemma4_tt.tt.expert_stream import ExpertStream, MlpStream, pad_down
+from gemma4_tt.tt.expert_stream import ExpertStream, MlpStream, pad_down, run
 
 _STREAMS: dict[tuple, object] = {}
 
@@ -42,7 +42,8 @@ def router_op(mesh, cfg) -> Router:
 def mlp_stream(mesh, cfg, mlp_pad: int) -> MlpStream:
     key = ("mlp", id(mesh))
     if key not in _STREAMS:
-        _STREAMS[key] = MlpStream(mesh, cfg.hidden_size, mlp_pad)
+        # leaves the router's cores free: router and MLP gate|up run as one merged op
+        _STREAMS[key] = MlpStream(mesh, cfg.hidden_size, mlp_pad, exclude=router_op(mesh, cfg).cores)
     return _STREAMS[key]
 
 
@@ -366,12 +367,12 @@ class FeedForward:
         out = boundary.compact(2)
         ms = self.mlp_stream
         h = ms.h_tensor()
-        ms.gate_up(mlp_in, self.mlp_gate_up, h)
-        ms.down(h, self.mlp_down, out, compact_chunk0=0)
-        h.deallocate(True)
         router = router_op(self.mesh, self.cfg)
         ids, weights = router.outputs()
-        router(normed, self.router, ids, weights)
+        # The router is latency-bound and the MLP gate|up DRAM-bound: one merged op on disjoint cores.
+        run([router(normed, self.router, ids, weights, build=True), ms.gate_up(mlp_in, self.mlp_gate_up, h, build=True)])
+        ms.down(h, self.mlp_down, out, compact_chunk0=0)
+        h.deallocate(True)
         st = self.stream
         act = st.act_tensor()
         st.gate_up(exp_in, ids, weights, self.scale_row, self.exp_gate_up, act)

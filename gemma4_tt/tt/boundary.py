@@ -294,8 +294,9 @@ class Router:
 
         return row(ttnn.uint16), row(ttnn.bfloat16)
 
-    def __call__(self, x, w, ids, wts):
-        """x: normed row form BF16 [1, 1, 1, H]; w: the [H, E] BF16 router weight (tile layout)."""
+    def __call__(self, x, w, ids, wts, build=False):
+        """x: normed row form BF16 [1, 1, 1, H]; w: the [H, E] BF16 router weight (tile layout).
+        build: return (program, tensors) to run merged with another op (expert_stream.run)."""
         crs = _crs(self.cores)
         cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, cb_out = 0, 1, 2, 3, 4, 5, 6
         f32, bf16 = ttnn.float32, ttnn.bfloat16
@@ -335,4 +336,5 @@ class Router:
             ),
         ]
         sems = [ttnn.SemaphoreDescriptor(id=sem_id, core_ranges=crs, initial_value=0)]
-        return ttnn.generic_op([x, w, ids, wts], ttnn.ProgramDescriptor(kernels=kernels, semaphores=sems, cbs=cbs))
+        program = ttnn.ProgramDescriptor(kernels=kernels, semaphores=sems, cbs=cbs)
+        return (program, [x, w, ids, wts]) if build else ttnn.generic_op([x, w, ids, wts], program)

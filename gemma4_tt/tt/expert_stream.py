@@ -39,11 +39,11 @@ BFP8_TILE = 1088
 BF16_TILE = 2048
 
 
-def _bank_cores(mesh, banks, per_bank):
+def _bank_cores(mesh, banks, per_bank, exclude=()):
     """per_bank logical cores per DRAM bank, nearest (Manhattan) to the bank's optimal NOC0 reader."""
     opt = mesh.get_optimal_dram_bank_to_logical_worker_assignment(ttnn.NOC.NOC_0, ttnn.MeshCoordinate(0, 0))
     grid = mesh.compute_with_storage_grid_size()
-    free = {(x, y) for x in range(grid.x) for y in range(grid.y)}
+    free = {(x, y) for x in range(grid.x) for y in range(grid.y)} - {(c.x, c.y) for c in exclude}
     out = {b: [] for b in banks}
     for r in range(per_bank):  # one core per bank per round, so no bank takes all the near cores
         for b in banks:
@@ -118,7 +118,22 @@ def _const_row(mesh, values, dtype):
     )
 
 
-def gate_up_op(assign, cores, x, ids, weights, scale, w, act, *, kx, slots_per_core, pairs, n_scale, split=None, fidelity=ttnn.MathFidelity.LoFi):
+def run(parts):
+    """Run (program, io tensors) parts built on disjoint cores as one merged generic op."""
+    if len(parts) == 1:
+        return ttnn.generic_op(parts[0][1], parts[0][0])
+    tensors, seen = [], set()
+    for _, ios in parts:
+        for t in ios:
+            if id(t) not in seen:
+                seen.add(id(t))
+                tensors.append(t)
+    return ttnn.generic_op(tensors, ttnn.merge_program_descriptors([p for p, _ in parts]))
+
+
+def gate_up_op(
+    assign, cores, x, ids, weights, scale, w, act, *, kx, slots_per_core, pairs, n_scale, split=None, fidelity=ttnn.MathFidelity.LoFi, build=False
+):
     """act[slot, pair] = gelu_tanh(x Wg) * (x Wu) * weights[slot] * scale[ids[slot]] (kernels/expert_gate_up_*).
 
     assign: (core, bank, r, vc, slot0, pair_j, act_pair) per core. act tile = slot * pairs + act_pair.
@@ -159,7 +174,8 @@ def gate_up_op(assign, cores, x, ids, weights, scale, w, act, *, kx, slots_per_c
     program = ttnn.ProgramDescriptor(
         kernels=_kernels(cores, "gate_up", (reader_ct, reader_rt), (writer_ct, writer_rt), compute_ct, fidelity), semaphores=[], cbs=cbs
     )
-    return ttnn.generic_op([w, x, ids, weights, scale, act], program)
+    ios = [w, x, ids, weights, scale, act]
+    return (program, ios) if build else ttnn.generic_op(ios, program)
 
 
 def down_op(assign, cores, act, ids, w, out, *, slots, kt, cols, banks, bank_cols, n_tiles, compact_chunk0=None, fidelity=ttnn.MathFidelity.LoFi):
@@ -251,7 +267,8 @@ class ExpertStream:
 class MlpStream:
     """The shared dense MLP of one layer for one decode token, through the expert stream kernels."""
 
-    def __init__(self, mesh, hidden: int, mlp_pad: int, down_readers=2, down_slots=4, fidelity=ttnn.MathFidelity.HiFi2):
+    def __init__(self, mesh, hidden: int, mlp_pad: int, down_readers=2, down_slots=4, fidelity=ttnn.MathFidelity.HiFi2, exclude=()):
+        """exclude: cores left free for an op that runs merged with gate_up (the router)."""
         self.mesh = mesh
         self.fidelity = fidelity  # BFP8 weights; the ttnn MLP used HiFi2 (LoFi: PCC 0.99985 vs it)
         self.banks = banks = mesh.dram_grid_size().x
@@ -262,7 +279,7 @@ class MlpStream:
         self.per_bank = half // banks  # 3 pairs per bank
         self.row_tiles = 2 * self.per_bank  # 6 tiles per bank per K row
         self.h_tiles = half
-        gu, self.gu_cores = _bank_cores(mesh, list(range(banks)), self.per_bank)
+        gu, self.gu_cores = _bank_cores(mesh, list(range(banks)), self.per_bank, exclude=exclude)
         # pair j of bank b: gate column b + 12 j -> h tile b + 12 j
         self.gu_assign = [(c, b, j, v, 0, j, b + banks * j) for c, b, j, v in gu]
         self.n_tiles = hidden // TILE
@@ -281,11 +298,11 @@ class MlpStream:
             ttnn.Shape([1, 1, 1, self.h_tiles * TILE]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG
         )
 
-    def gate_up(self, x, w_gate_up, h):
+    def gate_up(self, x, w_gate_up, h, build=False):
         """h = gelu_tanh(x Wg) * (x Wu); w_gate_up: the interleaved per-chip [2816, 2 * 1152] BFP8 weight."""
         return gate_up_op(
             self.gu_assign, self.gu_cores, x, self.ids0, self.ones, self.ones, w_gate_up, h,
-            kx=self.kx, slots_per_core=1, pairs=0, n_scale=16, split=(self.row_tiles, self.per_bank), fidelity=self.fidelity,
+            kx=self.kx, slots_per_core=1, pairs=0, n_scale=16, split=(self.row_tiles, self.per_bank), fidelity=self.fidelity, build=build,
         )
 
     def down(self, h, w_down, out, compact_chunk0: int = 0):
