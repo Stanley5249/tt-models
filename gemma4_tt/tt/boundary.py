@@ -92,7 +92,7 @@ def _accessor(t):
 class Boundary:
     """Compact pack and the two tail ops of one mesh (core placement shared by the layers)."""
 
-    def __init__(self, mesh, hidden: int, eps: float, tail_cores: int = 11):
+    def __init__(self, mesh, hidden: int, eps: float, tail_cores: int = 6):
         self.mesh = mesh
         self.hidden = hidden
         self.chunks = hidden // CHUNK  # 176

@@ -32,23 +32,25 @@ void kernel_main() {
     }
     cb_push_back(cb_j, 1);
 
-    cb_reserve_back(cb_w, w_tiles);
-    uint32_t l1 = get_write_ptr(cb_w);
-    for (uint32_t t = 0; t < w_tiles; ++t) {
-        noc_async_read_page(t, s_w, l1 + t * COMPACT_TILE);
+    // The partials and the residual first: compute starts on them while the weights arrive.
+    cb_reserve_back(cb_g, g_tiles);
+    uint32_t l1 = get_write_ptr(cb_g);
+    for (uint32_t t = 0; t < g_tiles; ++t) {
+        noc_async_read_page(t, s_g, l1 + t * COMPACT_TILE);
     }
     cb_reserve_back(cb_x, x_tiles);
     l1 = get_write_ptr(cb_x);
     for (uint32_t t = 0; t < x_tiles; ++t) {
         noc_async_read_page(t, s_x, l1 + t * COMPACT_TILE);
     }
-    cb_reserve_back(cb_g, g_tiles);
-    l1 = get_write_ptr(cb_g);
-    for (uint32_t t = 0; t < g_tiles; ++t) {
-        noc_async_read_page(t, s_g, l1 + t * COMPACT_TILE);
+    noc_async_read_barrier();
+    cb_push_back(cb_g, g_tiles);
+    cb_push_back(cb_x, x_tiles);
+    cb_reserve_back(cb_w, w_tiles);
+    l1 = get_write_ptr(cb_w);
+    for (uint32_t t = 0; t < w_tiles; ++t) {
+        noc_async_read_page(t, s_w, l1 + t * COMPACT_TILE);
     }
     noc_async_read_barrier();
     cb_push_back(cb_w, w_tiles);
-    cb_push_back(cb_x, x_tiles);
-    cb_push_back(cb_g, g_tiles);
 }

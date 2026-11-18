@@ -137,14 +137,14 @@ void kernel_main() {
     compute_kernel_hw_startup(cb_g, cb_x, cb_xo);
     constexpr uint32_t t_a = cb_t0, t_b = cb_t0 + 1, t_c = cb_t0 + 2, t_d = cb_t0 + 3;
     cb_wait_front(cb_j, 1);
-    cb_wait_front(cb_w, w_tiles);
-    cb_wait_front(cb_x, V);
     cb_wait_front(cb_g, 2 * g_half);
+    cb_wait_front(cb_x, V);
 #if defined(ATTN_TAIL)
     // weights: [post_attn | pre_ff | pre_ff2], V tiles each
     add_vec(cb_g, 0, cb_g, g_half);
     emit(t_a);  // a
     cb_wait_front(t_a, V);
+    cb_wait_front(cb_w, w_tiles);
     norm_vec(t_a, 0, cb_w, 0);
     emit(t_b);  // rms(a) * w_post_attn
     cb_pop_front(t_a, V);
@@ -169,6 +169,7 @@ void kernel_main() {
     add_vec(cb_g, V, cb_g, g_half + V);
     emit(t_b);  // e
     cb_wait_front(t_a, V);
+    cb_wait_front(cb_w, w_tiles);
     norm_vec(t_a, 0, cb_w, 0);
     emit(t_c);  // rms(m) * w1
     cb_pop_front(t_a, V);

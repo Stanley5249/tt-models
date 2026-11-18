@@ -33,13 +33,18 @@ def report(name, got, ref):
 
 
 def main():
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tail-cores", type=int, default=11)
+    args = ap.parse_args()
     v = torch.randn(2, H)
     assert torch.equal(from_compact(to_compact(v), 2, H), v), "host compact round trip"
     print("host round trip ok")
     torch.manual_seed(0)
     with open_n300(trace_region_size=50_000_000) as mesh:
         init_ccl(mesh)
-        b = Boundary(mesh, H, EPS)
+        b = Boundary(mesh, H, EPS, tail_cores=args.tail_cores)
         shard0 = ttnn.ShardTensorToMesh(mesh, dim=0)
 
         def dev(t, dtype=ttnn.float32, mapper=None, mem=ttnn.L1_MEMORY_CONFIG):
