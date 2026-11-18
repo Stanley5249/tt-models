@@ -29,7 +29,7 @@ void kernel_main() {
     cb_reserve_back(cb_j, 1);
     volatile tt_l1_ptr uint32_t* j = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(get_write_ptr(cb_j));
     for (uint32_t i = 0; i < COMPACT_TILE / 4; ++i) {
-        j[i] = 0x3F800000;  // 1.0f
+        j[i] = (i % 256) < 16 ? 0x3F800000 : 0;  // reduce scaler: 1.0f in the first row of every face
     }
     cb_push_back(cb_j, 1);
 

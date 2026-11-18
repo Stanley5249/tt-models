@@ -1,8 +1,8 @@
 // Layer-boundary math (TRISC) on compact FP32 vectors of V tiles (gemma4_tt/tt/boundary.py).
 //
-// RMS statistics use two matmuls against an all-ones tile J: (A*A) @ J puts every row sum in its row,
-// J @ that puts the total in every element, so 1 / sqrt(mean + eps) multiplies elementwise without a
-// broadcast. Padding chunks are zero in every input and weight, so they add nothing.
+// RMS statistics: an FPU scalar reduce of A*A puts the total at [0, 0] (cb_j holds the reduce scaler),
+// and a broadcast-scalar multiply applies 1 / sqrt(mean + eps). Padding chunks are zero in every input
+// and weight, so they add nothing.
 //
 // ATTN_TAIL: a = g0 + g1; x2 = x + rms(a) * w_post_attn; n = rms(x2);
 //            outputs x2 (FP32), n, n * w_pre_ff, n * w_pre_ff2 (BF16)
@@ -17,8 +17,10 @@
 #include "api/compute/eltwise_unary/eltwise_unary.h"
 #include "api/compute/eltwise_unary/rsqrt.h"
 #include "api/compute/matmul.h"
+#include "api/compute/bcast.h"
 #include "api/compute/pack.h"
 #include "api/compute/reconfig_data_format.h"
+#include "api/compute/reduce.h"
 
 constexpr uint32_t cb_g = get_compile_time_arg_val(0);
 constexpr uint32_t cb_x = get_compile_time_arg_val(1);
@@ -77,29 +79,16 @@ ALWI void mul_vec(uint32_t cba, uint32_t a, uint32_t cbb, uint32_t b) {
     }
 }
 
-// cb_r <- one tile holding 1 / sqrt(mean(A^2) + eps) in every element.
+// cb_r <- a tile whose [0, 0] holds 1 / sqrt(mean(A^2) + eps).
 ALWI void rms_scale(uint32_t cba, uint32_t a) {
     mul_vec(cba, a, cba, a);
     emit(cb_sq);
     cb_wait_front(cb_sq, V);
-    matmul_init(cb_sq, cb_j);
+    reduce_init<PoolType::SUM, ReduceDim::REDUCE_SCALAR>(cb_sq, cb_j, cb_r);
     tile_regs_acquire();
     for (uint32_t t = 0; t < V; ++t) {
-        matmul_tiles(cb_sq, cb_j, t, 0, 0);  // row sums, accumulated over the V tiles
+        reduce_tile<PoolType::SUM, ReduceDim::REDUCE_SCALAR>(cb_sq, cb_j, t, 0, 0);
     }
-    tile_regs_commit();
-    tile_regs_wait();
-    pack_reconfig_data_format(cb_rs);
-    cb_reserve_back(cb_rs, 1);
-    pack_tile(0, cb_rs);
-    cb_push_back(cb_rs, 1);
-    tile_regs_release();
-    cb_pop_front(cb_sq, V);
-
-    cb_wait_front(cb_rs, 1);
-    matmul_init(cb_j, cb_rs);
-    tile_regs_acquire();
-    matmul_tiles(cb_j, cb_rs, 0, 0, 0);  // total in every element
     binop_with_scalar_tile_init();
     mul_unary_tile(0, inv_h);
     add_unary_tile(0, eps);
@@ -112,17 +101,18 @@ ALWI void rms_scale(uint32_t cba, uint32_t a) {
     pack_tile(0, cb_r);
     cb_push_back(cb_r, 1);
     tile_regs_release();
-    cb_pop_front(cb_rs, 1);
+    reduce_uninit();
+    cb_pop_front(cb_sq, V);
 }
 
 // dest[t] = A[a + t] * r (* W[w + t] when w_cb is a CB). Pops cb_r.
 ALWI void norm_vec(uint32_t cba, uint32_t a, uint32_t w_cb, uint32_t w) {
     rms_scale(cba, a);
     cb_wait_front(cb_r, 1);
-    mul_init(cba, cb_r, false);
+    mul_bcast_scalar_init(cba, cb_r);
     tile_regs_acquire();
     for (uint32_t t = 0; t < V; ++t) {
-        mul_tiles(cba, cb_r, a + t, 0, t);
+        mul_tiles_bcast_scalar(cba, cb_r, a + t, 0, t);
     }
     if (w_cb != 0xFFFF) {
         mul_reuse_dest_init<EltwiseBinaryReuseDestType::DEST_TO_SRCA>(w_cb);
