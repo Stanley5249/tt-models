@@ -114,14 +114,14 @@ class DecoderLayer:
         h.deallocate(True)
         return self._finish(x, a)
 
-    def decode_b1(self, xc, h, rope, kv_cache, page_table, cur_pos, b: Boundary):
+    def decode_b1(self, xc, h, rope, kv_cache, page_table, cur_pos, b: Boundary, x_page0: int = 0):
         """One decode token on compact boundaries: xc compact FP32 residual, h its normed row form.
         Returns the next (xc, h); h of the last layer is final-normed."""
         a = self.attn.decode_b1(h, rope, kv_cache, page_table, cur_pos, b)
         g = all_gather_compact(a)
         a.deallocate(True)
         x2, n, m_in, e_in = b.compact(), b.row(), b.row(), b.row()
-        b.attn_tail(g, xc, self.w_attn_c, x2, n, m_in, e_in)
+        b.attn_tail(g, xc, self.w_attn_c, x2, n, m_in, e_in, x_page0=x_page0)
         g.deallocate(True)
         f = self.ff.decode_b1(n, m_in, e_in, b)
         for t in (n, m_in, e_in):
@@ -173,6 +173,11 @@ class Gemma4TT:
         self.lm_head = self._lm_head(loader, ckpt, precision.lm_head)
         self.lm_in = width_sharded_l1(self.hidden, LM_CORES)
         self.boundary = Boundary(mesh, self.hidden, cfg.rms_norm_eps)
+        # compact tiles of each layer type's [cos | sin] table in the batch-1 FP32 input
+        self._cs_tiles = {
+            kind: 2 * next(layer.attn.qk_rope.V for layer in self.layers if layer.sliding == (kind == "sliding_attention"))
+            for kind in ("sliding_attention", "full_attention")
+        }
         final_raw = ckpt.get("norm.weight").float()
         for i, layer in enumerate(self.layers):
             nxt = self.layers[i + 1]._raw["input_layernorm"] if i + 1 < len(self.layers) else final_raw
@@ -183,6 +188,7 @@ class Gemma4TT:
         self.rope = self._rope_tables(max_seq_len)
         self.kv_caches = None
         self.traces = {}
+        self._pt_last, self._pt_src = {}, {}
         init_ccl(mesh)
 
     # -- host-side tables ----------------------------------------------------
@@ -335,13 +341,24 @@ class Gemma4TT:
         later calls only copy the inputs and replay it. Returns float logits [B, V].
         """
         rows = tokens.shape[0]
-        active = torch.nonzero(positions >= 0).flatten()
+        active, logits = self.decode_active(tokens, positions, page_table, trace)
         if len(active) == rows:
-            return self._decode_rows(tokens, positions, page_table, torch.arange(rows), trace)
-        logits = torch.zeros(rows, self.vocab)
-        if len(active):
-            logits[active] = self._decode_rows(tokens[active], positions[active], page_table[active], active, trace)
-        return logits
+            return logits
+        out = torch.zeros(rows, self.vocab)
+        out[active] = logits
+        return out
+
+    def decode_active(self, tokens, positions, page_table, trace: bool = False):
+        """decode() without the inactive rows: (active row indices, float logits [A, V]).
+
+        Building the zero-filled [B, V] result of decode() costs ~1 ms per step; the vLLM
+        adapter samples only the active rows."""
+        active = torch.nonzero(positions >= 0).flatten()
+        if len(active) == tokens.shape[0]:
+            return active, self._decode_rows(tokens, positions, page_table, active, trace)
+        if not len(active):
+            return active, torch.zeros(0, self.vocab)
+        return active, self._decode_rows(tokens[active], positions[active], page_table[active], active, trace)
 
     def _decode_rows(self, tokens, positions, page_table, slots, trace) -> torch.Tensor:
         """Decode rows that are all active; row i belongs to batch slot slots[i]."""
@@ -365,7 +382,15 @@ class Gemma4TT:
             ttnn.end_trace_capture(self.mesh, tid, cq_id=0)
             self.traces[key] = (tid, dev, out)
         tid, dev, out = self.traces[key]
+        # Page tables change only when a sequence gets a new block or a slot is remapped;
+        # every copy costs 0.02-0.2 ms of host time, so unchanged ones are skipped.
+        last = self._pt_last.setdefault(key, {})
         for k, v in host.items():
+            src = self._pt_src.get(k)
+            if src is not None:
+                if k in last and torch.equal(last[k], src):
+                    continue
+                last[k] = src.clone()
             ttnn.copy_host_to_device_tensor(v, dev[k])
         ttnn.execute_trace(self.mesh, tid, cq_id=0, blocking=False)
         return self._read_logits(out)
@@ -399,10 +424,8 @@ class Gemma4TT:
             # compact FP32 residual and layer 0's normed input (host RMSNorm in FP32)
             xf = emb.float()
             h0 = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.cfg.rms_norm_eps) * self.input_ln0
-            first = {
-                "xc": self._host(to_compact(xf)[None, None], ttnn.float32),
-                "h0": self._host(h0.reshape(1, 1, 1, self.hidden)),
-            }
+            first = {"h0": self._host(h0.reshape(1, 1, 1, self.hidden))}
+            f32 = [to_compact(xf)[None, None]]  # one FP32 input [xc | sliding cs | full cs]: fewer host copies
         else:
             first = {"x": self._host(emb.reshape(1, 1, batch, self.hidden))}
         inputs = {
@@ -411,6 +434,7 @@ class Gemma4TT:
             "global_pt": self._host(pt, ttnn.int32, rm),
             "ring_pt": self._host(self.slot_blocks[slots].contiguous(), ttnn.int32, rm),
         }
+        self._pt_src = {"global_pt": pt, "ring_pt": self.slot_blocks[slots]}
         pos = positions.clamp(min=0).long()
         for kind, (cos, sin) in self.rope.items():
             attn = next(layer.attn for layer in self.layers if layer.sliding == (kind == "sliding_attention"))
@@ -420,23 +444,26 @@ class Gemma4TT:
                 rows = torch.full((batch, attn.heads, attn.shape.head_dim), fill, dtype=table.dtype)
                 rows[:, :roped] = table[pos][:, None, :]
                 tables[name] = rows
-            if batch == 1:  # one compact [cos | signed sin] input for the fused q/k norm + RoPE
-                cs = attn.qk_rope.host_tables(tables["cos"].flatten(), tables["sin"].flatten())
-                inputs[f"{kind}.cs"] = self._host(cs, ttnn.float32)
+            if batch == 1:  # compact [cos | signed sin] tables for the fused q/k norm + RoPE
+                f32.append(attn.qk_rope.host_tables(tables["cos"].flatten(), tables["sin"].flatten()))
             else:
                 for name, rows in tables.items():
                     inputs[f"{kind}.{name}"] = self._host(rows.reshape(1, 1, batch * attn.heads, -1), ttnn.float32)
+        if batch == 1:
+            inputs["in32"] = self._host(torch.cat(f32, dim=-1), ttnn.float32)
         return inputs
 
     def _decode_device(self, dev: dict[str, ttnn.Tensor]) -> ttnn.Tensor:
         """Device decode graph. Never frees its inputs, so it can be traced."""
-        if "xc" in dev:  # batch 1: compact boundaries
-            xc, h = dev["xc"], dev["h0"]
+        if "in32" in dev:  # batch 1: compact boundaries
+            V = self.boundary.V
+            pages = {"sliding_attention": V, "full_attention": V + self._cs_tiles["sliding_attention"]}
+            xc, h = dev["in32"], dev["h0"]
             for i, (layer, cache) in enumerate(zip(self.layers, self.kv_caches)):
                 kind = "sliding_attention" if layer.sliding else "full_attention"
-                rope = dev[f"{kind}.cs"]
+                rope = ("compact", dev["in32"], pages[kind])
                 pt = dev["ring_pt"] if layer.sliding else dev["global_pt"]
-                xn, hn = layer.decode_b1(xc, h, rope, cache, pt, dev["cur_pos"], self.boundary)
+                xn, hn = layer.decode_b1(xc, h, rope, cache, pt, dev["cur_pos"], self.boundary, x_page0=0)
                 if i:  # never free the step inputs
                     xc.deallocate(True)
                     h.deallocate(True)
@@ -512,3 +539,4 @@ class Gemma4TT:
         for tid, dev, out in self.traces.values():
             ttnn.release_trace(self.mesh, tid)
         self.traces = {}
+        self._pt_last = {}

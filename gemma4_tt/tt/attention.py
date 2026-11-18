@@ -273,9 +273,9 @@ class Attention:
         # large and sensitive to q/k rounding: norm, weight and RoPE run in fp32 and
         # round to BF16 once, before the head split (BF16 here raised decode KL by 30%).
         xqkv = ttnn.linear(x, self.wqkv, compute_kernel_config=HIFI2, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.float32)
-        if not isinstance(rope, tuple):  # batch 1: rope is the step's compact [cos | sin] (boundary.QkRope)
+        if len(rope) == 3:  # batch 1: ("compact", tensor, first tile) of the step's [cos | sin] (boundary.QkRope)
             roped = ttnn.allocate_tensor_on_device(ttnn.Shape([1, 1, 1, width]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG)
-            self.qk_rope(xqkv, rope, self.rope_w, roped)
+            self.qk_rope(xqkv, rope[1], self.rope_w, roped, cs_page0=rope[2])
             xqkv.deallocate(True)
             fused = roped
         else:

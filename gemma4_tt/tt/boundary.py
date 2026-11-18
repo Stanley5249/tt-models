@@ -139,7 +139,7 @@ class Boundary:
         program = ttnn.ProgramDescriptor(kernels=[kernel], semaphores=[], cbs=[_cb(crs, cb_scr, ttnn.float32, scr_bytes, 1)])
         return ttnn.generic_op([src, dst], program)
 
-    def _tail(self, kind: str, g, x, w, x_out, rows: list, w_vectors: int, scalar: float = 1.0):
+    def _tail(self, kind: str, g, x, w, x_out, rows: list, w_vectors: int, scalar: float = 1.0, x_page0: int = 0):
         V = self.V
         cores = self.tail_cores
         crs = _crs(cores)
@@ -161,7 +161,7 @@ class Boundary:
         reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
         for i, c in enumerate(cores):
             c0, c1 = self.tail_ranges[i]
-            reader_rt[c.x][c.y] = [g.buffer_address(), x.buffer_address(), w.buffer_address()]
+            reader_rt[c.x][c.y] = [g.buffer_address(), x.buffer_address(), w.buffer_address(), x_page0]
             writer_rt[c.x][c.y] = [x_out.buffer_address(), 1 if i == 0 else 0, c0, c1] + [r.buffer_address() for r in rows]
         reader_ct = [cb_g, cb_x, cb_w, cb_j, g_tiles, V, w_vectors * V] + _accessor(g) + _accessor(x) + _accessor(w)
         writer_ct = [cb_xo, cb_row0, V, len(rows)] + _accessor(x_out) + _accessor(rows[0])
@@ -195,11 +195,11 @@ class Boundary:
         program = ttnn.ProgramDescriptor(kernels=kernels, semaphores=[], cbs=cbs)
         return ttnn.generic_op([g, x, w, *rows, x_out], program)
 
-    def attn_tail(self, g, x, w, x_out, n, mlp_in, exp_in):
+    def attn_tail(self, g, x, w, x_out, n, mlp_in, exp_in, x_page0: int = 0):
         """g: all-gathered compact attention partials [1, 2, 32, V*32]; x: compact residual; w: compact
         [post_attention | pre_feedforward | pre_feedforward_2] weights. Writes x_out = x + rms(sum g) *
         w_post_attn (compact) and n = rms(x_out), n * w_pre_ff, n * w_pre_ff2 (row form BF16)."""
-        return self._tail("ATTN_TAIL", g, x, w, x_out, [n, mlp_in, exp_in], 3)
+        return self._tail("ATTN_TAIL", g, x, w, x_out, [n, mlp_in, exp_in], 3, x_page0=x_page0)
 
     def ff_tail(self, g, x, w, x_out, h, scalar: float):
         """g: all-gathered compact [mlp | experts] partials [1, 2, 32, 2*V*32]; w: compact [post_ff1 |
@@ -238,7 +238,7 @@ class QkRope:
         """Per-step [cos | sin * rotate_half sign] for one token, as host compact FP32 [1, 1, 32, 2 V 32]."""
         return to_compact(torch.stack([cos_row, sin_row * self.sign]))[None, None]
 
-    def __call__(self, x, cs, w, out):
+    def __call__(self, x, cs, w, out, cs_page0: int = 0):
         """x: FP32 row-form QKV matmul output [1, 1, 1, W]; out: BF16 row form [1, 1, 1, W]."""
         crs = _crs(self.cores)
         cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, cb_sq, cb_s1, cb_r, cb_out = 0, 1, 2, 3, 4, 5, 6, 7, 8, 16
@@ -247,7 +247,7 @@ class QkRope:
         cbs.append(_cb(crs, cb_out, ttnn.bfloat16, 2048, 1))
         reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
         for t, c in enumerate(self.cores):
-            reader_rt[c.x][c.y] = [x.buffer_address(), cs.buffer_address(), w.buffer_address(), t]
+            reader_rt[c.x][c.y] = [x.buffer_address(), cs.buffer_address(), w.buffer_address(), t, cs_page0]
             writer_rt[c.x][c.y] = [out.buffer_address(), t]
         head_chunks = self.head_dim // CHUNK
         reader_ct = [cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, head_chunks, self.V] + _accessor(x) + _accessor(cs) + _accessor(w)

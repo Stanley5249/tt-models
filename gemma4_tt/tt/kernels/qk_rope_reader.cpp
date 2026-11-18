@@ -5,7 +5,7 @@
 // table). Reads the step's [cos | sin * sign] and the layer's [w | w permuted] compact tiles, and builds
 // the two block-ones tiles of the per-head sums.
 //
-// runtime args: [x_addr, cs_addr, w_addr, tile]
+// runtime args: [x_addr, cs_addr, w_addr, tile, cs_page0] (cs_page0: the tables' first tile in a combined input)
 
 #include "compact.hpp"
 
@@ -14,6 +14,7 @@ void kernel_main() {
     const uint32_t cs_addr = get_arg_val<uint32_t>(1);
     const uint32_t w_addr = get_arg_val<uint32_t>(2);
     const uint32_t tile = get_arg_val<uint32_t>(3);
+    const uint32_t cs_page0 = get_arg_val<uint32_t>(4);
 
     constexpr uint32_t cb_x = get_compile_time_arg_val(0);
     constexpr uint32_t cb_xr = get_compile_time_arg_val(1);
@@ -44,8 +45,8 @@ void kernel_main() {
     }
     cb_reserve_back(cb_cs, 2);
     const uint32_t lcs = get_write_ptr(cb_cs);
-    noc_async_read_page(tile, s_cs, lcs);
-    noc_async_read_page(vec_tiles + tile, s_cs, lcs + COMPACT_TILE);
+    noc_async_read_page(cs_page0 + tile, s_cs, lcs);
+    noc_async_read_page(cs_page0 + vec_tiles + tile, s_cs, lcs + COMPACT_TILE);
     cb_reserve_back(cb_w, 2);
     const uint32_t lw = get_write_ptr(cb_w);
     noc_async_read_page(tile, s_w, lw);

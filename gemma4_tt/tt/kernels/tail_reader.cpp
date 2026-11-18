@@ -1,7 +1,7 @@
 // Layer-boundary input reader (NCRISC): the all-gathered compact partial sums (both chips), the compact
 // residual and the compact weights, whole FP32 tiles, plus an all-ones FP32 tile for the matmul sums.
 //
-// runtime args: [g_addr, x_addr, w_addr]
+// runtime args: [g_addr, x_addr, w_addr, x_page0] (x_page0: the residual's first tile in a combined input)
 
 #include "compact.hpp"
 
@@ -9,6 +9,7 @@ void kernel_main() {
     const uint32_t g_addr = get_arg_val<uint32_t>(0);
     const uint32_t x_addr = get_arg_val<uint32_t>(1);
     const uint32_t w_addr = get_arg_val<uint32_t>(2);
+    const uint32_t x_page0 = get_arg_val<uint32_t>(3);
 
     constexpr uint32_t cb_g = get_compile_time_arg_val(0);
     constexpr uint32_t cb_x = get_compile_time_arg_val(1);
@@ -41,7 +42,7 @@ void kernel_main() {
     cb_reserve_back(cb_x, x_tiles);
     l1 = get_write_ptr(cb_x);
     for (uint32_t t = 0; t < x_tiles; ++t) {
-        noc_async_read_page(t, s_x, l1 + t * COMPACT_TILE);
+        noc_async_read_page(x_page0 + t, s_x, l1 + t * COMPACT_TILE);
     }
     noc_async_read_barrier();
     cb_push_back(cb_g, g_tiles);

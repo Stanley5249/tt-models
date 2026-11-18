@@ -24,8 +24,10 @@ MAX_TOP_K = 1024
 LOGPROBS_K = 32
 
 
-def sample(logits: torch.Tensor, params, positions: torch.Tensor):
+def sample(logits: torch.Tensor, params, positions: torch.Tensor, rows_idx=None):
     """Sample one token per row from float logits [B, V] with vLLM's semantics.
+
+    rows_idx: the batch rows these logits belong to (their sampling params); default 0..B-1.
 
     vLLM's CPU sampler sorts the whole 262k vocabulary whenever top-p is set
     (14 ms per row on one thread, which vLLM's worker uses). Top-k first and
@@ -37,25 +39,28 @@ def sample(logits: torch.Tensor, params, positions: torch.Tensor):
     (top logprobs, token ids) pair of the raw logits for the plugin to pack.
     """
     rows = logits.shape[0]
-    temps = [float(t) for t in params.temperature[:rows]]
-    top_ks = [int(k) if int(k) > 0 else MAX_TOP_K for k in params.top_k[:rows]]
+    idx = list(range(rows)) if rows_idx is None else [int(r) for r in rows_idx]
+    temps = [float(params.temperature[r]) for r in idx]
+    if all(t == 0.0 for t in temps) and (params.enable_log_probs is None or not any(params.enable_log_probs[r] for r in idx)):
+        return logits.argmax(-1, keepdim=True), None  # greedy: no top-k sort
+    top_ks = [int(params.top_k[r]) if int(params.top_k[r]) > 0 else MAX_TOP_K for r in idx]
     k_max = min(max(top_ks + [1]), MAX_TOP_K)
     vals, ids = logits.topk(k_max, dim=-1)  # sorted, largest first
     out = ids[:, :1].clone()
-    for i in range(rows):
+    for i, r in enumerate(idx):
         if temps[i] == 0.0:
             continue
         k = min(top_ks[i], k_max)
         probs = torch.softmax(vals[i, :k] / temps[i], dim=-1)
-        top_p = float(params.top_p[i])
+        top_p = float(params.top_p[r])
         if top_p < 1.0:
             before = torch.cumsum(probs, 0) - probs  # mass of the better candidates
             probs = torch.where(before < top_p, probs, torch.zeros_like(probs))
-        seed = params.seed[i] if params.seed is not None else None
+        seed = params.seed[r] if params.seed is not None else None
         gen = None if seed is None else torch.Generator().manual_seed((int(seed) * 1_000_003 + int(positions[i])) % 2**63)
         out[i, 0] = ids[i, torch.multinomial(probs, 1, generator=gen)]
     log_probs = None
-    if params.enable_log_probs is not None and any(params.enable_log_probs[:rows]):
+    if params.enable_log_probs is not None and any(params.enable_log_probs[r] for r in idx):
         lp, lp_ids = torch.log_softmax(logits, dim=-1).topk(LOGPROBS_K, dim=-1)
         log_probs = (lp, lp_ids)
     return out, log_probs
@@ -141,17 +146,29 @@ class Gemma4ForCausalLM:
         if slot_remap is not None:
             self.model.remap_slots(slot_remap)
         t0 = time.perf_counter()
-        logits = self.model.decode(tokens[:, 0], start_pos, page_table, trace=enable_trace)
+        active, logits = self.model.decode_active(tokens[:, 0], start_pos, page_table, trace=enable_trace)
         if self.timing:
             t1 = time.perf_counter()
             outside = (t0 - self._last_return) * 1e3 if self._last_return else float("nan")
-            active = int((start_pos >= 0).sum())
-            logger.info(f"Gemma4 decode: {active} active, model {(t1 - t0) * 1e3:.1f} ms, outside since last {outside:.1f} ms")
+            n_active = len(active)
+            logger.info(f"Gemma4 decode: {n_active} active, model {(t1 - t0) * 1e3:.1f} ms, outside since last {outside:.1f} ms")
             self._last_return = t1
+        rows = tokens.shape[0]
         if sampling_params is not None:
-            ids, log_probs = sample(logits, sampling_params, start_pos)
+            ids = torch.zeros(rows, 1, dtype=torch.long)
+            log_probs = None
+            if len(active):
+                got, lp = sample(logits, sampling_params, start_pos[active], rows_idx=active)
+                ids[active] = got
+                if lp is not None:
+                    vals = torch.zeros(rows, LOGPROBS_K)
+                    lp_ids = torch.zeros(rows, LOGPROBS_K, dtype=torch.long)
+                    vals[active], lp_ids[active] = lp
+                    log_probs = (vals, lp_ids)
             return ids if log_probs is None else (ids, log_probs)
-        return logits[:, None, :]
+        full = torch.zeros(rows, logits.shape[-1])
+        full[active] = logits
+        return full[:, None, :]
 
     # -- lifecycle -------------------------------------------------------------
 
