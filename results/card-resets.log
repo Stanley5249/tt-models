@@ -2,3 +2,4 @@
 2026-11-18T23:17:39+08:00 tt-smi -r after ttnn.experimental.all_reduce_async hang in scripts/bench_ccl.py (ETH heartbeat timeout on next open)
   (tt-smi printed 'BAR0 mapping failed' on re-init, but the card answered tt-smi -s 15 s later and ran decode)
 2026-11-18T23:29:07+08:00 tt-smi -r after ttnn.all_reduce(num_links=2) hung in scripts/bench_ccl.py
+2026-11-19T00:34:59+08:00 tt-smi -r after killing tests/boundary_check.py, which hung at close after a TT_FATAL (use of a deallocated output in the test)

@@ -138,6 +138,7 @@ class FeedForward:
             return torch.cat(parts, -1)[None]
 
         self.stream = expert_stream(loader.mesh, cfg, self.expert_local)
+        self.pack_cores = [ttnn.CoreCoord(x, 7) for x in range(8)]
         self.down_width = self.stream.down_width
 
         def experts_down():
@@ -326,7 +327,7 @@ class FeedForward:
         t.deallocate(True)
         return out
 
-    def _mlp(self, x):
+    def _mlp(self, x, dtype=None):
         gu = ttnn.linear(x, self.mlp_gate_up, compute_kernel_config=HIFI2, memory_config=DRAM)
         n = self.mlp_pad  # padding columns are zero in gate and up, so h carries zeros there
         t = gu.shape[2]
@@ -336,8 +337,25 @@ class FeedForward:
         h = ttnn.mul(gate, up, input_tensor_a_activations=[GELU_TANH])
         gate.deallocate(True)
         up.deallocate(True)
-        out = ttnn.linear(h, self.mlp_down, compute_kernel_config=HIFI2, memory_config=DRAM)
+        out = ttnn.linear(h, self.mlp_down, compute_kernel_config=HIFI2, memory_config=DRAM, dtype=dtype)
         h.deallocate(True)
+        return out
+
+    def decode_b1(self, normed, mlp_in, exp_in, boundary) -> ttnn.Tensor:
+        """One decode token on compact boundaries (boundary.py). normed, mlp_in, exp_in: row form BF16
+        from the attention tail. Returns this chip's [mlp | experts] partial sums, compact FP32."""
+        out = boundary.compact(2)
+        mlp = self._mlp(mlp_in, dtype=ttnn.float32)
+        boundary.pack(mlp, out, self.pack_cores)
+        mlp.deallocate(True)
+        ids, weights = self._route(normed, 1)
+        st = self.stream
+        act = st.act_tensor()
+        st.gate_up(exp_in, ids, weights, self.scale_row, self.exp_gate_up, act)
+        weights.deallocate(True)
+        st.down(act, ids, self.exp_down, out, compact_chunk0=boundary.V * 64)
+        act.deallocate(True)
+        ids.deallocate(True)
         return out
 
     def _chunk_config(self, rows: int):

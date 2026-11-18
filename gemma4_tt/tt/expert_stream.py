@@ -168,25 +168,35 @@ class ExpertStream:
         )
         return ttnn.generic_op([w_gate_up, x, ids, weights, scale, act], program)
 
-    def down(self, act, ids, w_down, out):
-        """act: gate_up's output; w_down: the interleaved [1, E, 352, 3072] BFP4 weight; out [1, 1, 32, H]."""
-        cb_in0, cb_w, cb_rs, cb_out = 0, 1, 3, 16
+    def down(self, act, ids, w_down, out, compact_chunk0: int | None = None):
+        """act: gate_up's output; w_down: the interleaved [1, E, 352, 3072] BFP4 weight.
+
+        out: a [1, 1, 1, H] BF16 row-form tensor, or with compact_chunk0 a compact FP32 tensor
+        (boundary.py) whose chunks compact_chunk0 .. receive the sum, padding chunks zeroed."""
+        cb_in0, cb_w, cb_rs, cb_zero, cb_out = 0, 1, 3, 4, 16
         cores = self.down_cores
         J = self.down_cols
         kin = self.top_k * self.kt
+        compact = compact_chunk0 is not None
+        out_dtype = ttnn.float32 if compact else ttnn.bfloat16
         cbs = [
             _cb(cores, cb_in0, ttnn.bfloat16, BF16_TILE, kin),
             _cb(cores, cb_w, ttnn.bfloat4_b, BFP4_TILE, 3 * self.kt * J),
             _cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
-            _cb(cores, cb_out, ttnn.bfloat16, BF16_TILE, J),
+            _cb(cores, cb_zero, ttnn.bfloat16, 64, 1),
+            _cb(cores, cb_out, out_dtype, 2 * BF16_TILE if compact else BF16_TILE, J),
         ]
+        chunks = 2 * self.n_tiles
+        pad = -(-chunks // 64) * 64 - chunks
         reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
-        for core, bank, r, vc in self.down_assign:
+        for i, (core, bank, r, vc) in enumerate(self.down_assign):
             j0 = r * J
             reader_rt[core.x][core.y] = [w_down.buffer_address(), ids.buffer_address(), bank, vc, j0]
-            writer_rt[core.x][core.y] = [act.buffer_address(), out.buffer_address(), bank, j0]
+            zero = pad if compact and i == 0 else 0
+            writer_rt[core.x][core.y] = [act.buffer_address(), out.buffer_address(), bank, j0, (compact_chunk0 or 0) + chunks, zero]
         reader_ct = [cb_w, cb_rs, self.top_k, self.kt, J, self.bank_cols, BFP4_TILE] + _accessor(ids)
-        writer_ct = [cb_in0, cb_out, kin, J, self.banks, self.n_tiles] + _accessor(act) + _accessor(out)
+        writer_ct = [cb_in0, cb_out, kin, J, self.banks, self.n_tiles, int(compact), compact_chunk0 or 0, cb_zero]
+        writer_ct += _accessor(act) + _accessor(out)
         compute_ct = [cb_in0, cb_w, cb_out, self.top_k, self.kt, J]
         program = ttnn.ProgramDescriptor(
             kernels=_kernels(cores, "down", (reader_ct, reader_rt), (writer_ct, writer_rt), compute_ct), semaphores=[], cbs=cbs

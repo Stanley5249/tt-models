@@ -15,7 +15,20 @@ from transformers.models.gemma4 import modeling_gemma4 as hf
 from gemma4_tt.checkpoint import Checkpoint
 from gemma4_tt.reference import embed_scale
 from gemma4_tt.tt.attention import Attention, ring_selection
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, dram_sharded, init_ccl, norm_weight, rms_norm, width_sharded_l1
+from gemma4_tt.tt.boundary import Boundary, compact_tensor, to_compact
+from gemma4_tt.tt.common import (
+    DRAM,
+    HIFI2,
+    HIFI4,
+    TILE,
+    WeightLoader,
+    all_gather_compact,
+    dram_sharded,
+    init_ccl,
+    norm_weight,
+    rms_norm,
+    width_sharded_l1,
+)
 
 # The LM head is read as LM_SPLITS DRAM-sharded matmuls per chip: 2.5 -> 1.37 ms per
 # decode step against one interleaved matmul (scripts/bench_lm_head_dram.py).
@@ -63,6 +76,18 @@ class DecoderLayer:
             f"L{idx}.post_attn_ln", lambda: norm_weight(ckpt.get(p + "post_attention_layernorm.weight")), layout=rm
         )
         self.scalar = float(ckpt.get(p + "layer_scalar").float().item())
+        self._raw = {n: ckpt.get(p + n + ".weight").float() for n in (
+            "post_attention_layernorm", "pre_feedforward_layernorm", "pre_feedforward_layernorm_2",
+            "post_feedforward_layernorm_1", "post_feedforward_layernorm_2", "post_feedforward_layernorm", "input_layernorm",
+        )}
+
+    def boundary_weights(self, mesh, next_norm: torch.Tensor):
+        """Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's input norm (or the final norm)."""
+        r = self._raw
+        attn = torch.stack([r["post_attention_layernorm"], r["pre_feedforward_layernorm"], r["pre_feedforward_layernorm_2"]])
+        ff = torch.stack([r["post_feedforward_layernorm_1"], r["post_feedforward_layernorm_2"], r["post_feedforward_layernorm"], next_norm])
+        self.w_attn_c = compact_tensor(mesh, attn)
+        self.w_ff_c = compact_tensor(mesh, ff)
 
     def _rms(self, x, w):
         return rms_norm(x, w, self.eps)
@@ -88,6 +113,26 @@ class DecoderLayer:
         a = self.attn.prefill(h, rope, kv_cache, fill)
         h.deallocate(True)
         return self._finish(x, a)
+
+    def decode_b1(self, xc, h, rope, kv_cache, page_table, cur_pos, b: Boundary):
+        """One decode token on compact boundaries: xc compact FP32 residual, h its normed row form.
+        Returns the next (xc, h); h of the last layer is final-normed."""
+        a = self.attn.decode_b1(h, rope, kv_cache, page_table, cur_pos, b)
+        g = all_gather_compact(a)
+        a.deallocate(True)
+        x2, n, m_in, e_in = b.compact(), b.row(), b.row(), b.row()
+        b.attn_tail(g, xc, self.w_attn_c, x2, n, m_in, e_in)
+        g.deallocate(True)
+        f = self.ff.decode_b1(n, m_in, e_in, b)
+        for t in (n, m_in, e_in):
+            t.deallocate(True)
+        g = all_gather_compact(f)
+        f.deallocate(True)
+        x3, h2 = b.compact(), b.row()
+        b.ff_tail(g, x2, self.w_ff_c, x3, h2, self.scalar)
+        g.deallocate(True)
+        x2.deallocate(True)
+        return x3, h2
 
     def decode(self, x, rope, kv_cache, page_table, cur_pos):
         h = self._rms(x, self.input_ln)
@@ -127,6 +172,12 @@ class Gemma4TT:
         self.final_norm = loader.put("final_norm", lambda: norm_weight(ckpt.get("norm.weight")), layout=ttnn.ROW_MAJOR_LAYOUT)
         self.lm_head = self._lm_head(loader, ckpt, precision.lm_head)
         self.lm_in = width_sharded_l1(self.hidden, LM_CORES)
+        self.boundary = Boundary(mesh, self.hidden, cfg.rms_norm_eps)
+        final_raw = ckpt.get("norm.weight").float()
+        for i, layer in enumerate(self.layers):
+            nxt = self.layers[i + 1]._raw["input_layernorm"] if i + 1 < len(self.layers) else final_raw
+            layer.boundary_weights(mesh, nxt)
+        self.input_ln0 = self.layers[0]._raw["input_layernorm"]
         self.embed_table = ckpt.get("embed_tokens.weight")  # BF16 [V, H] on host
         self.embed_scale = torch.tensor(embed_scale(self.hidden), dtype=torch.bfloat16)
         self.rope = self._rope_tables(max_seq_len)
@@ -343,8 +394,19 @@ class Gemma4TT:
         n = min(width, page_table.shape[1])
         pt[:, :n] = page_table[:, :n].to(torch.int32)
         rm = ttnn.ROW_MAJOR_LAYOUT
+        emb = self.embed(tokens.long())
+        if batch == 1:
+            # compact FP32 residual and layer 0's normed input (host RMSNorm in FP32)
+            xf = emb.float()
+            h0 = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.cfg.rms_norm_eps) * self.input_ln0
+            first = {
+                "xc": self._host(to_compact(xf)[None, None], ttnn.float32),
+                "h0": self._host(h0.reshape(1, 1, 1, self.hidden)),
+            }
+        else:
+            first = {"x": self._host(emb.reshape(1, 1, batch, self.hidden))}
         inputs = {
-            "x": self._host(self.embed(tokens.long()).reshape(1, 1, batch, self.hidden)),
+            **first,
             "cur_pos": self._host(positions.to(torch.int32), ttnn.int32, rm),
             "global_pt": self._host(pt, ttnn.int32, rm),
             "ring_pt": self._host(self.slot_blocks[slots].contiguous(), ttnn.int32, rm),
@@ -361,6 +423,21 @@ class Gemma4TT:
 
     def _decode_device(self, dev: dict[str, ttnn.Tensor]) -> ttnn.Tensor:
         """Device decode graph. Never frees its inputs, so it can be traced."""
+        if "xc" in dev:  # batch 1: compact boundaries
+            xc, h = dev["xc"], dev["h0"]
+            for i, (layer, cache) in enumerate(zip(self.layers, self.kv_caches)):
+                kind = "sliding_attention" if layer.sliding else "full_attention"
+                rope = (dev[f"{kind}.cos"], dev[f"{kind}.sin"])
+                pt = dev["ring_pt"] if layer.sliding else dev["global_pt"]
+                xn, hn = layer.decode_b1(xc, h, rope, cache, pt, dev["cur_pos"], self.boundary)
+                if i:  # never free the step inputs
+                    xc.deallocate(True)
+                    h.deallocate(True)
+                xc, h = xn, hn
+            out = self._logits_device(h, normed=True)
+            xc.deallocate(True)
+            h.deallocate(True)
+            return out
         x = ttnn.clone(dev["x"])
         for layer, cache in zip(self.layers, self.kv_caches):
             kind = "sliding_attention" if layer.sliding else "full_attention"
@@ -388,12 +465,13 @@ class Gemma4TT:
         out.deallocate(True)
         return logits
 
-    def _logits_device(self, x: ttnn.Tensor) -> ttnn.Tensor:
+    def _logits_device(self, x: ttnn.Tensor, normed: bool = False) -> ttnn.Tensor:
         """Raw fp32 logits, row-major; the host applies the final softcap
         (three fp32 ops over the tile-padded [32, 65536] took 0.63 ms here)."""
-        h = rms_norm(x, self.final_norm, self.cfg.rms_norm_eps)
+        h = x if normed else rms_norm(x, self.final_norm, self.cfg.rms_norm_eps)
         hs = ttnn.to_memory_config(h, self.lm_in)
-        h.deallocate(True)
+        if not normed:
+            h.deallocate(True)
         rows = x.shape[2]
         parts = []
         for w in self.lm_head:

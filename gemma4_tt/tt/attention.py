@@ -126,6 +126,7 @@ class Attention:
             in0_block_w=k_local // TILE // s.n_q, per_core_M=1, per_core_N=hidden // TILE // s.n_q, fused_activation=None
         )
         self.wo_out = width_sharded_l1(hidden, s.n_q)
+        self.wo_cores = [ttnn.CoreCoord(i, 0) for i in range(s.n_q)]  # the wo_out shard cores
         rm = ttnn.ROW_MAJOR_LAYOUT
         self.q_norm = loader.put(f"L{layer_idx}.q_norm", lambda: norm_weight(ckpt.get(p + "q_norm.weight")), layout=rm)
         self.k_norm = loader.put(f"L{layer_idx}.k_norm", lambda: norm_weight(ckpt.get(p + "k_norm.weight")), layout=rm)
@@ -216,6 +217,19 @@ class Attention:
             )
         return self._head_w_dev[batch]
 
+    def decode_b1(self, x: ttnn.Tensor, rope, kv_cache, page_table, cur_pos, boundary) -> ttnn.Tensor:
+        """One decode token: x is the normed row-form input. Returns this chip's o_proj partial sum in
+        compact FP32 form (boundary.py), packed straight from the width-sharded matmul output."""
+        heads = self._heads_decode(x, rope, kv_cache, page_table, cur_pos)
+        out_sh = ttnn.linear(
+            heads, self.wo_dram, program_config=self.wo_cfg, compute_kernel_config=HIFI2, memory_config=self.wo_out, dtype=ttnn.float32
+        )
+        heads.deallocate(True)
+        out = boundary.compact()
+        boundary.pack(out_sh, out, self.wo_cores)
+        out_sh.deallocate(True)
+        return out
+
     def decode(self, x: ttnn.Tensor, rope, kv_cache, page_table, cur_pos) -> ttnn.Tensor:
         """x [1, 1, B, H] replicated. Returns all-reduced attention output [1, 1, B, H].
 
@@ -224,6 +238,18 @@ class Attention:
         page_table: global layers get the vLLM table, sliding layers the ring table.
         cur_pos: int32 [B] absolute positions, -1 for inactive rows.
         """
+        heads = self._heads_decode(x, rope, kv_cache, page_table, cur_pos)
+        batch = x.shape[2]
+        out_sh = ttnn.linear(heads, self.wo_dram, program_config=self.wo_cfg, compute_kernel_config=HIFI2, memory_config=self.wo_out)
+        heads.deallocate(True)
+        out = ttnn.sharded_to_interleaved(out_sh, DRAM)
+        out_sh.deallocate(True)
+        if out.shape[2] != batch:
+            out = ttnn.slice(out, [0, 0, 0, 0], [1, 1, batch, out.shape[3]])
+        return all_reduce(out)
+
+    def _heads_decode(self, x, rope, kv_cache, page_table, cur_pos):
+        """QKV, q/k norm and RoPE, cache update and SDPA: the concatenated heads, one head per core."""
         s = self.shape
         batch = x.shape[2]
         width = self.heads * s.head_dim
@@ -268,14 +294,7 @@ class Attention:
             **modulo,
         )
         q.deallocate(True)
-        heads = self._concat_heads_decode(attn, batch)  # [1, 1, 32, n_q * hd], one head per core
-        out_sh = ttnn.linear(heads, self.wo_dram, program_config=self.wo_cfg, compute_kernel_config=HIFI2, memory_config=self.wo_out)
-        heads.deallocate(True)
-        out = ttnn.sharded_to_interleaved(out_sh, DRAM)
-        out_sh.deallocate(True)
-        if out.shape[2] != batch:
-            out = ttnn.slice(out, [0, 0, 0, 0], [1, 1, batch, out.shape[3]])
-        return all_reduce(out)
+        return self._concat_heads_decode(attn, batch)  # [1, 1, 32, n_q * hd], one head per core
 
     def _concat_heads_decode(self, attn, batch):
         s = self.shape

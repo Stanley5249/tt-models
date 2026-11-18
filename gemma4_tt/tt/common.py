@@ -187,3 +187,22 @@ def rms_norm(x: ttnn.Tensor, weight, eps: float) -> ttnn.Tensor:
     out = ttnn.to_memory_config(y, DRAM)
     y.deallocate(True)
     return out
+
+
+def all_gather_compact(x: ttnn.Tensor) -> ttnn.Tensor:
+    """[1, 1, 32, W] compact partials -> [1, 2, 32, W] with both chips' (boundary.py); 10 us for 3 tiles."""
+    gather_sems, barrier = _SEMAPHORES[id(x.device())].next()
+    return ttnn.experimental.all_gather_async(
+        x,
+        persistent_output_buffer=None,
+        dim=1,
+        multi_device_global_semaphore=gather_sems,
+        num_links=1,
+        cluster_axis=1,
+        topology=ttnn.Topology.Linear,
+        memory_config=L1,
+        barrier_semaphore=barrier,
+        chunks_per_sync=10,
+        num_workers_per_link=2,
+        num_buffers_per_channel=2,
+    )
