@@ -415,10 +415,17 @@ class Gemma4TT:
         for kind, (cos, sin) in self.rope.items():
             attn = next(layer.attn for layer in self.layers if layer.sliding == (kind == "sliding_attention"))
             roped = attn.shape.n_q + attn.shape.n_kv  # Q and K rows; V rows keep cos 1, sin 0
+            tables = {}
             for name, table, fill in (("cos", cos, 1.0), ("sin", sin, 0.0)):
                 rows = torch.full((batch, attn.heads, attn.shape.head_dim), fill, dtype=table.dtype)
                 rows[:, :roped] = table[pos][:, None, :]
-                inputs[f"{kind}.{name}"] = self._host(rows.reshape(1, 1, batch * attn.heads, -1), ttnn.float32)
+                tables[name] = rows
+            if batch == 1:  # one compact [cos | signed sin] input for the fused q/k norm + RoPE
+                cs = attn.qk_rope.host_tables(tables["cos"].flatten(), tables["sin"].flatten())
+                inputs[f"{kind}.cs"] = self._host(cs, ttnn.float32)
+            else:
+                for name, rows in tables.items():
+                    inputs[f"{kind}.{name}"] = self._host(rows.reshape(1, 1, batch * attn.heads, -1), ttnn.float32)
         return inputs
 
     def _decode_device(self, dev: dict[str, ttnn.Tensor]) -> ttnn.Tensor:
@@ -427,7 +434,7 @@ class Gemma4TT:
             xc, h = dev["xc"], dev["h0"]
             for i, (layer, cache) in enumerate(zip(self.layers, self.kv_caches)):
                 kind = "sliding_attention" if layer.sliding else "full_attention"
-                rope = (dev[f"{kind}.cos"], dev[f"{kind}.sin"])
+                rope = dev[f"{kind}.cs"]
                 pt = dev["ring_pt"] if layer.sliding else dev["global_pt"]
                 xn, hn = layer.decode_b1(xc, h, rope, cache, pt, dev["cur_pos"], self.boundary)
                 if i:  # never free the step inputs

@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--phase", default=None, help="default: every decode phase")
     ap.add_argument("--layer-ops", type=int, default=0, help="ops per decoder layer, for the per-position table")
     ap.add_argument("--head-ops", type=int, default=1, help="ops before the first layer")
+    ap.add_argument("--layers", type=int, default=30, help="decoder layers (the rest is the LM head)")
     ap.add_argument("--freq-mhz", type=float, default=1000.0)
     args = ap.parse_args()
 
@@ -61,7 +62,7 @@ def main():
     g["gap_us"] = (start - end.shift(1)).clip(lower=0).fillna(0) / args.freq_mhz
     g["kern_us"] = g[KERN] / 1e3
     body = g.iloc[args.head_ops :]
-    n_layers = len(body) // args.layer_ops
+    n_layers = min(args.layers, len(body) // args.layer_ops)
     layers = body.iloc[: n_layers * args.layer_ops].copy()
     layers["pos"] = [i % args.layer_ops for i in range(len(layers))]
     tab = layers.groupby("pos").agg(

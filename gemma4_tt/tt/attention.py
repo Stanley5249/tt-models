@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
+from gemma4_tt.tt.boundary import QkRope
 from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, dram_sharded, norm_weight, width_sharded_l1
 
 
@@ -54,6 +55,16 @@ def ring_selection(seq_len: int, padded_len: int, window: int) -> tuple[int, tor
     for p in range(seq_len - window, seq_len):
         sel[p % window, p - tail_start] = 1.0
     return tail_start, sel[None, None]
+
+
+_QK_ROPE = {}
+
+
+def qk_rope(mesh, width: int, head_dim: int, eps: float) -> QkRope:
+    key = (id(mesh), width, head_dim)
+    if key not in _QK_ROPE:
+        _QK_ROPE[key] = QkRope(mesh, width, head_dim, eps)
+    return _QK_ROPE[key]
 
 
 _ROTATE = {}
@@ -136,6 +147,11 @@ class Attention:
         self._head_w = (ckpt.get(p + "q_norm.weight").float(), ckpt.get(p + "k_norm.weight").float())
         self._head_w_dev = {}
         self.mesh = loader.mesh
+        # batch-1 decode: fused q/k norm + RoPE (boundary.QkRope) with [w | w permuted] per value
+        self.qk_rope = qk_rope(self.mesh, self.heads * s.head_dim, s.head_dim, self.eps)
+        q, k = self._head_w
+        w_row = torch.cat([q.repeat(s.n_q), k.repeat(s.n_kv), torch.ones(s.n_kv * s.head_dim)])
+        self.rope_w = self.qk_rope.weights(w_row)
 
     # -- prefill -----------------------------------------------------------
 
@@ -257,14 +273,20 @@ class Attention:
         # large and sensitive to q/k rounding: norm, weight and RoPE run in fp32 and
         # round to BF16 once, before the head split (BF16 here raised decode KL by 30%).
         xqkv = ttnn.linear(x, self.wqkv, compute_kernel_config=HIFI2, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.float32)
-        rows = ttnn.reshape(xqkv, (1, 1, batch * self.heads, s.head_dim))
-        normed = ttnn.rms_norm(rows, epsilon=self.eps, memory_config=ttnn.L1_MEMORY_CONFIG, compute_kernel_config=HIFI4)
-        xqkv.deallocate(True)
-        weighted = ttnn.mul(normed, self.head_weights(batch), memory_config=ttnn.L1_MEMORY_CONFIG)
-        normed.deallocate(True)
-        roped = apply_rope(weighted, *rope, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.bfloat16)
-        weighted.deallocate(True)
-        fused = ttnn.reshape(roped, (1, 1, batch, width))
+        if not isinstance(rope, tuple):  # batch 1: rope is the step's compact [cos | sin] (boundary.QkRope)
+            roped = ttnn.allocate_tensor_on_device(ttnn.Shape([1, 1, 1, width]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG)
+            self.qk_rope(xqkv, rope, self.rope_w, roped)
+            xqkv.deallocate(True)
+            fused = roped
+        else:
+            rows = ttnn.reshape(xqkv, (1, 1, batch * self.heads, s.head_dim))
+            normed = ttnn.rms_norm(rows, epsilon=self.eps, memory_config=ttnn.L1_MEMORY_CONFIG, compute_kernel_config=HIFI4)
+            xqkv.deallocate(True)
+            weighted = ttnn.mul(normed, self.head_weights(batch), memory_config=ttnn.L1_MEMORY_CONFIG)
+            normed.deallocate(True)
+            roped = apply_rope(weighted, *rope, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.bfloat16)
+            weighted.deallocate(True)
+            fused = ttnn.reshape(roped, (1, 1, batch, width))
         q, k, v = ttnn.experimental.nlp_create_qkv_heads_decode(
             fused, num_heads=s.n_q, num_kv_heads=s.n_kv, memory_config=ttnn.L1_HEIGHT_SHARDED_MEMORY_CONFIG
         )
