@@ -18,6 +18,7 @@ import torch
 import ttnn
 
 from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, L1, TILE, WeightLoader, all_reduce, compute_config, norm_weight, rms_norm
+from gemma4_tt.tt.boundary import Router
 from gemma4_tt.tt.expert_stream import ExpertStream, MlpStream, pad_down
 
 _STREAMS: dict[tuple, object] = {}
@@ -28,6 +29,13 @@ def expert_stream(mesh, cfg, expert_local: int) -> ExpertStream:
     key = ("experts", id(mesh))
     if key not in _STREAMS:
         _STREAMS[key] = ExpertStream(mesh, cfg.hidden_size, expert_local, cfg.top_k_experts, cfg.num_experts)
+    return _STREAMS[key]
+
+
+def router_op(mesh, cfg) -> Router:
+    key = ("router", id(mesh))
+    if key not in _STREAMS:
+        _STREAMS[key] = Router(mesh, cfg.hidden_size, cfg.num_experts, cfg.top_k_experts)
     return _STREAMS[key]
 
 
@@ -361,7 +369,9 @@ class FeedForward:
         ms.gate_up(mlp_in, self.mlp_gate_up, h)
         ms.down(h, self.mlp_down, out, compact_chunk0=0)
         h.deallocate(True)
-        ids, weights = self._route(normed, 1)
+        router = router_op(self.mesh, self.cfg)
+        ids, weights = router.outputs()
+        router(normed, self.router, ids, weights)
         st = self.stream
         act = st.act_tensor()
         st.gate_up(exp_in, ids, weights, self.scale_row, self.exp_gate_up, act)

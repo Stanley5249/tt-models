@@ -268,3 +268,71 @@ class QkRope:
             ),
         ]
         return ttnn.generic_op([x, cs, w, out], ttnn.ProgramDescriptor(kernels=kernels, semaphores=[], cbs=cbs))
+
+
+class Router:
+    """Batch-1 router: logits, top-k and softmax over the k logits in one op (kernels/router_*).
+
+    topk_router_gpt took 68 us per layer, mostly in its top-k stage. Here 11 cores each multiply 8 K tiles
+    of the normed row by the BF16 router weight, the reducer core gathers the partial rows (semaphore),
+    sums them and takes exp on the FPU/SFPU, and its RISC picks the top k and normalizes them.
+    Outputs match topk_router_gpt's: row-major uint16 ids and BF16 weights, first k entries of row 0."""
+
+    def __init__(self, mesh, hidden: int, n_experts: int, top_k: int, parts: int = 11, core_row: int = 5):
+        self.mesh, self.top_k = mesh, top_k
+        self.kx = hidden // TILE
+        self.n_tiles = n_experts // TILE
+        self.parts = parts
+        self.kt = self.kx // parts
+        assert self.kt * parts == self.kx and parts <= 32
+        self.cores = [ttnn.CoreCoord(i % 8, core_row - i // 8) for i in range(parts)]
+        self.red = mesh.worker_core_from_logical_core(self.cores[0])
+
+    def outputs(self):
+        def row(dtype):
+            return ttnn.allocate_tensor_on_device(ttnn.Shape([1, 16]), dtype, ttnn.ROW_MAJOR_LAYOUT, self.mesh, L1)
+
+        return row(ttnn.uint16), row(ttnn.bfloat16)
+
+    def __call__(self, x, w, ids, wts):
+        """x: normed row form BF16 [1, 1, 1, H]; w: the [H, E] BF16 router weight (tile layout)."""
+        crs = _crs(self.cores)
+        cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, cb_out = 0, 1, 2, 3, 4, 5, 6
+        f32, bf16 = ttnn.float32, ttnn.bfloat16
+        n = self.n_tiles
+        cbs = [
+            _cb(crs, cb_x, bf16, 2048, self.kt),
+            _cb(crs, cb_w, bf16, 2048, self.kt * n),
+            _cb(crs, cb_j, f32, FP32_TILE, 1),
+            _cb(crs, cb_partial, f32, FP32_TILE, n),
+            _cb(crs, cb_part, f32, FP32_TILE, n),
+            _cb(crs, cb_e, f32, FP32_TILE, n),
+            _cb(crs, cb_out, bf16, 128, 1),
+        ]
+        reader_rt, writer_rt, compute_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
+        for i, c in enumerate(self.cores):
+            red = int(i == 0)
+            reader_rt[c.x][c.y] = [x.buffer_address(), w.buffer_address(), i * self.kt, red]
+            writer_rt[c.x][c.y] = [i, self.red.x, self.red.y, red, ids.buffer_address(), wts.buffer_address()]
+            compute_rt[c.x][c.y] = [red]
+        sem_id = 0
+        dm = ttnn.DataMovementConfigDescriptor
+        kernels = [
+            ttnn.KernelDescriptor(
+                kernel_source=str(KERNELS / "router_reader.cpp"), core_ranges=crs,
+                compile_time_args=[cb_x, cb_w, cb_j, self.kt, n] + _accessor(x) + _accessor(w), runtime_args=reader_rt,
+                config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
+            ),
+            ttnn.KernelDescriptor(
+                kernel_source=str(KERNELS / "router_writer.cpp"), core_ranges=crs,
+                compile_time_args=[cb_partial, cb_part, cb_e, cb_out, n, self.parts, self.top_k, sem_id] + _accessor(ids) + _accessor(wts),
+                runtime_args=writer_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
+            ),
+            ttnn.KernelDescriptor(
+                kernel_source=str(KERNELS / "router_compute.cpp"), core_ranges=crs,
+                compile_time_args=[cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, self.kt, n], runtime_args=compute_rt,
+                config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True, math_approx_mode=False),
+            ),
+        ]
+        sems = [ttnn.SemaphoreDescriptor(id=sem_id, core_ranges=crs, initial_value=0)]
+        return ttnn.generic_op([x, w, ids, wts], ttnn.ProgramDescriptor(kernels=kernels, semaphores=sems, cbs=cbs))
