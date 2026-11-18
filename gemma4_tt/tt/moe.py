@@ -6,15 +6,28 @@ every selected expert and the load is always balanced. The two partial sums
 are reduced with one all-reduce on a [.., 2*H] concatenation, because each
 branch has its own post-norm that needs the full sum.
 
-Experts use indexed `sparse_matmul`. Decode (T <= 16) gives each (token,
-slot) pair its own matmul slot. Prefill is expert-major: the host groups every
-expert's tokens into chunks, so each chunk reads one expert's weights once.
+Batch-1 decode streams the routed experts per DRAM bank with two generic ops
+(expert_stream.py). Other decode batches (T <= 16) use indexed `sparse_matmul`,
+each (token, slot) pair its own matmul slot. Prefill is expert-major: the host
+groups every expert's tokens into chunks, so each chunk reads one expert's
+weights once. The down weight is stored with the hidden padded to 3072 columns
+for the stream's bank layout; the sparse paths slice the padding off.
 """
 
 import torch
 import ttnn
 
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, compute_config, norm_weight, rms_norm
+from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, L1, TILE, WeightLoader, all_reduce, compute_config, norm_weight, rms_norm
+from gemma4_tt.tt.expert_stream import ExpertStream, pad_down
+
+_STREAMS: dict[int, ExpertStream] = {}
+
+
+def expert_stream(mesh, cfg, expert_local: int) -> ExpertStream:
+    """One ExpertStream (core placement) per mesh, shared by the layers."""
+    if id(mesh) not in _STREAMS:
+        _STREAMS[id(mesh)] = ExpertStream(mesh, cfg.hidden_size, expert_local, cfg.top_k_experts, cfg.num_experts)
+    return _STREAMS[id(mesh)]
 
 
 # HF uses gelu_pytorch_tanh. Fusing GELU_TANH into the multiply halves the mean
@@ -124,13 +137,25 @@ class FeedForward:
             parts = [torch.cat([g[..., c * n : (c + 1) * n], zeros, u[..., c * n : (c + 1) * n], zeros], -1) for c in range(tp)]
             return torch.cat(parts, -1)[None]
 
+        self.stream = expert_stream(loader.mesh, cfg, self.expert_local)
+        self.down_width = self.stream.down_width
+
         def experts_down():
-            return ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous()[None]  # [1, E, I, H]
+            down = ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous()  # [E, I, H]
+            return pad_down(down, self.down_width)[None]  # [1, E, I, 3072]
 
         self.exp_gate_up = put(f"L{layer_idx}.exp_gate_up_p{self.expert_pad}", experts_gate_up, expert_dtype, shard_dim=-1)
         # per_expert_scale is applied to the routing weights: folding it into the BFP4
         # down weights changes their block rounding and measurably hurt accuracy.
-        self.exp_down = put(f"L{layer_idx}.exp_down", experts_down, expert_dtype, shard_dim=-2)
+        self.exp_down = put(f"L{layer_idx}.exp_down_p{self.down_width}", experts_down, expert_dtype, shard_dim=-2)
+        # Row-major per_expert_scale for the stream's gate_up writer.
+        self.scale_row = ttnn.from_torch(
+            ckpt.get(p + "router.per_expert_scale").float().reshape(1, -1),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            device=loader.mesh,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(loader.mesh),
+        )
         self.per_expert_scale = put(
             f"L{layer_idx}.per_expert_scale", lambda: ckpt.get(p + "router.per_expert_scale").float().reshape(1, 1, 1, E)
         )
@@ -158,7 +183,7 @@ class FeedForward:
         self._combine_masks = {}
         self._chunk_cfgs = {}
         self.gate_up_cfg = _matmul_1d_config(1, 2 * self.expert_pad, H, in0_block_w=44)
-        self.down_cfg = _matmul_1d_config(1, H, self.expert_local)
+        self.down_cfg = _matmul_1d_config(1, self.down_width, self.expert_local)
 
     def _rms(self, x, w):
         return rms_norm(x, w, self.eps)
@@ -211,6 +236,29 @@ class FeedForward:
             )
         return self._zero_bias[tokens]
 
+    def _route(self, normed: ttnn.Tensor, tokens: int):
+        """topk_router_gpt: row-major [T, k] uint16 ids and BF16 softmax weights over the k logits."""
+        return ttnn.experimental.topk_router_gpt(
+            ttnn.reshape(normed, (tokens, self.hidden)),
+            weight_tensor=self.router_2d,
+            bias_tensor=self._bias(tokens),
+            k=self.top_k,
+            num_experts=self.n_experts,
+        )
+
+    def _experts_stream(self, x: ttnn.Tensor, normed: ttnn.Tensor) -> ttnn.Tensor:
+        """One decode token: router, then the gate|up and down streams (expert_stream.py)."""
+        ids, weights = self._route(normed, 1)
+        st = self.stream
+        act = st.act_tensor()
+        st.gate_up(x, ids, weights, self.scale_row, self.exp_gate_up, act)
+        weights.deallocate(True)
+        out = st.out_tensor(L1)
+        st.down(act, ids, self.exp_down, out)
+        act.deallocate(True)
+        ids.deallocate(True)
+        return out
+
     def _experts_decode(self, x: ttnn.Tensor, normed: ttnn.Tensor) -> ttnn.Tensor:
         """Route and run the experts for T <= 32 tokens with compact (indexed) sparse matmuls.
 
@@ -221,13 +269,7 @@ class FeedForward:
         tokens = x.shape[2]
         slots = tokens * self.top_k
         n = self.expert_local
-        ids, weights = ttnn.experimental.topk_router_gpt(
-            ttnn.reshape(normed, (tokens, self.hidden)),
-            weight_tensor=self.router_2d,
-            bias_tensor=self._bias(tokens),
-            k=self.top_k,
-            num_experts=self.n_experts,
-        )  # row-major [T, k]: uint16 ids, bf16 softmax over the k logits
+        ids, weights = self._route(normed, tokens)
         if tokens == 1:
             idx = ttnn.reshape(ids, (1, slots))
             idx32 = ttnn.typecast(idx, ttnn.uint32)
@@ -274,8 +316,14 @@ class FeedForward:
             dtype=ttnn.bfloat16,
         )  # [1, S, T, H]
         hw.deallocate(True)
-        out = ttnn.experimental.fast_reduce_nc(down, dims=[1], compute_kernel_config=HIFI4, memory_config=DRAM)  # [1, 1, T, H]
+        out = ttnn.experimental.fast_reduce_nc(down, dims=[1], compute_kernel_config=HIFI4, memory_config=DRAM)  # [1, 1, T, 3072]
         down.deallocate(True)
+        return self._unpad(out)
+
+    def _unpad(self, t: ttnn.Tensor) -> ttnn.Tensor:
+        """Drop the down weight's padding columns."""
+        out = ttnn.slice(t, [0, 0, 0, 0], [1, 1, t.shape[2], self.hidden])
+        t.deallocate(True)
         return out
 
     def _mlp(self, x):
@@ -300,7 +348,7 @@ class FeedForward:
             # partial sum to the BF16 output (in0_block_w=8 raised prefill KL 0.32 -> 0.36).
             self._chunk_cfgs[rows] = (
                 _matmul_1d_config(m, 2 * self.expert_pad, self.hidden, in0_block_w=44 if m <= 2 else 22),
-                _matmul_1d_config(m, self.hidden, self.expert_local),
+                _matmul_1d_config(m, self.down_width, self.expert_local),
             )
         return self._chunk_cfgs[rows]
 
@@ -421,17 +469,17 @@ class FeedForward:
         if len(outs) > 1:
             for o in outs:
                 o.deallocate(True)
-        flat = ttnn.to_layout(ttnn.reshape(down, (n_chunks * rows, self.hidden)), ttnn.ROW_MAJOR_LAYOUT)
+        flat = ttnn.to_layout(ttnn.reshape(down, (n_chunks * rows, self.down_width)), ttnn.ROW_MAJOR_LAYOUT)
         down.deallocate(True)
         b = up(back[None], ttnn.uint32)
-        pairs = ttnn.embedding(b, flat, layout=ttnn.TILE_LAYOUT)  # [1, k * T, H], slot-major
+        pairs = ttnn.embedding(b, flat, layout=ttnn.TILE_LAYOUT)  # [1, k * T, 3072], slot-major
         b.deallocate(True)
         flat.deallocate(True)
         out = ttnn.experimental.fast_reduce_nc(
-            ttnn.reshape(pairs, (1, k, tokens, self.hidden)), dims=[1], compute_kernel_config=HIFI4, memory_config=DRAM
+            ttnn.reshape(pairs, (1, k, tokens, self.down_width)), dims=[1], compute_kernel_config=HIFI4, memory_config=DRAM
         )
         pairs.deallocate(True)
-        return out
+        return self._unpad(out)
 
     def _experts(self, x, normed, chunk_tokens: int = 4096):
         """Prefill experts in token chunks, which bound the gathered-row buffers."""
@@ -459,10 +507,13 @@ class FeedForward:
         mlp = self._mlp(mlp_in)
         mlp_in.deallocate(True)
 
-        exp_in = ttnn.mul(normed, self.pre_ff2)
+        # The stream reads row 0 of every x tile from 44 cores, so x stays in L1.
+        exp_in = ttnn.mul(normed, self.pre_ff2, memory_config=L1 if t == 1 else DRAM)
         # Indexed mode allows at most one slot per expert (T * k <= E, so T <= 16);
         # longer inputs, such as the 32-token prefill warmup, take the grouped path.
-        if t * self.top_k <= self.n_experts:
+        if t == 1:
+            experts = self._experts_stream(exp_in, normed)
+        elif t * self.top_k <= self.n_experts:
             experts = self._experts_decode(exp_in, normed)
         else:
             experts = self._experts(exp_in, normed)
