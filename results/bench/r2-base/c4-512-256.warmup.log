@@ -1,0 +1,121 @@
+2026-11-19 01:03:42.312 | DEBUG    | ttnn:<module>:45 - Initial ttnn.CONFIG:
+Config{cache_path=/home/st418/.cache/ttnn,model_cache_path=/home/st418/.cache/ttnn/models,tmp_dir=/tmp/ttnn,enable_model_cache=false,enable_fast_runtime_mode=true,validate_program_args=false,throw_exception_on_fallback=false,enable_logging=false,enable_graph_report=false,enable_graph_python_stack_traces=false,enable_detailed_buffer_report=false,enable_detailed_tensor_report=false,enable_comparison_mode=false,comparison_mode_should_raise_exception=false,comparison_mode_pcc=0.9999,root_report_path=generated/ttnn/reports,report_name=std::nullopt,strict_ccl_topology=false,std::nullopt}
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0x7a5d6bf0db20>, trust_remote_code=False, seed=0, num_prompts=4, dataset_name='random', no_stream=False, dataset_path=None, no_oversample=False, skip_chat_template=False, enable_multimodal_chat=False, disable_shuffle=False, custom_output_len=256, custom_ensure_client_side_data=False, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, timed_trace_chunk_hash_size=16, timed_trace_sec_multiplier=1, timed_trace_label_timestamp='timestamp', timed_trace_label_input_length='input_length', timed_trace_label_output_length='output_length', timed_trace_label_hash_ids='hash_ids', blazedit_min_distance=0.0, blazedit_max_distance=1.0, asr_max_audio_len_sec=inf, asr_min_audio_len_sec=0.0, random_input_len=512, random_output_len=256, random_range_ratio='0', random_prefix_len=0, random_batch_size=1, no_reranker=False, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 1}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, bfcl_categories=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, speed_bench_dataset_subset='qualitative', speed_bench_output_len=4096, speed_bench_category=None, label=None, backend='openai', base_url='http://127.0.0.1:8000', host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=4, model='google/gemma-4-26B-A4B-it-qat-q4_0-unquantized', input_len=None, output_len=None, tokenizer=None, tokenizer_mode='auto', use_beam_search=False, logprobs=None, request_rate=inf, burstiness=1.0, probe_request_rate=0.0, disable_tqdm=False, num_warmups=0, profile=False, save_result=False, save_detailed=False, append_result=False, metadata=None, result_dir=None, result_filename=None, ignore_eos=True, self_timed=None, percentile_metrics='ttft,tpot,itl,e2el', metric_percentiles='50,90', goodput=None, request_id_prefix='bench-ab6f88f8-', top_p=None, top_k=None, min_p=None, temperature=None, frequency_penalty=None, presence_penalty=None, repetition_penalty=None, served_model_name='gemma4', lora_modules=None, lora_assignment='random', ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=0, chat_template_kwargs=None, extra_body=None, skip_tokenizer_init=False, insecure=False, plot_timeline=False, timeline_itl_thresholds='25,50', plot_dataset_stats=False, log_config_file=None, logging_config=LoggingConfig(log_level='INFO', configure_logging=True, pylogging_config_file=None))
+(MainProcess pid=979084) INFO 11-19 01:03:48 [utils.py:88] Sampling input_len from [512, 512] and output_len from [256, 256]
+WARNING: /tokenize unavailable, skipping alignment.
+WARNING: vllm bench serve no longer sets temperature==0 (greedy) in requests by default. The default will be determined on the server side and can be model/API specific. For the old behavior, include --temperature=0.
+Starting initial single prompt test run...
+Skipping endpoint ready check.
+Starting main benchmark run...
+Traffic request rate: inf
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 4
+  0%|          | 0/4 [00:00<?, ?it/s] 25%|██▌       | 1/4 [00:16<00:50, 16.94s/it]100%|██████████| 4/4 [00:16<00:00,  4.24s/it]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     4         
+Failed requests:                         0         
+Maximum request concurrency:             4         
+Benchmark duration (s):                  16.94     
+Total input tokens:                      2048      
+Total generated tokens:                  1024      
+Request throughput (req/s):              0.24      
+Output token throughput (tok/s):         60.44     
+Peak output token throughput (tok/s):    72.00     
+Peak concurrent requests:                4.00      
+Total token throughput (tok/s):          181.32    
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1726.17   
+Median TTFT (ms):                        2063.75   
+P50 TTFT (ms):                           2063.75   
+P90 TTFT (ms):                           2064.09   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          59.67     
+Median TPOT (ms):                        58.35     
+P50 TPOT (ms):                           58.35     
+P90 TPOT (ms):                           62.05     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           59.67     
+Median ITL (ms):                         58.30     
+P50 ITL (ms):                            58.30     
+P90 ITL (ms):                            59.02     
+----------------End-to-end Latency----------------
+Mean E2EL (ms):                          16942.05  
+Median E2EL (ms):                        16942.15  
+P50 E2EL (ms):                           16942.15  
+P90 E2EL (ms):                           16942.32  
+==================================================
+nanobind: leaked 4 instances!
+nanobind: leaked 64 types!
+ - leaked type "triton._C.libtriton.ir.location"
+ - leaked type "TMEM_LOAD_REDUCE_MODIFIER"
+ - leaked type "triton._C.libtriton.ir.block"
+ - leaked type "triton._C.libtriton.gluon_ir.GluonOpBuilder"
+ - leaked type "triton._C.libtriton.ir.builder"
+ - leaked type "triton._C.libtriton.nvidia.cublas.CublasLt"
+ - leaked type "triton._C.libtriton.ir.integer_attr"
+ - leaked type "ATOMIC_OP"
+ - leaked type "PROPAGATE_NAN"
+ - leaked type "METRIC_TYPE"
+ - ... skipped remainder
+nanobind: leaked 514 functions!
+ - leaked function "has_return"
+ - leaked function "create_minsi"
+ - leaked function "get_partition_op_holder"
+ - leaked function "printStackTraceOnDiagnostic"
+ - leaked function "extend_with"
+ - leaked function "get_name"
+ - leaked function ""
+ - leaked function "create_icmpUGT"
+ - leaked function ""
+ - leaked function "__str__"
+ - ... skipped remainder
+nanobind: this is likely caused by a reference counting issue in the binding code.
+See https://nanobind.readthedocs.io/en/latest/refleaks.htmlnanobind: leaked 138 instances!
+ - leaked instance 0x5e8dbf286b40 of type "ttnn._ttnn.operations.unary.nez_t"
+ - leaked instance 0x5e8dbef93ea0 of type "ttnn._ttnn.operations.unary.identity_t"
+ - leaked instance 0x5e8dbf3492c0 of type "ttnn._ttnn.operations.unary.exp2_t"
+ - leaked instance 0x7a5d9d6f9128 of type "ttnn._ttnn.operations.sliding_window.Op2DSliceConfig"
+ - leaked instance 0x7a5d9ce83ec8 of type "ttnn._ttnn.multi_device.MeshCoordinate"
+ - leaked instance 0x7a5d9d89a748 of type "ttnn._ttnn.tensor.CoreRangeSet"
+ - leaked instance 0x5e8dbfaf9870 of type "ttnn._ttnn.operations.moreh.moreh_getitem_t"
+ - leaked instance 0x5e8dbfaf3c40 of type "ttnn._ttnn.operations.moreh.moreh_adam_t"
+ - leaked instance 0x5e8dbf120470 of type "ttnn._ttnn.operations.unary.sin_t"
+ - leaked instance 0x5e8dbfb0cac0 of type "ttnn._ttnn.operations.moreh.moreh_clip_grad_norm_t"
+ - leaked instance 0x5e8dbf384e20 of type "ttnn._ttnn.operations.unary.tanh_t"
+ - leaked instance 0x7a5d9d790108 of type "ttnn._ttnn.tensor.CoreRangeSet"
+ - leaked instance 0x5e8dbf4e9eb0 of type "ttnn._ttnn.operations.unary.sigmoid_accurate_t"
+ - leaked instance 0x7a5d9d729908 of type "ttnn._ttnn.tensor.MemoryConfig"
+ - leaked instance 0x5e8dbfb031b0 of type "ttnn._ttnn.operations.moreh.moreh_sgd_t"
+ - leaked instance 0x5e8dbf5bcb90 of type "ttnn._ttnn.operations.unary.isneginf_t"
+ - leaked instance 0x5e8dbf035c60 of type "ttnn._ttnn.operations.unary.swish_t"
+ - leaked instance 0x5e8dbf69e8c0 of type "ttnn._ttnn.operations.unary.lgamma_t"
+ - leaked instance 0x5e8dbef93ef0 of type "ttnn._ttnn.operations.unary.digamma_t"
+ - leaked instance 0x5e8dbf3bdc00 of type "ttnn._ttnn.operations.unary.gtz_t"
+ - ... skipped remainder
+nanobind: leaked 1032 types!
+ - leaked type "SocketEndpoint"
+ - leaked type "ttnn._ttnn.operations.experimental.quasar.gt__t"
+ - leaked type "ttnn._ttnn.d2d_stream_service.D2DStreamServiceSender"
+ - leaked type "ttnn._ttnn.prefetcher_pipe.PrefetcherPipeSpace"
+ - leaked type "ttnn._ttnn.operations.experimental.insert_t"
+ - leaked type "ttnn._ttnn.operations.reduction.var_t"
+ - leaked type "DispatchCoreAxis"
+ - leaked type "ttnn._ttnn.operations.unary.fill_t"
+ - leaked type "ttnn._ttnn.operations.data_movement.gather_t"
+ - leaked type "ttnn._ttnn.operations.ternary.where_t"
+ - ... skipped remainder
+nanobind: leaked 4786 functions!
+ - leaked function ""
+ - leaked function "__eq__"
+ - leaked function ""
+ - leaked function ""
+ - leaked function "__call__"
+ - leaked function "__eq__"
+ - leaked function ""
+ - leaked function ""
+ - leaked function "to_numpy"
+ - leaked function "compute_output_specs"
+ - ... skipped remainder
+nanobind: this is likely caused by a reference counting issue in the binding code.
+See https://nanobind.readthedocs.io/en/latest/refleaks.html
