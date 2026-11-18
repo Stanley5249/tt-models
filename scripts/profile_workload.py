@@ -32,10 +32,11 @@ def main():
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--layers", type=int, default=None)
     ap.add_argument("--precision", default="")
+    ap.add_argument("--trace", action="store_true", help="replay a metal trace, so op-to-op gaps are device gaps")
     args = ap.parse_args()
 
     ckpt = Checkpoint()
-    with open_n300() as mesh:
+    with open_n300(trace_region_size=300_000_000 if args.trace else 0) as mesh:
         model = Gemma4TT(mesh, ckpt, max_batch=args.batch, num_layers=args.layers, precision=Precision.parse(args.precision))
         per_user = -(-(args.prompt_len + args.decode_steps + 128) // model.block_size)
         model.allocate_kv_cache(per_user * args.batch + 1)
@@ -44,7 +45,9 @@ def main():
         # Warm-up compiles every program once, outside the measured phases.
         for b in range(args.batch):
             model.prefill(ids[b, : args.prompt_len], pts[b], slot=b)
-        model.decode(ids[:, args.prompt_len], torch.full((args.batch,), args.prompt_len), pts)
+        model.decode(ids[:, args.prompt_len], torch.full((args.batch,), args.prompt_len), pts, trace=args.trace)
+        if args.trace:  # the first traced call compiles and captures; replay once more
+            model.decode(ids[:, args.prompt_len], torch.full((args.batch,), args.prompt_len), pts, trace=True)
         ttnn.synchronize_device(mesh)
         ttnn.ReadDeviceProfiler(mesh)  # flush, so the device buffers hold only measured phases
 
@@ -58,12 +61,13 @@ def main():
             signpost(f"decode{step}")
             pos = args.prompt_len + 1 + step
             t0 = time.time()
-            model.decode(ids[:, pos], torch.full((args.batch,), pos), pts)
+            model.decode(ids[:, pos], torch.full((args.batch,), pos), pts, trace=args.trace)
             ttnn.synchronize_device(mesh)
             print(f"decode step {step}: {time.time() - t0:.3f}s", flush=True)
             ttnn.ReadDeviceProfiler(mesh)
         signpost("end")
         ttnn.ReadDeviceProfiler(mesh)
+        model.release_traces()
 
 
 if __name__ == "__main__":
