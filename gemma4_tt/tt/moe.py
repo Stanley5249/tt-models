@@ -18,16 +18,24 @@ import torch
 import ttnn
 
 from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, L1, TILE, WeightLoader, all_reduce, compute_config, norm_weight, rms_norm
-from gemma4_tt.tt.expert_stream import ExpertStream, pad_down
+from gemma4_tt.tt.expert_stream import ExpertStream, MlpStream, pad_down
 
-_STREAMS: dict[int, ExpertStream] = {}
+_STREAMS: dict[tuple, object] = {}
 
 
 def expert_stream(mesh, cfg, expert_local: int) -> ExpertStream:
     """One ExpertStream (core placement) per mesh, shared by the layers."""
-    if id(mesh) not in _STREAMS:
-        _STREAMS[id(mesh)] = ExpertStream(mesh, cfg.hidden_size, expert_local, cfg.top_k_experts, cfg.num_experts)
-    return _STREAMS[id(mesh)]
+    key = ("experts", id(mesh))
+    if key not in _STREAMS:
+        _STREAMS[key] = ExpertStream(mesh, cfg.hidden_size, expert_local, cfg.top_k_experts, cfg.num_experts)
+    return _STREAMS[key]
+
+
+def mlp_stream(mesh, cfg, mlp_pad: int) -> MlpStream:
+    key = ("mlp", id(mesh))
+    if key not in _STREAMS:
+        _STREAMS[key] = MlpStream(mesh, cfg.hidden_size, mlp_pad)
+    return _STREAMS[key]
 
 
 # HF uses gelu_pytorch_tanh. Fusing GELU_TANH into the multiply halves the mean
@@ -105,6 +113,8 @@ class FeedForward:
         self.post_ff2 = norm("post_feedforward_layernorm_2")
         self.post_ff = norm("post_feedforward_layernorm")
 
+        self.mlp_stream = mlp_stream(loader.mesh, cfg, self.mlp_pad)
+
         def mlp_gate_up():
             g = ckpt.get(p + "mlp.gate_proj.weight").T  # [H, I]
             u = ckpt.get(p + "mlp.up_proj.weight").T
@@ -115,10 +125,11 @@ class FeedForward:
         def mlp_down():
             d = ckpt.get(p + "mlp.down_proj.weight").T  # [I, H]
             n, zeros = self.mlp_local, d.new_zeros(self.mlp_pad - self.mlp_local, H)
-            return torch.cat([torch.cat([d[c * n : (c + 1) * n], zeros]) for c in range(tp)]).contiguous()[None, None]
+            d = torch.cat([torch.cat([d[c * n : (c + 1) * n], zeros]) for c in range(tp)])
+            return pad_down(d, self.mlp_stream.down_width).contiguous()[None, None]  # hidden padded for the stream
 
         self.mlp_gate_up = put(f"L{layer_idx}.mlp_gate_up_p{self.mlp_pad}", mlp_gate_up, mlp_dtype, shard_dim=-1)
-        self.mlp_down = put(f"L{layer_idx}.mlp_down_p{self.mlp_pad}", mlp_down, mlp_dtype, shard_dim=-2)
+        self.mlp_down = put(f"L{layer_idx}.mlp_down_p{self.mlp_pad}_w{self.mlp_stream.down_width}", mlp_down, mlp_dtype, shard_dim=-2)
 
         def router():
             # HF: softmax((rmsnorm(x) * scale * H^-0.5) @ proj.T); fold scale and H^-0.5 into proj.
@@ -339,15 +350,17 @@ class FeedForward:
         up.deallocate(True)
         out = ttnn.linear(h, self.mlp_down, compute_kernel_config=HIFI2, memory_config=DRAM, dtype=dtype)
         h.deallocate(True)
-        return out
+        return self._unpad(out)
 
     def decode_b1(self, normed, mlp_in, exp_in, boundary) -> ttnn.Tensor:
         """One decode token on compact boundaries (boundary.py). normed, mlp_in, exp_in: row form BF16
         from the attention tail. Returns this chip's [mlp | experts] partial sums, compact FP32."""
         out = boundary.compact(2)
-        mlp = self._mlp(mlp_in, dtype=ttnn.float32)
-        boundary.pack(mlp, out, self.pack_cores)
-        mlp.deallocate(True)
+        ms = self.mlp_stream
+        h = ms.h_tensor()
+        ms.gate_up(mlp_in, self.mlp_gate_up, h)
+        ms.down(h, self.mlp_down, out, compact_chunk0=0)
+        h.deallocate(True)
         ids, weights = self._route(normed, 1)
         st = self.stream
         act = st.act_tensor()
