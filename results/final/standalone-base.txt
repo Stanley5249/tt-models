@@ -1,0 +1,10 @@
+base 5887694 ttnn 0.81.1+conda.8 host: governor performance, profile performance
+execute 31.422
+execute 31.493
+execute 31.498
+b1 "median_ms": 33.38, "mean_ms": 33.29
+b1 "median_ms": 32.79, "mean_ms": 32.91
+b1 "median_ms": 33.59, "mean_ms": 33.47
+b4 "median_ms": 55.53, "mean_ms": 55.57
+b4 "median_ms": 55.48, "mean_ms": 55.38
+b4 "median_ms": 55.39, "mean_ms": 55.39

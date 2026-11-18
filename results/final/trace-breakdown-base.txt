@@ -1,0 +1,85 @@
+decode0 chip 0.0: 2199 ops, span 34.00 ms, FW 51.44 ms, kernel 31.62 ms, gaps 0.82 ms (0.37 us/op)
+decode0 chip 1.0: 2199 ops, span 34.04 ms, FW 50.01 ms, kernel 31.61 ms, gaps 0.86 ms (0.39 us/op)
+decode1 chip 0.0: 2199 ops, span 34.01 ms, FW 51.44 ms, kernel 31.62 ms, gaps 0.82 ms (0.37 us/op)
+decode1 chip 1.0: 2199 ops, span 34.02 ms, FW 49.97 ms, kernel 31.60 ms, gaps 0.86 ms (0.39 us/op)
+decode2 chip 0.0: 2199 ops, span 34.00 ms, FW 51.41 ms, kernel 31.61 ms, gaps 0.83 ms (0.38 us/op)
+decode2 chip 1.0: 2199 ops, span 34.02 ms, FW 49.96 ms, kernel 31.60 ms, gaps 0.86 ms (0.39 us/op)
+
+per position, decode1 chip 0, mean over 30 layers:
+                                         op           a           b  cores  kern_us  kern_max  gap_us
+pos                                                                                                  
+0       InterleavedToShardedDeviceOperation  2816[2816]         NaN    8.0      2.4       3.0     0.5
+1                  LayerNormDeviceOperation  2816[2816]      32[32]    8.0     13.6      14.0     0.5
+2       ShardedToInterleavedDeviceOperation  2816[2816]         NaN    8.0      2.3       2.4     1.1
+3                     MatmulDeviceOperation  2816[2816]  4096[4096]   64.0     69.7      79.6     0.0
+4                ReshapeViewDeviceOperation  4096[4096]         NaN   16.0     14.0      15.2     0.0
+5                  LayerNormDeviceOperation    256[256]         NaN    1.0     10.6      14.3     0.4
+6                   BinaryNgDeviceOperation    256[256]    256[256]   64.0      4.4       4.6     0.0
+7                     MatmulDeviceOperation    256[256]    256[256]   16.0     12.1      13.6     0.0
+8                   BinaryNgDeviceOperation    256[256]    256[256]   64.0      4.2       4.6     0.0
+9                   BinaryNgDeviceOperation    256[256]    256[256]   64.0      4.5       4.6     0.0
+10                  BinaryNgDeviceOperation    256[256]    256[256]   64.0      4.6       4.8     0.0
+11               ReshapeViewDeviceOperation    256[256]         NaN   64.0      5.0       6.5     0.0
+12   NLPCreateQKVHeadsDecodeDeviceOperation  4096[4096]         NaN    1.0      7.7       7.8     1.3
+13          PagedUpdateCacheDeviceOperation    256[256]    256[256]    1.0      9.8      10.5     1.5
+14          PagedUpdateCacheDeviceOperation    256[256]    256[256]    1.0      9.8      10.5     1.5
+15                SdpaDecodeDeviceOperation    256[256]    256[256]   64.0     28.5      32.8     4.1
+16      InterleavedToShardedDeviceOperation    256[256]         NaN    1.0      1.2       1.6     0.3
+17      NLPConcatHeadsDecodeDeviceOperation    256[256]         NaN    8.0      2.0       2.3     0.0
+18                    MatmulDeviceOperation  2048[2048]  2816[2816]   64.0     40.5      63.2     0.0
+19      ShardedToInterleavedDeviceOperation  2816[2816]         NaN    8.0      2.1       2.5     0.0
+20                     SliceDeviceOperation  2816[2816]         NaN   64.0      3.4       3.8     0.0
+21             ReduceScatterDeviceOperation  2816[2816]         NaN    5.0     27.5      30.9     0.9
+22                 AllGatherDeviceOperation  1408[1408]         NaN    1.0     22.0      22.4     0.0
+23      InterleavedToShardedDeviceOperation  2816[2816]         NaN    8.0      3.1       3.7     0.0
+24                 LayerNormDeviceOperation  2816[2816]      32[32]    8.0     14.2      14.5     0.0
+25      ShardedToInterleavedDeviceOperation  2816[2816]         NaN    8.0      2.3       2.4     1.1
+26                  BinaryNgDeviceOperation    256[256]    256[256]   64.0      5.1       6.0     0.0
+27      InterleavedToShardedDeviceOperation  2816[2816]         NaN    8.0      2.5       4.2     0.6
+28                 LayerNormDeviceOperation  2816[2816]         NaN    8.0     11.6      12.0     0.4
+29      ShardedToInterleavedDeviceOperation  2816[2816]         NaN    8.0      2.3       2.4     1.1
+30                  BinaryNgDeviceOperation    256[256]    256[256]   64.0      5.8       6.4     0.0
+31                    MatmulDeviceOperation  2816[2816]  2304[2304]   36.0     54.5      55.5     0.0
+32                     SliceDeviceOperation  2304[2304]         NaN   36.0      2.9       3.1     0.0
+33                     SliceDeviceOperation  2304[2304]         NaN   36.0      2.9       3.1     0.0
+34                  BinaryNgDeviceOperation  1152[1152]  1152[1152]   64.0      7.1       7.3     0.0
+35                    MatmulDeviceOperation  1152[1152]  2816[2816]   44.0     28.0      28.5     0.0
+36                  BinaryNgDeviceOperation    256[256]    256[256]   64.0      5.9       6.8     0.0
+37             TopkRouterGptDeviceOperation  2816[2816]    128[128]   12.0     68.5      70.5     2.8
+38                  TypecastDeviceOperation        8[8]         NaN   32.0      1.2       1.2     0.0
+39                EmbeddingsDeviceOperation        8[8]      32[32]    8.0      2.6       2.8     0.0
+40      TilizeWithValPaddingDeviceOperation      32[32]         NaN    1.0      3.7       3.8     1.5
+41               ReshapeViewDeviceOperation        8[8]         NaN   64.0      4.0       4.0     0.0
+42      TilizeWithValPaddingDeviceOperation        1[1]         NaN    1.0      4.5       4.5     1.5
+43                  BinaryNgDeviceOperation      32[32]       32[1]   64.0      4.5       4.6     0.0
+44               ReshapeViewDeviceOperation      32[32]         NaN    8.0      3.3       3.3     0.0
+45                     SliceDeviceOperation      32[32]         NaN    8.0      2.6       2.7     0.0
+46                     UnaryDeviceOperation    768[768]    768[768]   64.0      6.2       7.2     0.0
+47              SparseMatmulDeviceOperation  2816[2816]    768[768]   24.0    119.5     120.0     0.0
+48                     SliceDeviceOperation    768[768]         NaN   64.0      3.7       3.9     0.0
+49                     SliceDeviceOperation    768[768]         NaN   64.0      3.7       4.1     0.0
+50                  BinaryNgDeviceOperation  1152[1152]  1152[1152]   64.0     10.6      10.8     0.0
+51                  BinaryNgDeviceOperation    352[352]       32[1]   64.0      5.8       5.9     0.0
+52                     UnaryDeviceOperation    768[768]    768[768]   64.0     15.4      16.0     0.0
+53              SparseMatmulDeviceOperation    352[352]  2816[2816]   30.0     61.6      65.6     0.0
+54              FastReduceNCDeviceOperation  2816[2816]         NaN   64.0      9.8      10.3     0.0
+55                     SliceDeviceOperation  2816[2816]         NaN   64.0      3.4       3.8     0.0
+56                    ConcatDeviceOperation  2816[2816]  2816[2816]   64.0      6.2       6.6     0.0
+57             ReduceScatterDeviceOperation  5632[5632]         NaN    5.0     36.8      40.6     0.0
+58                 AllGatherDeviceOperation  2816[2816]         NaN    1.0     39.2      39.8     0.0
+59                     SliceDeviceOperation  5632[5632]         NaN   64.0      3.3       3.9     0.0
+60                     SliceDeviceOperation  5632[5632]         NaN   64.0      3.8       4.2     0.0
+61      InterleavedToShardedDeviceOperation  2816[2816]         NaN    8.0      2.7       3.7     0.0
+62                 LayerNormDeviceOperation  2816[2816]      32[32]    8.0     13.9      14.2     0.2
+63      ShardedToInterleavedDeviceOperation  2816[2816]         NaN    8.0      2.3       2.4     1.1
+64      InterleavedToShardedDeviceOperation  2816[2816]         NaN    8.0      2.4       3.7     0.9
+65                 LayerNormDeviceOperation  2816[2816]      32[32]    8.0     13.5      13.9     0.5
+66      ShardedToInterleavedDeviceOperation  2816[2816]         NaN    8.0      2.3       2.8     1.1
+67                  BinaryNgDeviceOperation    256[256]    256[256]   64.0      5.0       5.9     0.0
+68      InterleavedToShardedDeviceOperation  2816[2816]         NaN    8.0      2.4       3.0     0.7
+69                 LayerNormDeviceOperation  2816[2816]      32[32]    8.0     13.5      14.0     0.5
+70      ShardedToInterleavedDeviceOperation  2816[2816]         NaN    8.0      2.3       2.4     1.1
+71                  BinaryNgDeviceOperation    256[256]    256[256]   64.0      5.1       6.0     0.0
+72                  BinaryNgDeviceOperation  2816[2816]         NaN   64.0      7.3       7.4     0.0
+
+layer total kernel 947 us, gaps 27 us; tail 8 ops kernel 3207 us, gaps 2 us

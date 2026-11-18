@@ -1,0 +1,30 @@
+decode0 chip 0.0: 574 ops, span 15.75 ms, FW 24.53 ms, kernel 15.01 ms, gaps 0.34 ms (0.60 us/op)
+decode0 chip 1.0: 574 ops, span 16.27 ms, FW 25.69 ms, kernel 15.53 ms, gaps 0.35 ms (0.61 us/op)
+decode1 chip 0.0: 574 ops, span 15.75 ms, FW 24.57 ms, kernel 15.01 ms, gaps 0.34 ms (0.59 us/op)
+decode1 chip 1.0: 574 ops, span 16.28 ms, FW 25.69 ms, kernel 15.54 ms, gaps 0.35 ms (0.61 us/op)
+decode2 chip 0.0: 574 ops, span 15.75 ms, FW 24.55 ms, kernel 15.01 ms, gaps 0.34 ms (0.60 us/op)
+decode2 chip 1.0: 574 ops, span 16.28 ms, FW 25.69 ms, kernel 15.53 ms, gaps 0.35 ms (0.61 us/op)
+
+per position, decode1 chip 0, mean over 30 layers:
+                                         op           a           b  cores  kern_us  kern_max  gap_us
+pos                                                                                                  
+0                     MatmulDeviceOperation  2816[2816]  4096[4096]   64.0     70.3      81.5     0.0
+1                  GenericOpDeviceOperation  4096[4096]    672[672]    5.0     24.2      24.6     0.1
+2    NLPCreateQKVHeadsDecodeDeviceOperation  4096[4096]         NaN    1.0      7.7       7.8     0.0
+3           PagedUpdateCacheDeviceOperation    256[256]    256[256]    1.0      9.8      10.6     1.5
+4           PagedUpdateCacheDeviceOperation    256[256]    256[256]    1.0      9.8      10.7     1.5
+5                 SdpaDecodeDeviceOperation    256[256]    256[256]   64.0     28.5      32.8     4.2
+6       InterleavedToShardedDeviceOperation    256[256]         NaN    1.0      1.3       1.6     0.3
+7       NLPConcatHeadsDecodeDeviceOperation    256[256]         NaN    8.0      2.0       2.3     0.0
+8                     MatmulDeviceOperation  2048[2048]  2816[2816]   64.0     41.2      64.8     0.0
+9                  GenericOpDeviceOperation  2816[2816]      96[96]    8.0      2.9       3.0     0.0
+10            AllGatherAsyncDeviceOperation      96[96]         NaN    5.0     14.1      18.1     0.8
+11                 GenericOpDeviceOperation      96[96]    672[672]    6.0     26.0      26.6     0.0
+12                 GenericOpDeviceOperation  2816[2816]    128[128]   47.0     50.8      55.2     0.0
+13                 GenericOpDeviceOperation  3072[3072]  1152[1152]   24.0     20.5      21.6     0.0
+14                 GenericOpDeviceOperation    768[768]  2816[2816]   44.0     46.9      47.4     0.0
+15                 GenericOpDeviceOperation  3072[3072]  2816[2816]   24.0     26.1      26.5     0.0
+16            AllGatherAsyncDeviceOperation    192[192]         NaN    5.0     14.2      17.7     0.0
+17                 GenericOpDeviceOperation    192[192]      96[96]    6.0     35.3      36.3     2.9
+
+layer total kernel 432 us, gaps 11 us; tail 34 ops kernel 2063 us, gaps 0 us

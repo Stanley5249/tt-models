@@ -1,0 +1,6 @@
+decode0 chip 0.0: 604 ops, span 16.85 ms, FW 27.40 ms, kernel 16.19 ms, gaps 0.24 ms (0.40 us/op)
+decode0 chip 1.0: 604 ops, span 17.39 ms, FW 28.38 ms, kernel 16.73 ms, gaps 0.24 ms (0.40 us/op)
+decode1 chip 0.0: 604 ops, span 16.81 ms, FW 27.34 ms, kernel 16.16 ms, gaps 0.24 ms (0.40 us/op)
+decode1 chip 1.0: 604 ops, span 17.35 ms, FW 28.31 ms, kernel 16.70 ms, gaps 0.24 ms (0.40 us/op)
+decode2 chip 0.0: 604 ops, span 16.83 ms, FW 27.39 ms, kernel 16.17 ms, gaps 0.24 ms (0.40 us/op)
+decode2 chip 1.0: 604 ops, span 17.37 ms, FW 28.33 ms, kernel 16.71 ms, gaps 0.24 ms (0.40 us/op)

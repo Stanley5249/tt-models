@@ -1,0 +1,10 @@
+final f158df1 ttnn 0.81.1+conda.8 host: governor performance, profile performance
+execute 15.625
+execute 15.627
+execute 15.624
+b1 "median_ms": 17.52, "mean_ms": 17.44
+b1 "median_ms": 17.53, "mean_ms": 17.52
+b1 "median_ms": 17.55, "mean_ms": 17.53
+b4 "median_ms": 56.44, "mean_ms": 56.39
+b4 "median_ms": 56.51, "mean_ms": 56.48
+b4 "median_ms": 56.61, "mean_ms": 56.68
