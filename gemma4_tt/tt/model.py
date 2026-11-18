@@ -7,6 +7,7 @@ device memory); the tied LM head is uploaded once, split over the vocabulary.
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 import ttnn
 from transformers.models.gemma4 import modeling_gemma4 as hf
@@ -14,7 +15,13 @@ from transformers.models.gemma4 import modeling_gemma4 as hf
 from gemma4_tt.checkpoint import Checkpoint
 from gemma4_tt.reference import embed_scale
 from gemma4_tt.tt.attention import Attention, ring_selection
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, norm_weight, rms_norm
+from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, dram_sharded, norm_weight, rms_norm, width_sharded_l1
+
+# The LM head is read as LM_SPLITS DRAM-sharded matmuls per chip: 2.5 -> 1.37 ms per
+# decode step against one interleaved matmul (scripts/bench_lm_head_dram.py).
+# A single DRAM-sharded matmul over all 65536 columns does not fit L1.
+LM_SPLITS = 16
+LM_CORES = 8
 from gemma4_tt.tt.moe import FeedForward
 
 
@@ -118,9 +125,8 @@ class Gemma4TT:
         loader = WeightLoader(mesh, cache_dir)
         self.layers = [DecoderLayer(loader, ckpt, cfg, i, precision) for i in range(self.num_layers)]
         self.final_norm = loader.put("final_norm", lambda: norm_weight(ckpt.get("norm.weight")), layout=ttnn.ROW_MAJOR_LAYOUT)
-        self.lm_head = loader.put(
-            "lm_head", lambda: ckpt.get("embed_tokens.weight").T.contiguous()[None, None], precision.lm_head, shard_dim=-1
-        )
+        self.lm_head = self._lm_head(loader, ckpt, precision.lm_head)
+        self.lm_in = width_sharded_l1(self.hidden, LM_CORES)
         self.embed_table = ckpt.get("embed_tokens.weight")  # BF16 [V, H] on host
         self.embed_scale = torch.tensor(embed_scale(self.hidden), dtype=torch.bfloat16)
         self.rope = self._rope_tables(max_seq_len)
@@ -138,6 +144,30 @@ class Gemma4TT:
             cos, sin = rotary(torch.zeros(1, dtype=torch.float32), pos, kind)
             out[kind] = (cos[0], sin[0])
         return out
+
+    def _lm_head(self, loader, ckpt, dtype) -> list[ttnn.Tensor]:
+        """LM_SPLITS DRAM-sharded column blocks per chip; chip c split i holds vocab
+        columns c * V/tp + i * width onwards, so concatenating the splits on each chip
+        and then the chips gives the vocabulary order."""
+        per_chip = self.vocab // self.tp
+        width = per_chip // LM_SPLITS
+        mem = dram_sharded(self.mesh, self.hidden, width)
+        self.lm_cfg = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
+            in0_block_w=self.hidden // TILE // LM_CORES, per_core_M=1, per_core_N=width // TILE // LM_CORES, fused_activation=None
+        )
+        self.lm_out = width_sharded_l1(width, LM_CORES)
+        table = {}
+
+        def split(i):
+            if "t" not in table:
+                table["t"] = ckpt.get("embed_tokens.weight").T  # [H, V]
+            t = table["t"]
+            cols = [t[:, c * per_chip + i * width : c * per_chip + (i + 1) * width] for c in range(self.tp)]
+            return torch.cat(cols, -1).contiguous()[None, None]
+
+        heads = [loader.put(f"lm_head_ds{LM_SPLITS}_{i}", lambda i=i: split(i), dtype, shard_dim=-1, memory_config=mem) for i in range(LM_SPLITS)]
+        table.clear()
+        return heads
 
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
         return self.embed_table[ids] * self.embed_scale  # BF16 math, as HF
@@ -358,25 +388,39 @@ class Gemma4TT:
         return logits
 
     def _logits_device(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        """Raw fp32 logits, row-major; the host applies the final softcap
+        (three fp32 ops over the tile-padded [32, 65536] took 0.63 ms here)."""
         h = rms_norm(x, self.final_norm, self.cfg.rms_norm_eps)
-        logits = ttnn.linear(h, self.lm_head, compute_kernel_config=HIFI2, memory_config=DRAM, dtype=ttnn.float32)
+        hs = ttnn.to_memory_config(h, self.lm_in)
         h.deallocate(True)
-        cap = self.cfg.final_logit_softcapping
-        scaled = ttnn.mul(logits, 1.0 / cap)
-        logits.deallocate(True)
-        t = ttnn.tanh(scaled)
-        scaled.deallocate(True)
-        capped = ttnn.mul(t, cap)
-        t.deallocate(True)
-        # Row-major drops the tile padding, so the host reads B rows instead of
-        # 32 (9 ms -> under 1 ms for one user's 131072 fp32 logits).
-        out = ttnn.to_layout(capped, ttnn.ROW_MAJOR_LAYOUT, memory_config=DRAM)
-        capped.deallocate(True)
+        rows = x.shape[2]
+        parts = []
+        for w in self.lm_head:
+            o = ttnn.linear(hs, w, program_config=self.lm_cfg, compute_kernel_config=HIFI2, memory_config=self.lm_out, dtype=ttnn.float32)
+            # Untilizing straight from L1 drops the tile padding, so the host reads
+            # B rows instead of 32 (9 ms -> under 1 ms for 131072 fp32 logits), and
+            # the row-major concat below only moves those rows.
+            parts.append(ttnn.untilize_with_unpadding(o, output_tensor_end=[0, 0, rows - 1, o.shape[3] - 1], memory_config=DRAM))
+            o.deallocate(True)
+        hs.deallocate(True)
+        out = ttnn.concat(parts, dim=-1)
+        for o in parts:
+            o.deallocate(True)
         return out
 
     def _read_logits(self, out: ttnn.Tensor) -> torch.Tensor:
         logits = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float()
-        return logits.reshape(-1, self.vocab)
+        cap = self.cfg.final_logit_softcapping
+        logits = logits.reshape(-1, self.vocab)
+        if cap:
+            # numpy ufuncs run on this thread. torch's pool sleeps during the ~30 ms
+            # device wait, and waking it made the same in-place softcap take 1 ms
+            # instead of 0.2 ms.
+            arr = logits.numpy()
+            np.divide(arr, cap, out=arr)
+            np.tanh(arr, out=arr)
+            np.multiply(arr, cap, out=arr)
+        return logits
 
     def release_traces(self):
         for tid, dev, out in self.traces.values():
