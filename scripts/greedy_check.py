@@ -4,8 +4,10 @@
     pixi run python scripts/greedy_check.py --compare results/greedy/base.json
 
 Uses traced decode, as serving does. A comparison reports, per prompt, how
-many leading tokens match; numerically different kernels can legitimately
-diverge after a near-tie, so read the texts when a prompt diverges early.
+many leading tokens match up to the reference's first end-of-turn token
+(serving stops there, and the text after it is flat and near-tied).
+Numerically different kernels can legitimately diverge after a near-tie, so
+read the texts when a prompt diverges early.
 """
 
 import argparse
@@ -57,10 +59,13 @@ def main():
         args.save.parent.mkdir(parents=True, exist_ok=True)
         args.save.write_text(json.dumps(results, indent=1))
     ref = json.loads(args.compare.read_text()) if args.compare else None
+    eos = set(tok.convert_tokens_to_ids(["<turn|>"])) | {tok.eos_token_id}
     for i, r in enumerate(results):
         line = repr(r["text"][:100])
         if ref:
-            a, b = r["ids"], ref[i]["ids"]
+            b = ref[i]["ids"]
+            b = b[: next((j + 1 for j, t in enumerate(b) if t in eos), len(b))]
+            a = r["ids"][: len(b)]
             same = next((j for j, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
             line = f"match {same}/{len(a)}  " + line
             if same < len(a):

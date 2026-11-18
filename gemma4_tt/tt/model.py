@@ -15,7 +15,7 @@ from transformers.models.gemma4 import modeling_gemma4 as hf
 from gemma4_tt.checkpoint import Checkpoint
 from gemma4_tt.reference import embed_scale
 from gemma4_tt.tt.attention import Attention, ring_selection
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, dram_sharded, norm_weight, rms_norm, width_sharded_l1
+from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, dram_sharded, init_ccl, norm_weight, rms_norm, width_sharded_l1
 
 # The LM head is read as LM_SPLITS DRAM-sharded matmuls per chip: 2.5 -> 1.37 ms per
 # decode step against one interleaved matmul (scripts/bench_lm_head_dram.py).
@@ -132,6 +132,7 @@ class Gemma4TT:
         self.rope = self._rope_tables(max_seq_len)
         self.kv_caches = None
         self.traces = {}
+        init_ccl(mesh)
 
     # -- host-side tables ----------------------------------------------------
 
