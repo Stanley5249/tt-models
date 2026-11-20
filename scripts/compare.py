@@ -103,10 +103,13 @@ def main():
         model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, num_layers=args.layers)
         print(f"model loaded in {time.time() - t0:.0f}s", flush=True)
         if args.perturb:
-            plain, gen = model.embed, torch.Generator().manual_seed(args.perturb)
+            plain = model.embed
 
             def embed(t):
+                # Noise keyed by the call's tokens, so calls the model makes for itself
+                # (trace warm-up) do not shift the noise of the measured steps.
                 x = plain(t)
+                gen = torch.Generator().manual_seed(args.perturb * 1_000_003 + int((t.long() * (torch.arange(t.numel()) + 1)).sum()))
                 return (x.float() * (1 + 2**-9 * torch.randn(x.shape, generator=gen))).to(x.dtype)
 
             model.embed = embed
