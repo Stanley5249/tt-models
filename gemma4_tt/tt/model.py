@@ -44,7 +44,7 @@ LM_CORES = 8
 # (the expert-major MoE gathers k = 8 rows per token) whatever chunk vLLM schedules.
 PREFILL_CHUNK = 4096
 
-from gemma4_tt.tt.moe import FeedForward  # noqa: E402
+from gemma4_tt.tt.moe import STREAM_ROWS, FeedForward  # noqa: E402
 
 
 @dataclass
@@ -162,6 +162,8 @@ class Gemma4TT:
         block_size: int = 64,
         num_layers: int | None = None,
     ):
+        if max_batch > STREAM_ROWS:
+            raise ValueError(f"decode streams the experts of at most {STREAM_ROWS} rows; got max_batch={max_batch}")
         self.mesh = mesh
         self.ckpt = ckpt = ckpt or Checkpoint()
         self.cfg = cfg = ckpt.config

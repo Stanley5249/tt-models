@@ -33,7 +33,8 @@ void kernel_main() {
     constexpr uint32_t split = get_compile_time_arg_val(8);
     constexpr uint32_t k_stride = get_compile_time_arg_val(9);  // split: bytes per K row of the bank
     constexpr uint32_t up_delta = get_compile_time_arg_val(10);  // split: up tile offset from gate, in tiles
-    constexpr auto idx_args = TensorAccessorArgs<11>();
+    constexpr uint32_t id_bytes = get_compile_time_arg_val(11);  // the ids row, <= 64
+    constexpr auto idx_args = TensorAccessorArgs<12>();
 
     constexpr uint32_t block_bytes = block_tiles * tile_bytes;
     constexpr uint32_t packet_bytes = split ? tile_bytes : block_bytes / packets;
@@ -42,8 +43,8 @@ void kernel_main() {
 
     cb_reserve_back(cb_scr, 1);
     const uint32_t scr = get_write_ptr(cb_scr);
-    const auto s_idx = TensorAccessor(idx_args, idx_addr, 32);
-    read_row0(s_idx, scr, 32);
+    const auto s_idx = TensorAccessor(idx_args, idx_addr, id_bytes);
+    read_row0(s_idx, scr, id_bytes);
     noc_async_read_barrier();
     volatile tt_l1_ptr uint16_t* ids = reinterpret_cast<volatile tt_l1_ptr uint16_t*>(scr);
     uint32_t offsets[slots];

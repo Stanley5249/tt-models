@@ -1,4 +1,4 @@
-"""Batch-1 decode experts as two DRAM-streaming generic ops (kernels/expert_*.cpp).
+"""Decode experts as two DRAM-streaming generic ops (kernels/expert_*.cpp).
 
 ttnn's indexed sparse_matmul splits only N over cores and reads the routed
 experts tile by tile: 120 + 62 us per layer for the 8 routed experts' 13 MB
@@ -18,8 +18,13 @@ Layouts (per chip, interleaved BFP4, tile page p on DRAM bank p % 12):
   columns b + 12 j (j = 0..7), k-major, 88 tiles per expert.
 
 gate_up: act[slot, pair] = gelu_tanh(x Wg) * (x Wu) * w_slot * per_expert_scale[e]
-into a [32, 8 * 352] tile tensor (row 0). down: out[col] = sum over slots and k
-of act . Wd, the slot sum fused into the K accumulation.
+into a [32, slots * 352] tile tensor. down: out[col] = sum over slots and k of
+act . Wd, the slot sum fused into the K accumulation.
+
+Several decode tokens (rows 0 .. B - 1 of every tile) share one op pair: the
+matmuls compute all rows anyway, and slot s = 8 * token + j scales only its
+token's row, so the down's slot sum leaves each token's experts in its row.
+The weight bytes grow with the B * 8 slots, the op count does not.
 
 MlpStream runs the shared dense MLP through the same kernels: its per-chip
 gate|up [2816, 2304] BFP8 has 72 column tiles, so bank b holds the 3 pairs
@@ -131,12 +136,21 @@ def run(parts):
     return ttnn.generic_op(tensors, ttnn.merge_program_descriptors([p for p, _ in parts]))
 
 
+def _id_bytes(slots: int) -> int:
+    """Bytes the kernels read of the row-major ids / weights row (scratch holds 64)."""
+    n = max(32, 2 * slots)
+    assert n <= 64, "the kernels' scratch holds 32 slots"
+    return n
+
+
 def gate_up_op(
-    assign, cores, x, ids, weights, scale, w, act, *, kx, slots_per_core, pairs, n_scale, split=None, fidelity=ttnn.MathFidelity.LoFi, build=False
+    assign, cores, x, ids, weights, scale, w, act, *, kx, slots_per_core, pairs, n_scale, rows=1, slots_per_row=0,
+    split=None, fidelity=ttnn.MathFidelity.LoFi, build=False
 ):
     """act[slot, pair] = gelu_tanh(x Wg) * (x Wu) * weights[slot] * scale[ids[slot]] (kernels/expert_gate_up_*).
 
     assign: (core, bank, r, vc, slot0, pair_j, act_pair) per core. act tile = slot * pairs + act_pair.
+    rows: decode tokens (tile rows); slot s scales row s // slots_per_row only, or every row with 0.
     split: None for the expert layout (contiguous (gate, up) per k, expert-major), or (k_stride_tiles,
     up_delta) for the dense layout (one-tile packets at row offsets pair_j and pair_j + up_delta)."""
     cb_x, cb_w, cb_sc, cb_rs, cb_ws, cb_act = 0, 1, 2, 3, 4, 16
@@ -165,9 +179,10 @@ def gate_up_op(
         ]
     expert_bytes = kx * 2 * tb
     k_stride, up_delta = split or (0, 0)
-    reader_ct = [cb_w, cb_rs, slots_per_core, blocks, 2 * block_k, 2, tb, expert_bytes, int(split is not None), k_stride * tb, up_delta]
+    id_bytes = _id_bytes(max(a[4] for a in assign) + slots_per_core)
+    reader_ct = [cb_w, cb_rs, slots_per_core, blocks, 2 * block_k, 2, tb, expert_bytes, int(split is not None), k_stride * tb, up_delta, id_bytes]
     reader_ct += _accessor(ids)
-    writer_ct = [cb_x, cb_sc, cb_act, cb_ws, kx, slots_per_core, pairs, n_scale]
+    writer_ct = [cb_x, cb_sc, cb_act, cb_ws, kx, slots_per_core, pairs, n_scale, rows, slots_per_row, id_bytes]
     for t in (x, act, ids, weights, scale):
         writer_ct += _accessor(t)
     compute_ct = [cb_x, cb_w, cb_sc, cb_act, slots_per_core, blocks, block_k]
@@ -178,18 +193,21 @@ def gate_up_op(
     return (program, ios) if build else ttnn.generic_op(ios, program)
 
 
-def down_op(assign, cores, act, ids, w, out, *, slots, kt, cols, banks, bank_cols, n_tiles, compact_chunk0=None, fidelity=ttnn.MathFidelity.LoFi):
+def down_op(
+    assign, cores, act, ids, w, out, *, slots, kt, cols, banks, bank_cols, n_tiles, rows=1, compact_chunk0=None, fidelity=ttnn.MathFidelity.LoFi
+):
     """out[col] = sum over slots e and K tiles k of act[e, k] . W_{ids[e]}[k, col] (kernels/expert_down_*).
 
     w: interleaved [*, slots' K, banks * bank_cols * 32]; bank b holds columns b + banks * j. out: a
-    [1, 1, 1, H] BF16 row-form tensor, or with compact_chunk0 a compact FP32 tensor (boundary.py)."""
+    [1, 1, rows, H] BF16 row-form tensor, or with compact_chunk0 (one row) a compact FP32 tensor
+    (boundary.py)."""
+    assert compact_chunk0 is None or rows == 1
     cb_in0, cb_w, cb_rs, cb_zero, cb_out = 0, 1, 3, 4, 16
-    kin = slots * kt
     tb = _tile_bytes(w.dtype)
     compact = compact_chunk0 is not None
     out_dtype = ttnn.float32 if compact else ttnn.bfloat16
     cbs = [
-        _cb(cores, cb_in0, ttnn.bfloat16, BF16_TILE, kin),
+        _cb(cores, cb_in0, ttnn.bfloat16, BF16_TILE, 2 * kt),  # streamed one slot at a time
         _cb(cores, cb_w, w.dtype, tb, 3 * kt * cols),
         _cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
         _cb(cores, cb_zero, ttnn.bfloat16, 64, 1),
@@ -203,8 +221,8 @@ def down_op(assign, cores, act, ids, w, out, *, slots, kt, cols, banks, bank_col
         reader_rt[core.x][core.y] = [w.buffer_address(), ids.buffer_address(), bank, vc, j0]
         zero = pad if compact and i == 0 else 0
         writer_rt[core.x][core.y] = [act.buffer_address(), out.buffer_address(), bank, j0, (compact_chunk0 or 0) + chunks, zero]
-    reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb] + _accessor(ids)
-    writer_ct = [cb_in0, cb_out, kin, cols, banks, n_tiles, int(compact), compact_chunk0 or 0, cb_zero]
+    reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, _id_bytes(slots)] + _accessor(ids)
+    writer_ct = [cb_in0, cb_out, slots, cols, banks, n_tiles, int(compact), compact_chunk0 or 0, cb_zero, kt, rows]
     writer_ct += _accessor(act) + _accessor(out)
     compute_ct = [cb_in0, cb_w, cb_out, slots, kt, cols]
     program = ttnn.ProgramDescriptor(
@@ -214,20 +232,21 @@ def down_op(assign, cores, act, ids, w, out, *, slots, kt, cols, banks, bank_col
 
 
 class ExpertStream:
-    """Routed experts of one layer for one decode token (batch 1)."""
+    """Routed experts of one layer for `rows` decode tokens (one op pair for all of them)."""
 
-    def __init__(self, mesh, hidden: int, expert_local: int, top_k: int, n_experts: int, gate_up_readers=4, down_readers=2):
+    def __init__(self, mesh, hidden: int, expert_local: int, top_k: int, n_experts: int, rows: int = 1, gate_up_readers=4, down_readers=2):
         self.mesh = mesh
         self.banks = mesh.dram_grid_size().x
-        self.hidden, self.top_k, self.n_experts = hidden, top_k, n_experts
+        self.hidden, self.top_k, self.n_experts, self.rows = hidden, top_k, n_experts, rows
+        self.slots = top_k * rows
         self.kx = hidden // TILE  # 88
         self.pairs = expert_local // TILE  # 11 real (gate, up) column pairs per chip
         self.kt = self.pairs  # down K tiles
         self.n_tiles = hidden // TILE  # 88 real down columns
         self.bank_cols = -(-self.n_tiles // self.banks)  # 8
         self.down_width = self.bank_cols * self.banks * TILE  # 3072
-        assert top_k % gate_up_readers == 0 and self.bank_cols % down_readers == 0
-        self.gu_slots = top_k // gate_up_readers
+        assert self.slots % gate_up_readers == 0 and self.bank_cols % down_readers == 0
+        self.gu_slots = self.slots // gate_up_readers
         self.down_cols = self.bank_cols // down_readers
         assert self.down_cols <= 4, "fp32 dest holds 4 tiles"
         gu, self.gu_cores = _bank_cores(mesh, list(range(self.pairs)), gate_up_readers)
@@ -237,19 +256,19 @@ class ExpertStream:
 
     def act_tensor(self):
         return ttnn.allocate_tensor_on_device(
-            ttnn.Shape([1, 1, TILE, self.top_k * self.pairs * TILE]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, self.act_mem
+            ttnn.Shape([1, 1, TILE, self.slots * self.pairs * TILE]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, self.act_mem
         )
 
     def out_tensor(self, memory_config):
-        """[1, 1, 1, H]: the kernels write row 0 of every tile; padding rows stay unwritten."""
-        return ttnn.allocate_tensor_on_device(ttnn.Shape([1, 1, 1, self.hidden]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, memory_config)
+        """[1, 1, rows, H]: the kernels write the token rows of every tile; padding rows stay unwritten."""
+        return ttnn.allocate_tensor_on_device(ttnn.Shape([1, 1, self.rows, self.hidden]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, memory_config)
 
     def gate_up(self, x, ids, weights, scale, w_gate_up, act):
-        """x [1, 1, 1, H] BF16 tiles; ids / weights: topk_router_gpt's row-major [1, k]; scale: row-major
-        BF16 [1, E] per_expert_scale; w_gate_up: the interleaved [1, E, H, 2 * pad] BFP4 weight."""
+        """x [1, 1, rows, H] BF16 tiles; ids / weights: row-major [1, rows * k], token-major (slot 8 t + j);
+        scale: row-major BF16 [1, E] per_expert_scale; w_gate_up: the interleaved [1, E, H, 2 * pad] BFP4 weight."""
         return gate_up_op(
             self.gu_assign, self.gu_cores, x, ids, weights, scale, w_gate_up, act,
-            kx=self.kx, slots_per_core=self.gu_slots, pairs=self.pairs, n_scale=self.n_experts,
+            kx=self.kx, slots_per_core=self.gu_slots, pairs=self.pairs, n_scale=self.n_experts, rows=self.rows, slots_per_row=self.top_k,
         )
 
     def down(self, act, ids, w_down, out, compact_chunk0: int | None = None):
@@ -259,13 +278,13 @@ class ExpertStream:
         (boundary.py) whose chunks compact_chunk0 .. receive the sum, padding chunks zeroed."""
         return down_op(
             self.down_assign, self.down_cores, act, ids, w_down, out,
-            slots=self.top_k, kt=self.kt, cols=self.down_cols, banks=self.banks, bank_cols=self.bank_cols,
-            n_tiles=self.n_tiles, compact_chunk0=compact_chunk0,
+            slots=self.slots, kt=self.kt, cols=self.down_cols, banks=self.banks, bank_cols=self.bank_cols,
+            n_tiles=self.n_tiles, rows=self.rows, compact_chunk0=compact_chunk0,
         )
 
 
 class MlpStream:
-    """The shared dense MLP of one layer for one decode token, through the expert stream kernels."""
+    """The shared dense MLP of one layer for up to 4 decode tokens, through the expert stream kernels."""
 
     def __init__(self, mesh, hidden: int, mlp_pad: int, down_readers=2, down_slots=4, fidelity=ttnn.MathFidelity.HiFi2, exclude=()):
         """exclude: cores left free for an op that runs merged with gate_up (the router)."""
@@ -293,24 +312,31 @@ class MlpStream:
         self.ids_down = _const_row(mesh, list(range(down_slots)) + [0] * (16 - down_slots), ttnn.uint16)
         self.ones = _const_row(mesh, [1.0] * 16, ttnn.bfloat16)
 
-    def h_tensor(self):
+    def h_tensor(self, rows: int = 1):
         return ttnn.allocate_tensor_on_device(
-            ttnn.Shape([1, 1, 1, self.h_tiles * TILE]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG
+            ttnn.Shape([1, 1, rows, self.h_tiles * TILE]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG
         )
 
-    def gate_up(self, x, w_gate_up, h, build=False):
-        """h = gelu_tanh(x Wg) * (x Wu); w_gate_up: the interleaved per-chip [2816, 2 * 1152] BFP8 weight."""
+    def out_tensor(self, rows: int):
+        """[1, 1, rows, H] row form, for down without compact_chunk0."""
+        return ttnn.allocate_tensor_on_device(ttnn.Shape([1, 1, rows, self.hidden]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG)
+
+    def gate_up(self, x, w_gate_up, h, rows: int = 1, build=False):
+        """h = gelu_tanh(x Wg) * (x Wu) for the token rows of x; w_gate_up: the interleaved per-chip
+        [2816, 2 * 1152] BFP8 weight."""
         return gate_up_op(
             self.gu_assign, self.gu_cores, x, self.ids0, self.ones, self.ones, w_gate_up, h,
-            kx=self.kx, slots_per_core=1, pairs=0, n_scale=16, split=(self.row_tiles, self.per_bank), fidelity=self.fidelity, build=build,
+            kx=self.kx, slots_per_core=1, pairs=0, n_scale=16, rows=rows, slots_per_row=0,
+            split=(self.row_tiles, self.per_bank), fidelity=self.fidelity, build=build,
         )
 
-    def down(self, h, w_down, out, compact_chunk0: int = 0):
-        """out (compact FP32) chunks compact_chunk0.. = h @ W_down; w_down: [1152, 3072] BFP8 per chip."""
+    def down(self, h, w_down, out, compact_chunk0: int | None = 0, rows: int = 1):
+        """out = h @ W_down; w_down: [1152, 3072] BFP8 per chip. out: compact FP32 chunks compact_chunk0..
+        (one row), or with compact_chunk0=None a [1, 1, rows, H] BF16 row-form tensor."""
         return down_op(
             self.down_assign, self.down_cores, h, self.ids_down, w_down, out,
             slots=self.down_slots, kt=self.down_kt, cols=self.down_cols, banks=self.banks, bank_cols=self.bank_cols,
-            n_tiles=self.n_tiles, compact_chunk0=compact_chunk0, fidelity=self.fidelity,
+            n_tiles=self.n_tiles, rows=rows, compact_chunk0=compact_chunk0, fidelity=self.fidelity,
         )
 
 

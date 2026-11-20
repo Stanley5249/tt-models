@@ -23,7 +23,8 @@ void kernel_main() {
     constexpr uint32_t cols = get_compile_time_arg_val(4);       // J
     constexpr uint32_t bank_cols = get_compile_time_arg_val(5);  // columns per bank (8)
     constexpr uint32_t tile_bytes = get_compile_time_arg_val(6);
-    constexpr auto idx_args = TensorAccessorArgs<7>();
+    constexpr uint32_t id_bytes = get_compile_time_arg_val(7);  // the ids row, <= 64
+    constexpr auto idx_args = TensorAccessorArgs<8>();
 
     constexpr uint32_t packet_bytes = cols * tile_bytes;
     constexpr uint32_t k_stride = bank_cols * tile_bytes;
@@ -32,8 +33,8 @@ void kernel_main() {
 
     cb_reserve_back(cb_scr, 1);
     const uint32_t scr = get_write_ptr(cb_scr);
-    const auto s_idx = TensorAccessor(idx_args, idx_addr, 32);
-    read_row0(s_idx, scr, 32);
+    const auto s_idx = TensorAccessor(idx_args, idx_addr, id_bytes);
+    read_row0(s_idx, scr, id_bytes);
     noc_async_read_barrier();
     volatile tt_l1_ptr uint16_t* ids = reinterpret_cast<volatile tt_l1_ptr uint16_t*>(scr);
 
