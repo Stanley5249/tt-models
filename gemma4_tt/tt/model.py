@@ -2,6 +2,10 @@
 
 The token embedding stays on the host (1.5 GB BF16 that would otherwise take
 device memory); the tied LM head is uploaded once, split over the vocabulary.
+
+The model holds no per-request state: every K/V row lives in the paged cache
+(kv_cache.py) at the blocks the caller's page tables name, so requests can be
+moved, preempted, resumed and share cached prefixes without telling the model.
 """
 
 from dataclasses import dataclass
@@ -14,8 +18,9 @@ from transformers.models.gemma4 import modeling_gemma4 as hf
 
 from gemma4_tt.checkpoint import Checkpoint
 from gemma4_tt.reference import embed_scale
-from gemma4_tt.tt.attention import Attention, ring_selection
+from gemma4_tt.tt.attention import CHUNK_ALIGN, Attention, PrefillChunk
 from gemma4_tt.tt.boundary import Boundary, compact_tensor, to_compact
+from gemma4_tt.tt.kv_cache import KvCache
 from gemma4_tt.tt.common import (
     DRAM,
     HIFI2,
@@ -35,7 +40,11 @@ from gemma4_tt.tt.common import (
 # A single DRAM-sharded matmul over all 65536 columns does not fit L1.
 LM_SPLITS = 16
 LM_CORES = 8
-from gemma4_tt.tt.moe import FeedForward
+# Longest piece of a prompt one prefill pass computes. It bounds activation memory
+# (the expert-major MoE gathers k = 8 rows per token) whatever chunk vLLM schedules.
+PREFILL_CHUNK = 4096
+
+from gemma4_tt.tt.moe import FeedForward  # noqa: E402
 
 
 @dataclass
@@ -108,16 +117,16 @@ class DecoderLayer:
             x3 = x4
         return x3
 
-    def prefill(self, x, rope, kv_cache, fill):
+    def prefill(self, x, rope, kv, chunk):
         h = self._rms(x, self.input_ln)
-        a = self.attn.prefill(h, rope, kv_cache, fill)
+        a = self.attn.prefill(h, rope, kv, chunk)
         h.deallocate(True)
         return self._finish(x, a)
 
-    def decode_b1(self, xc, h, rope, kv_cache, page_table, cur_pos, b: Boundary, x_page0: int = 0):
+    def decode_b1(self, xc, h, rope, kv, page_table, cur_pos, b: Boundary, x_page0: int = 0):
         """One decode token on compact boundaries: xc compact FP32 residual, h its normed row form.
         Returns the next (xc, h); h of the last layer is final-normed."""
-        a = self.attn.decode_b1(h, rope, kv_cache, page_table, cur_pos, b)
+        a = self.attn.decode_b1(h, rope, kv, page_table, cur_pos, b)
         g = all_gather_compact(a)
         a.deallocate(True)
         x2, n, m_in, e_in = b.compact(), b.row(), b.row(), b.row()
@@ -134,9 +143,9 @@ class DecoderLayer:
         x2.deallocate(True)
         return x3, h2
 
-    def decode(self, x, rope, kv_cache, page_table, cur_pos):
+    def decode(self, x, rope, kv, page_table, cur_pos):
         h = self._rms(x, self.input_ln)
-        a = self.attn.decode(h, rope, kv_cache, page_table, cur_pos)
+        a = self.attn.decode(h, rope, kv, page_table, cur_pos)
         h.deallocate(True)
         return self._finish(x, a)
 
@@ -185,8 +194,9 @@ class Gemma4TT:
         self.input_ln0 = self.layers[0]._raw["input_layernorm"]
         self.embed_table = ckpt.get("embed_tokens.weight")  # BF16 [V, H] on host
         self.embed_scale = torch.tensor(embed_scale(self.hidden), dtype=torch.bfloat16)
-        self.rope = self._rope_tables(max_seq_len)
-        self.kv_caches = None
+        # A chunk's padding can run CHUNK_ALIGN rows past the last position.
+        self.rope = self._rope_tables(max_seq_len + CHUNK_ALIGN)
+        self.kv: KvCache | None = None
         self.traces = {}
         self._trace_inputs: dict[int, dict[str, ttnn.Tensor]] = {}
         self._pt_last, self._pt_src = {}, {}
@@ -238,102 +248,102 @@ class Gemma4TT:
 
     # -- KV cache ------------------------------------------------------------
 
-    def allocate_kv_cache(self, num_blocks: int):
-        """Global layers: [num_blocks, kv/chip, block, 512]. Sliding layers: one ring of `window` per slot."""
-        bs = self.block_size
-        self.num_blocks = num_blocks
-        ring_blocks = self.window // bs
-        caches = []
-        for layer in self.layers:
-            s = layer.attn.shape
-            blocks = self.max_batch * ring_blocks if s.sliding else num_blocks
-            shape = (blocks, s.n_kv, bs, s.head_dim)
-            pair = [
-                ttnn.zeros(shape, dtype=self.precision.kv_cache, layout=ttnn.TILE_LAYOUT, device=self.mesh, memory_config=DRAM)
-                for _ in range(2)
-            ]
-            caches.append(pair)
-        self.kv_caches = caches
-        self.slot_blocks = torch.arange(self.max_batch * ring_blocks, dtype=torch.int32).reshape(self.max_batch, ring_blocks)
-        return caches
+    def allocate_kv_cache(self, rows: int, tokens: int) -> torch.Tensor:
+        """For scripts and tests without vLLM: allocate the layout vLLM would, sized
+        for `rows` sequences of up to `tokens` positions, and return their page tables
+        [groups, rows, width]. The adapter builds `kv` from vLLM's plan instead."""
+        shapes = [layer.attn.shape for layer in self.layers]
+        types = self.cfg.layer_types[: self.num_layers]
+        self.kv = KvCache.standalone(self.mesh, types, shapes, self.block_size, self.precision.kv_cache, rows, tokens, self._ring_tokens)
+        return self.page_tables(rows, tokens)
 
-    def remap_slots(self, slot_remap):
-        """Destination slot i takes the sliding ring of old slot slot_remap[i] (host-side only)."""
-        self.slot_blocks = self.slot_blocks[torch.as_tensor(slot_remap, dtype=torch.long)]
+    @property
+    def table_width(self) -> int:
+        """Blocks per sequence in the decode page tables (fixed, so traces can replay)."""
+        # paged ops need fewer blocks per sequence than blocks in the pool
+        return min(-(-self.max_seq_len // min(self.kv.block_sizes)), self.kv.num_blocks - 1)
+
+    def page_tables(self, rows: int, tokens: int) -> torch.Tensor:
+        """Disjoint page tables [groups, rows, width] for `rows` sequences of up to
+        `tokens` positions, for scripts and warmup."""
+        return self.kv.tables(rows, tokens, self.table_width, self._ring_tokens)
+
+    @property
+    def _ring_tokens(self) -> int:
+        """Sliding positions a script's page table keeps apart: the window behind a
+        prefill chunk, plus the chunk."""
+        return self.window + PREFILL_CHUNK + CHUNK_ALIGN
 
     # -- prefill -------------------------------------------------------------
 
-    def prefill(self, tokens: torch.Tensor, page_table: torch.Tensor, slot: int, all_logits: bool = False) -> torch.Tensor:
-        """Prefill one request from position 0. Returns float logits [V] of the last token
-        (or [S, V] for every position with `all_logits`, used by accuracy studies).
+    def prefill(self, tokens: torch.Tensor, start: int, tables: torch.Tensor, all_logits: bool = False) -> torch.Tensor:
+        """Compute positions [start, len(tokens)) of one sequence whose cache holds [0, start).
 
-        page_table: int32 [num_blocks_for_request] vLLM block ids for the global layers.
-        slot: the batch slot whose sliding ring receives this request.
+        tokens: the sequence from position 0. tables: int32 [groups, width], the
+        sequence's page table in every KV-cache group. Returns float logits [V] of
+        the last position, or [S, V] of every position from `start` with `all_logits`
+        (accuracy studies).
+
+        Work restarts on the CHUNK_ALIGN grid below `start`; the recomputed rows are
+        not written back where a group's block lies wholly before `start`, since
+        such a block can be a prefix-cache block that other requests read.
         """
-        seq_len = tokens.shape[0]
-        padded = -(-seq_len // TILE) * TILE
-        if padded > self.window and padded < self.window + TILE:
-            padded = self.window + TILE  # the ring tail needs window + 32 rows
+        end = tokens.shape[0]
+        if not 0 <= start < end:
+            raise ValueError(f"prefill of positions [{start}, {end})")
+        first = start // CHUNK_ALIGN * CHUNK_ALIGN
+        out = []
+        for c0 in range(first, end, PREFILL_CHUNK):
+            c1 = min(c0 + PREFILL_CHUNK, end)
+            x = self._prefill_chunk(tokens, c0, c1, max(start, c0), tables)
+            if all_logits or c1 == end:
+                lo = max(start, c0) - c0 if all_logits else c1 - 1 - c0
+                last = ttnn.slice(x, [0, 0, lo, 0], [1, 1, c1 - c0, self.hidden])
+                out.append(self._logits(last))
+            x.deallocate(True)  # `last` can be x itself or a view of it
+        return torch.cat(out) if all_logits else out[-1][-1]
+
+    def _prefill_chunk(self, tokens, c0: int, c1: int, keep: int, tables: torch.Tensor) -> ttnn.Tensor:
+        """Run positions [c0, c1) through every layer, writing K/V from `keep` on (per
+        group, from the start of keep's block). Returns the final hidden rows, padded."""
+        n = c1 - c0
+        # Chunked SDPA works on whole q chunks; the first chunk only needs whole tiles.
+        pad = TILE if c0 == 0 else CHUNK_ALIGN
+        padded = -(-n // pad) * pad
         ids = torch.zeros(padded, dtype=torch.long)
-        ids[:seq_len] = tokens
+        ids[:n] = tokens[c0:c1]
         x = self._to_device(self.embed(ids).reshape(1, 1, padded, self.hidden))
+        ropes = {
+            kind: (self._to_device(cos[c0 : c0 + padded][None, None]), self._to_device(sin[c0 : c0 + padded][None, None]))
+            for kind, (cos, sin) in self.rope.items()
+        }
 
-        ropes = {}
-        for kind, (cos, sin) in self.rope.items():
-            ropes[kind] = (self._to_device(cos[:padded][None, None]), self._to_device(sin[:padded][None, None]))
+        def table(t: torch.Tensor) -> ttnn.Tensor:
+            # Chunked SDPA with a device chunk start reads rows of a multiple of 32 bytes.
+            row = torch.zeros(1, -(-t.shape[0] // 8) * 8, dtype=torch.int32)
+            row[0, : t.shape[0]] = t
+            return self._to_device(row, ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
 
-        need_blocks = -(-padded // self.block_size)
-        pt = page_table[:need_blocks].to(torch.int32)
-        if pt.shape[0] < need_blocks:
-            raise ValueError(f"page table has {pt.shape[0]} blocks, prefill of {padded} tokens needs {need_blocks}")
-        global_pt = self._to_device(pt[None], ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
-        ring_pt = self._to_device(self.slot_blocks[slot : slot + 1], ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
-        sel = ring_selection(seq_len, padded, self.window)
-        sel_tt = None if sel is None else (sel[0], self._to_device(sel[1]))
-        kv_dtype = self.precision.kv_cache
-
-        def fill_global(k, v, cache):
-            for t, c in zip((k, v), cache):
-                t8 = ttnn.typecast(t, kv_dtype)
-                ttnn.experimental.paged_fill_cache(c, t8, global_pt, batch_idx=0)
-                t8.deallocate(True)
-
-        def fill_sliding(k, v, cache):
-            for t, c in zip((k, v), cache):
-                if sel_tt is None:
-                    rows = t
-                else:
-                    start, s_tt = sel_tt
-                    # A slice covering the whole tensor returns the input itself; never free k/v.
-                    tail = t if start == 0 else ttnn.slice(t, [0, 0, start, 0], [1, t.shape[1], padded, t.shape[3]])
-                    rows = ttnn.matmul(s_tt, tail, compute_kernel_config=HIFI4, memory_config=DRAM)
-                    if tail is not t:
-                        tail.deallocate(True)
-                t8 = ttnn.typecast(rows, kv_dtype)
-                if rows is not t:
-                    rows.deallocate(True)
-                ttnn.experimental.paged_fill_cache(c, t8, ring_pt, batch_idx=0)
-                t8.deallocate(True)
-
-        for layer, cache in zip(self.layers, self.kv_caches):
+        fill_rows, fill_tables, whole = [], [], []
+        for g, block in enumerate(self.kv.block_sizes):
+            fill_start = keep // block * block  # >= c0: c0 is on the CHUNK_ALIGN grid
+            fill_rows.append(fill_start - c0)
+            fill_tables.append(table(tables[g, fill_start // block :]))
+            whole.append(table(tables[g]) if c0 else None)
+        start = self._to_device(torch.tensor([c0], dtype=torch.int32), ttnn.int32, ttnn.ROW_MAJOR_LAYOUT) if c0 else None
+        chunk = PrefillChunk(c0, n, start, whole, fill_tables, fill_rows)
+        for layer, kv in zip(self.layers, self.kv.layers):
             kind = "sliding_attention" if layer.sliding else "full_attention"
-            fill = fill_sliding if layer.sliding else fill_global
-            x = layer.prefill(x, ropes[kind], cache, fill)
-
-        first = 0 if all_logits else seq_len - 1
-        last = ttnn.slice(x, [0, 0, first, 0], [1, 1, seq_len, self.hidden])
-        logits = self._logits(last)
-        x.deallocate(True)  # `last` can be x itself or a view of it
-        for t in (global_pt, ring_pt, *[r for pair in ropes.values() for r in pair]):
+            x = layer.prefill(x, ropes[kind], kv, chunk)
+        for t in (*fill_tables, *filter(None, [*whole, start]), *[r for pair in ropes.values() for r in pair]):
             t.deallocate(True)
-        if sel_tt is not None:
-            sel_tt[1].deallocate(True)
-        return logits if all_logits else logits[0]
+        return x
 
     # -- decode --------------------------------------------------------------
 
-    def decode(self, tokens: torch.Tensor, positions: torch.Tensor, page_table: torch.Tensor, trace: bool = False) -> torch.Tensor:
-        """One decode step for B rows (row i is slot i). positions -1 marks inactive rows.
+    def decode(self, tokens: torch.Tensor, positions: torch.Tensor, tables: torch.Tensor, trace: bool = False) -> torch.Tensor:
+        """One decode step for B rows. positions -1 marks inactive rows; tables is
+        int32 [groups, B, width], every row's page table in each KV-cache group.
 
         Inactive rows are dropped before the device step: vLLM pads decode to
         max_num_seqs rows, and every row costs 8 expert slots, so one user in a
@@ -342,28 +352,28 @@ class Gemma4TT:
         later calls only copy the inputs and replay it. Returns float logits [B, V].
         """
         rows = tokens.shape[0]
-        active, logits = self.decode_active(tokens, positions, page_table, trace)
+        active, logits = self.decode_active(tokens, positions, tables, trace)
         if len(active) == rows:
             return logits
         out = torch.zeros(rows, self.vocab)
         out[active] = logits
         return out
 
-    def decode_active(self, tokens, positions, page_table, trace: bool = False):
+    def decode_active(self, tokens, positions, tables, trace: bool = False):
         """decode() without the inactive rows: (active row indices, float logits [A, V]).
 
         Building the zero-filled [B, V] result of decode() costs ~1 ms per step; the vLLM
         adapter samples only the active rows."""
         active = torch.nonzero(positions >= 0).flatten()
         if len(active) == tokens.shape[0]:
-            return active, self._decode_rows(tokens, positions, page_table, active, trace)
+            return active, self._decode_rows(tokens, positions, tables, trace)
         if not len(active):
             return active, torch.zeros(0, self.vocab)
-        return active, self._decode_rows(tokens[active], positions[active], page_table[active], active, trace)
+        return active, self._decode_rows(tokens[active], positions[active], tables[:, active], trace)
 
-    def _decode_rows(self, tokens, positions, page_table, slots, trace) -> torch.Tensor:
-        """Decode rows that are all active; row i belongs to batch slot slots[i]."""
-        host = self._decode_inputs(tokens, positions, page_table, slots)
+    def _decode_rows(self, tokens, positions, tables, trace) -> torch.Tensor:
+        """Decode rows that are all active."""
+        host = self._decode_inputs(tokens, positions, tables)
         if not trace:
             dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
             out = self._decode_device(dev)
@@ -382,7 +392,7 @@ class Gemma4TT:
             ttnn.end_trace_capture(self.mesh, tid, cq_id=0)
             self.traces[key] = (tid, dev, out)
         tid, dev, out = self.traces[key]
-        # Page tables change only when a sequence gets a new block or a slot is remapped;
+        # Page tables change only when a sequence gets a new block or rows move;
         # every copy costs 0.02-0.2 ms of host time, so unchanged ones are skipped.
         last = self._pt_last.setdefault(key, {})
         for k, v in host.items():
@@ -407,13 +417,13 @@ class Gemma4TT:
         corrupted values: wrong tokens, or expert ids that send a read out of
         bounds and hang the device. The eager run also compiles the programs.
         """
-        width = min(self.max_seq_len // self.block_size, self.num_blocks - 1)
+        width = self.table_width
         for batch in range(1, self.max_batch + 1):
             for layer in self.layers:
                 layer.attn.head_weights(batch)
                 layer.ff.decode_constants(batch)
             zeros = torch.zeros(batch, dtype=torch.long)
-            host = self._decode_inputs(zeros, zeros, torch.zeros(batch, width, dtype=torch.int32), torch.arange(batch))
+            host = self._decode_inputs(zeros, zeros, torch.zeros(self.kv.groups, batch, width, dtype=torch.int32))
             self._trace_inputs[batch] = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
         for dev in self._trace_inputs.values():
             self._decode_device(dev).deallocate(True)
@@ -421,14 +431,13 @@ class Gemma4TT:
     def _host(self, t: torch.Tensor, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT) -> ttnn.Tensor:
         return ttnn.from_torch(t, dtype=dtype, layout=layout, mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
 
-    def _decode_inputs(self, tokens, positions, page_table, slots) -> dict[str, ttnn.Tensor]:
+    def _decode_inputs(self, tokens, positions, tables) -> dict[str, ttnn.Tensor]:
         """Host tensors for one decode step; shapes depend only on the batch size."""
         batch = tokens.shape[0]
-        # paged ops need fewer blocks per sequence than blocks in the pool
-        width = min(self.max_seq_len // self.block_size, self.num_blocks - 1)
-        pt = torch.zeros(batch, width, dtype=torch.int32)
-        n = min(width, page_table.shape[1])
-        pt[:, :n] = page_table[:, :n].to(torch.int32)
+        width = self.table_width
+        pts = torch.zeros(self.kv.groups, batch, width, dtype=torch.int32)
+        n = min(width, tables.shape[2])
+        pts[:, :, :n] = tables[:, :, :n].to(torch.int32)
         rm = ttnn.ROW_MAJOR_LAYOUT
         emb = self.embed(tokens.long())
         if batch == 1:
@@ -439,13 +448,11 @@ class Gemma4TT:
             f32 = [to_compact(xf)[None, None]]  # one FP32 input [xc | sliding cs | full cs]: fewer host copies
         else:
             first = {"x": self._host(emb.reshape(1, 1, batch, self.hidden))}
-        inputs = {
-            **first,
-            "cur_pos": self._host(positions.to(torch.int32), ttnn.int32, rm),
-            "global_pt": self._host(pt, ttnn.int32, rm),
-            "ring_pt": self._host(self.slot_blocks[slots].contiguous(), ttnn.int32, rm),
-        }
-        self._pt_src = {"global_pt": pt, "ring_pt": self.slot_blocks[slots]}
+        inputs = {**first, "cur_pos": self._host(positions.to(torch.int32), ttnn.int32, rm)}
+        self._pt_src = {}
+        for g in range(self.kv.groups):
+            inputs[f"pt{g}"] = self._host(pts[g], ttnn.int32, rm)
+            self._pt_src[f"pt{g}"] = pts[g]
         pos = positions.clamp(min=0).long()
         for kind, (cos, sin) in self.rope.items():
             attn = next(layer.attn for layer in self.layers if layer.sliding == (kind == "sliding_attention"))
@@ -470,11 +477,10 @@ class Gemma4TT:
             V = self.boundary.V
             pages = {"sliding_attention": V, "full_attention": V + self._cs_tiles["sliding_attention"]}
             xc, h = dev["in32"], dev["h0"]
-            for i, (layer, cache) in enumerate(zip(self.layers, self.kv_caches)):
+            for i, (layer, kv) in enumerate(zip(self.layers, self.kv.layers)):
                 kind = "sliding_attention" if layer.sliding else "full_attention"
                 rope = ("compact", dev["in32"], pages[kind])
-                pt = dev["ring_pt"] if layer.sliding else dev["global_pt"]
-                xn, hn = layer.decode_b1(xc, h, rope, cache, pt, dev["cur_pos"], self.boundary, x_page0=0)
+                xn, hn = layer.decode_b1(xc, h, rope, kv, dev[f"pt{kv.group}"], dev["cur_pos"], self.boundary, x_page0=0)
                 if i:  # never free the step inputs
                     xc.deallocate(True)
                     h.deallocate(True)
@@ -484,11 +490,10 @@ class Gemma4TT:
             h.deallocate(True)
             return out
         x = ttnn.clone(dev["x"])
-        for layer, cache in zip(self.layers, self.kv_caches):
+        for layer, kv in zip(self.layers, self.kv.layers):
             kind = "sliding_attention" if layer.sliding else "full_attention"
             rope = (dev[f"{kind}.cos"], dev[f"{kind}.sin"])
-            pt = dev["ring_pt"] if layer.sliding else dev["global_pt"]
-            x = layer.decode(x, rope, cache, pt, dev["cur_pos"])
+            x = layer.decode(x, rope, kv, dev[f"pt{kv.group}"], dev["cur_pos"])
         out = self._logits_device(x)
         x.deallocate(True)
         return out

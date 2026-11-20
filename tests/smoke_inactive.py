@@ -26,17 +26,15 @@ def main():
     seq = torch.randint(10, 20000, (n + 3,))
     with open_n300() as mesh:
         model = Gemma4TT(mesh, ckpt, cache_root=Path(__file__).resolve().parents[1] / "cache" / "fake", max_batch=2, num_layers=2)
-        per_user = 4
-        model.allocate_kv_cache(2 * per_user)
-        pts = torch.arange(2 * per_user, dtype=torch.int32).reshape(2, per_user)
-        model.prefill(seq[:n], pts[0], slot=0)
-        pt_padded = pts.clone()
-        pt_padded[1] = 0
+        tables = model.allocate_kv_cache(2, n + 3)
+        model.prefill(seq[:n], 0, tables[:, 0])
+        pt_padded = tables.clone()
+        pt_padded[:, 1] = tables[:, 0]
         # Two steps where row 1 is padding and points at user 0's blocks.
         for i in range(2):
             model.decode(torch.stack([seq[n + i], seq[0]]), torch.tensor([n + i, -1]), pt_padded)
         got = model.decode(torch.stack([seq[n + 2], seq[0]]), torch.tensor([n + 2, -1]), pt_padded)[0]
-        ref = model.prefill(seq[: n + 3], pts[0], slot=0)
+        ref = model.prefill(seq[: n + 3], 0, tables[:, 0])
         print(f"user 0 after padded steps: pcc={pcc(got, ref):.5f} top1 {got.argmax().item()} {ref.argmax().item()}")
 
 

@@ -47,6 +47,9 @@ def mlp_stream(mesh, cfg, mlp_pad: int) -> MlpStream:
     return _STREAMS[key]
 
 
+# Expert-major prefill rounds its chunk count up to a multiple of this (see _plan_chunks).
+CHUNK_GRANULE = 16
+
 # HF uses gelu_pytorch_tanh. Fusing GELU_TANH into the multiply halves the mean
 # error of ttnn.gelu(fast_and_approximate_mode=True) and saves one op.
 GELU_TANH = ttnn.UnaryOpType.GELU_TANH
@@ -398,7 +401,9 @@ class FeedForward:
         """Host layout of expert-major prefill for top-k ids/weights [T, k].
 
         Each expert's (token, slot) pairs fill chunks of `rows` rows; padding rows
-        gather token T (a zero row) and get weight 0. Returns the gather index into
+        gather token T (a zero row) and get weight 0. The chunk count rounds up to a
+        multiple of CHUNK_GRANULE with zero chunks: it depends on the routing, and
+        every new count would compile new programs. Returns the gather index into
         the token rows [C * rows], the row weights [C * rows], the expert of every
         chunk [C], and for each (slot j, token t) in slot-major order the row that
         holds its result [k * T].
@@ -408,13 +413,15 @@ class FeedForward:
         order = torch.argsort(flat, stable=True)
         counts = torch.bincount(flat, minlength=self.n_experts)
         chunks = (counts + rows - 1) // rows
-        chunk_expert = torch.repeat_interleave(torch.arange(self.n_experts), chunks)
+        real = int(chunks.sum())
+        extra = -(-real // CHUNK_GRANULE) * CHUNK_GRANULE - real
+        chunk_expert = torch.cat([torch.repeat_interleave(torch.arange(self.n_experts), chunks), torch.zeros(extra, dtype=torch.long)])
         # first row of each expert's region, then the row of every sorted pair
         region = torch.cumsum(chunks * rows, 0) - chunks * rows
         sorted_e = flat[order]
         rank = torch.arange(flat.numel()) - (torch.cumsum(counts, 0) - counts)[sorted_e]
         row_of_sorted = region[sorted_e] + rank
-        total = int(chunks.sum()) * rows
+        total = (real + extra) * rows
         gather = torch.full((total,), tokens, dtype=torch.int32)
         row_w = torch.zeros(total)
         gather[row_of_sorted] = (order // k).int()

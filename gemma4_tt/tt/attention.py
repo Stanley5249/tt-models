@@ -7,11 +7,11 @@ Global layers: 16 Q heads, 2 KV heads, head_dim 512, K reused as V
 Each chip owns 8 Q heads and the KV heads they read, so attention needs no
 communication until the output projection, whose partial sums are all-reduced.
 
-KV caches are paged. Global layers address the vLLM page table. Sliding layers
-use a per-slot ring of `window` tokens addressed by a slot page table, where
-position p lives at ring index p % window. Decode writes and reads the ring
-through `cache_position_modulo`; prefill builds the ring directly (see
-`ring_selection`) so no write ever wraps inside one op.
+KV caches are paged in vLLM's hybrid layout (kv_cache.py): every layer reads
+its group's page table at absolute positions, through its view of a shared
+buffer. A prefill chunk at position 0 attends over its own K/V; a later chunk
+(chunked prefill, a prefix-cache hit) attends over the paged cache, which then
+holds the earlier positions and the chunk itself.
 """
 
 from dataclasses import dataclass
@@ -22,6 +22,11 @@ import ttnn
 from gemma4_tt.checkpoint import attention_dims
 from gemma4_tt.tt.boundary import QkRope
 from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, dram_sharded, norm_weight, width_sharded_l1
+from gemma4_tt.tt.kv_cache import LayerKv
+
+# Chunked prefill attention needs its chunk start on a multiple of the SDPA q and
+# k chunks, which must also cover every KV block size (64 sliding, 128 global).
+CHUNK_ALIGN = 128
 
 
 @dataclass(frozen=True)
@@ -40,22 +45,22 @@ def attn_shape(cfg, layer_idx: int, tp: int) -> AttnShape:
     return AttnShape(sliding, head_dim, cfg.num_attention_heads // tp, n_kv // tp, cfg.sliding_window if sliding else None)
 
 
-def ring_selection(seq_len: int, padded_len: int, window: int) -> tuple[int, torch.Tensor] | None:
-    """Selection matrix that turns the last tile-aligned K/V rows into a ring.
+@dataclass
+class PrefillChunk:
+    """Positions [start, start + rows) of one sequence, as tile-padded rows of x.
 
-    Returns (tail_start, sel) with sel [1, 1, window, tail_len] so that
-    ring = sel @ kv[:, :, tail_start:padded_len], ring[p % window] = kv[p]
-    for the last `window` real positions p < seq_len. None when the prompt
-    fits the window and the rows can be written as they are.
+    start is a multiple of every block size and SDPA chunk. tables holds each
+    group's page table of the sequence, fill_tables the same tables from the block
+    each group writes first, at row fill_rows[group] of the chunk: rows before it
+    are already in the cache (shared prefix blocks must not be rewritten).
     """
-    if seq_len <= window:
-        return None
-    tail_len = window + TILE
-    tail_start = padded_len - tail_len
-    sel = torch.zeros(window, tail_len)
-    for p in range(seq_len - window, seq_len):
-        sel[p % window, p - tail_start] = 1.0
-    return tail_start, sel[None, None]
+
+    start: int
+    rows: int
+    start_tensor: ttnn.Tensor | None  # start on the device, so new offsets reuse the compiled programs
+    tables: list[ttnn.Tensor]
+    fill_tables: list[ttnn.Tensor]
+    fill_rows: list[int]
 
 
 _QK_ROPE = {}
@@ -156,11 +161,10 @@ class Attention:
 
     # -- prefill -----------------------------------------------------------
 
-    def prefill(self, x: ttnn.Tensor, rope, kv_cache, fill) -> ttnn.Tensor:
-        """x [1, 1, S, H] replicated. Returns all-reduced attention output [1, 1, S, H].
+    def prefill(self, x: ttnn.Tensor, rope, kv: LayerKv, chunk: PrefillChunk) -> ttnn.Tensor:
+        """x [1, 1, S, H] replicated, the chunk's rows. Returns all-reduced attention output [1, 1, S, H].
 
-        rope: (cos, sin) [1, 1, S, hd] for this layer type.
-        fill: callable(k, v, kv_cache) that writes prefill K/V into the cache.
+        rope: (cos, sin) [1, 1, S, hd] for this layer type at the chunk's positions.
         """
         s = self.shape
         xqkv = ttnn.linear(x, self.wqkv, compute_kernel_config=HIFI2, memory_config=DRAM)
@@ -171,18 +175,34 @@ class Attention:
         q = self._norm_rope(q, self.q_norm, rope)
         k = self._norm_rope(k, self.k_norm, rope)
         v = head_norm(v, None, self.eps)
-        fill(k, v, kv_cache)
-        attn = ttnn.transformer.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            is_causal=True,
-            scale=1.0,
-            sliding_window_size=s.window,
-            program_config=self._sdpa_prefill_config(q.shape[2]),
-            compute_kernel_config=HIFI4,
-            memory_config=DRAM,
-        )
+        self._fill(k, v, kv, chunk)
+        window = {} if s.window is None else {"sliding_window_size": s.window}
+        if chunk.start == 0:
+            attn = ttnn.transformer.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                is_causal=True,
+                scale=1.0,
+                program_config=self._sdpa_prefill_config(q.shape[2]),
+                compute_kernel_config=HIFI4,
+                memory_config=DRAM,
+                **window,
+            )
+        else:
+            attn = ttnn.transformer.chunked_scaled_dot_product_attention(
+                q,
+                kv.k,
+                kv.v,
+                chunk.tables[kv.group],
+                chunk_start_idx_tensor=chunk.start_tensor,
+                scale=1.0,
+                program_config=self._sdpa_chunked_config(),
+                compute_kernel_config=HIFI4,
+                memory_config=DRAM,
+                **window,
+                **kv.sdpa_args(),
+            )
         for t in (q, k, v):
             t.deallocate(True)
         out = ttnn.experimental.nlp_concat_heads(attn, memory_config=DRAM)
@@ -190,6 +210,20 @@ class Attention:
         out2 = ttnn.linear(out, self.wo, compute_kernel_config=HIFI2, memory_config=DRAM)
         out.deallocate(True)
         return all_reduce(out2)
+
+    @staticmethod
+    def _fill(k: ttnn.Tensor, v: ttnn.Tensor, kv: LayerKv, chunk: PrefillChunk):
+        """Write the chunk's K/V rows from the first block this layer's group owns."""
+        first = chunk.fill_rows[kv.group]
+        table = chunk.fill_tables[kv.group]
+        for t, cache in ((k, kv.k), (v, kv.v)):
+            # A slice covering the whole tensor returns the input itself; never free k/v.
+            rows = t if first == 0 else ttnn.slice(t, [0, 0, first, 0], [1, t.shape[1], t.shape[2], t.shape[3]])
+            t8 = ttnn.typecast(rows, cache.dtype)
+            if rows is not t:
+                rows.deallocate(True)
+            ttnn.experimental.paged_fill_cache(cache, t8, table, batch_idx=0, **kv.fill_args())
+            t8.deallocate(True)
 
     def _norm_rope(self, x, weight, rope):
         normed = head_norm(x, weight, self.eps)
@@ -210,6 +244,13 @@ class Attention:
             grid, q_chunk, k_chunk = (8, 8), fit(256), fit(128)
         return ttnn.SDPAProgramConfig(
             compute_with_storage_grid_size=grid, q_chunk_size=q_chunk, k_chunk_size=k_chunk, exp_approx_mode=False
+        )
+
+    def _sdpa_chunked_config(self):
+        """Chunked SDPA over the paged cache; the chunk start must be a multiple of both chunk sizes."""
+        grid = (8, 4) if self.shape.head_dim >= 512 else (8, 8)
+        return ttnn.SDPAProgramConfig(
+            compute_with_storage_grid_size=grid, q_chunk_size=CHUNK_ALIGN, k_chunk_size=CHUNK_ALIGN, exp_approx_mode=False
         )
 
     # -- decode ------------------------------------------------------------
@@ -234,10 +275,10 @@ class Attention:
             )
         return self._head_w_dev[batch]
 
-    def decode_b1(self, x: ttnn.Tensor, rope, kv_cache, page_table, cur_pos, boundary) -> ttnn.Tensor:
+    def decode_b1(self, x: ttnn.Tensor, rope, kv: LayerKv, page_table, cur_pos, boundary) -> ttnn.Tensor:
         """One decode token: x is the normed row-form input. Returns this chip's o_proj partial sum in
         compact FP32 form (boundary.py), packed straight from the width-sharded matmul output."""
-        heads = self._heads_decode(x, rope, kv_cache, page_table, cur_pos)
+        heads = self._heads_decode(x, rope, kv, page_table, cur_pos)
         out_sh = ttnn.linear(
             heads, self.wo_dram, program_config=self.wo_cfg, compute_kernel_config=HIFI2, memory_config=self.wo_out, dtype=ttnn.float32
         )
@@ -247,15 +288,15 @@ class Attention:
         out_sh.deallocate(True)
         return out
 
-    def decode(self, x: ttnn.Tensor, rope, kv_cache, page_table, cur_pos) -> ttnn.Tensor:
+    def decode(self, x: ttnn.Tensor, rope, kv: LayerKv, page_table, cur_pos) -> ttnn.Tensor:
         """x [1, 1, B, H] replicated. Returns all-reduced attention output [1, 1, B, H].
 
         rope: (cos, sin) [1, 1, B * heads, hd] in fused QKV row order, cos 1 and
         sin 0 on the V rows, so one rotation covers Q and K and leaves V alone.
-        page_table: global layers get the vLLM table, sliding layers the ring table.
+        page_table: this layer's group table [B, width].
         cur_pos: int32 [B] absolute positions, -1 for inactive rows.
         """
-        heads = self._heads_decode(x, rope, kv_cache, page_table, cur_pos)
+        heads = self._heads_decode(x, rope, kv, page_table, cur_pos)
         batch = x.shape[2]
         out_sh = ttnn.linear(heads, self.wo_dram, program_config=self.wo_cfg, compute_kernel_config=HIFI2, memory_config=self.wo_out)
         heads.deallocate(True)
@@ -265,7 +306,7 @@ class Attention:
             out = ttnn.slice(out, [0, 0, 0, 0], [1, 1, batch, out.shape[3]])
         return all_reduce(out)
 
-    def _heads_decode(self, x, rope, kv_cache, page_table, cur_pos):
+    def _heads_decode(self, x, rope, kv: LayerKv, page_table, cur_pos):
         """QKV, q/k norm and RoPE, cache update and SDPA: the concatenated heads, one head per core."""
         s = self.shape
         batch = x.shape[2]
@@ -293,28 +334,26 @@ class Attention:
         )
         roped.deallocate(True)
 
-        k_cache, v_cache = kv_cache
-        modulo = {"cache_position_modulo": s.window} if s.sliding else {}
-        ttnn.experimental.paged_update_cache(k_cache, k, update_idxs_tensor=cur_pos, page_table=page_table, **modulo)
-        ttnn.experimental.paged_update_cache(v_cache, v, update_idxs_tensor=cur_pos, page_table=page_table, **modulo)
+        ttnn.experimental.paged_update_cache(kv.k, k, update_idxs_tensor=cur_pos, page_table=page_table, **kv.update_args())
+        ttnn.experimental.paged_update_cache(kv.v, v, update_idxs_tensor=cur_pos, page_table=page_table, **kv.update_args())
         k.deallocate(True)
         v.deallocate(True)
 
         grid = (8, 4) if s.head_dim >= 512 and batch == 1 else (8, 8)
         attn = ttnn.transformer.paged_scaled_dot_product_attention_decode(
             q,
-            k_cache,
-            v_cache,
+            kv.k,
+            kv.v,
             cur_pos_tensor=cur_pos,
             page_table_tensor=page_table,
             scale=1.0,
-            sliding_window_size=s.window,
             program_config=ttnn.SDPAProgramConfig(
                 compute_with_storage_grid_size=grid, q_chunk_size=32, k_chunk_size=64, exp_approx_mode=False
             ),
             compute_kernel_config=HIFI4,
             memory_config=DRAM,
-            **modulo,
+            **({} if s.window is None else {"sliding_window_size": s.window}),
+            **kv.sdpa_args(),
         )
         q.deallocate(True)
         return self._concat_heads_decode(attn, batch)  # [1, 1, 32, n_q * hd], one head per core

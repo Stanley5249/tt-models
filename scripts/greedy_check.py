@@ -41,17 +41,15 @@ def main():
     results = []
     with open_n300(trace_region_size=300_000_000) as mesh:
         model = Gemma4TT(mesh, ckpt, max_batch=1)
-        blocks = 64
-        model.allocate_kv_cache(blocks + 1)
-        pt = torch.arange(blocks, dtype=torch.int32)
+        pt = model.allocate_kv_cache(1, 4096)
         for prompt in PROMPTS:
             ids = tok.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt")
             ids = ids["input_ids"][0] if hasattr(ids, "keys") else ids[0]
-            logits = model.prefill(ids, pt, slot=0)
+            logits = model.prefill(ids, 0, pt[:, 0])
             out = [int(logits.argmax())]
             for step in range(args.tokens - 1):
                 pos = torch.tensor([len(ids) + step])
-                logits = model.decode(torch.tensor([out[-1]]), pos, pt[None], trace=True)
+                logits = model.decode(torch.tensor([out[-1]]), pos, pt, trace=True)
                 out.append(int(logits[0].argmax()))
             results.append({"prompt": prompt, "ids": out, "text": tok.decode(out)})
         model.release_traces()

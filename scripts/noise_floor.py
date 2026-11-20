@@ -34,8 +34,7 @@ ids = tokens(ckpt, N)
 base = torch.load(ROOT / "cache" / "ref" / f"readme-{N}-fp32-logits.pt")
 with open_n300() as mesh:
     model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1)
-    blocks = -(-(N + 64) // model.block_size)
-    model.allocate_kv_cache(blocks)
+    tables = model.allocate_kv_cache(1, N)
     plain = model.embed
     for seed in seeds:
         if seed:
@@ -48,5 +47,5 @@ with open_n300() as mesh:
             model.embed = embed
         else:
             model.embed = plain
-        logits = model.prefill(ids, torch.arange(blocks, dtype=torch.int32), slot=0, all_logits=True)
+        logits = model.prefill(ids, 0, tables[:, 0], all_logits=True)
         print("RESULT", json.dumps({"label": label, "seed": seed, **score(logits, base, ids)}), flush=True)

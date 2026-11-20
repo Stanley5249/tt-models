@@ -38,13 +38,11 @@ def main():
     ckpt = Checkpoint()
     with open_n300(trace_region_size=300_000_000 if args.trace else 0) as mesh:
         model = Gemma4TT(mesh, ckpt, max_batch=args.batch, num_layers=args.layers, precision=Precision.parse(args.precision))
-        per_user = -(-(args.prompt_len + args.decode_steps + 128) // model.block_size)
-        model.allocate_kv_cache(per_user * args.batch + 1)
-        pts = torch.arange(per_user * args.batch, dtype=torch.int32).reshape(args.batch, per_user)
+        pts = model.allocate_kv_cache(args.batch, args.prompt_len + args.decode_steps + 2)
         ids = torch.randint(100, 20000, (args.batch, args.prompt_len + args.decode_steps + 2))
         # Warm-up compiles every program once, outside the measured phases.
         for b in range(args.batch):
-            model.prefill(ids[b, : args.prompt_len], pts[b], slot=b)
+            model.prefill(ids[b, : args.prompt_len], 0, pts[:, b])
         model.decode(ids[:, args.prompt_len], torch.full((args.batch,), args.prompt_len), pts, trace=args.trace)
         if args.trace:  # the first traced call compiles and captures; replay once more
             model.decode(ids[:, args.prompt_len], torch.full((args.batch,), args.prompt_len), pts, trace=True)
@@ -53,7 +51,7 @@ def main():
 
         signpost("prefill")
         t0 = time.time()
-        model.prefill(ids[0, : args.prompt_len], pts[0], slot=0)
+        model.prefill(ids[0, : args.prompt_len], 0, pts[:, 0])
         ttnn.synchronize_device(mesh)
         print(f"prefill {args.prompt_len}: {time.time() - t0:.3f}s", flush=True)
         ttnn.ReadDeviceProfiler(mesh)
