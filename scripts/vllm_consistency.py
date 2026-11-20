@@ -30,7 +30,9 @@ def complete(url: str, prompt: str, max_tokens: int, **sampling) -> str:
     body = json.dumps({"model": "gemma4", "messages": messages, "max_tokens": max_tokens, **sampling}).encode()
     req = urllib.request.Request(f"{url}/v1/chat/completions", data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=600) as resp:
-        return json.load(resp)["choices"][0]["message"]["content"]
+        msg = json.load(resp)["choices"][0]["message"]
+    # With a reasoning parser, thinking text arrives apart from the answer.
+    return (msg.get("reasoning") or msg.get("reasoning_content") or "") + (msg.get("content") or "")
 
 
 def main():

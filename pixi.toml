@@ -5,9 +5,8 @@ requires-pixi = ">=0.81"
 # The ttnn wheel needs glibc 2.34; Ubuntu 22.04 has 2.35.
 platforms = [{ platform = "linux-64", glibc = "2.34" }]
 
-# Conda supplies Python and the native libraries the ttnn wheel loads:
-# libhwloc, libnuma, and a GLIBCXX_3.4.32 libstdc++ for tt-metal, mpc and zstd
-# for the bundled SFPI compiler. Every Python package comes from PyPI.
+# tt-metal needs libhwloc, libnuma, and libstdc++ with GLIBCXX_3.4.32.
+# The bundled SFPI compiler needs mpc and zstd.
 [dependencies]
 python = "3.12.*"
 libstdcxx = ">=13"
@@ -55,20 +54,40 @@ opencv-python-headless = "==4.11.*"
 # vllm-tt-plugin's supported range; vLLM alone allows up to 5.18.
 transformers = ">=5.10.4,<5.15"
 
+# Both tasks bind to 127.0.0.1:8000, so run one at a time.
+# Pi sends tool_choice=auto. vLLM requires both auto tool choice and a tool parser.
 [tasks.serve-qwen3-8b]
-cmd = """vllm serve Qwen/Qwen3-8B --host 127.0.0.1 --port 8000 \
-  --block-size 64 --max-num-seqs 32 --max-model-len 32768 \
+cmd = """vllm serve Qwen/Qwen3-8B \
+  --host 127.0.0.1 --port 8000 \
+  --block-size 64 \
+  --max-num-seqs 32 \
+  --max-model-len 32768 \
   --enable-auto-tool-choice --tool-call-parser hermes \
   --reasoning-parser qwen3"""
-# tt_transformers reads HF_MODEL, not vLLM's --model.
-env = { MESH_DEVICE = "N300", HF_MODEL = "Qwen/Qwen3-8B", TT_CACHE_PATH = "$PIXI_PROJECT_ROOT/cache/Qwen3-8B" }
+
+[tasks.serve-qwen3-8b.env]
+MESH_DEVICE = "N300"
+# Keep this ID in sync with cmd. tt_transformers reads HF_MODEL directly.
+HF_MODEL = "Qwen/Qwen3-8B"
+TT_CACHE_PATH = "$PIXI_PROJECT_ROOT/cache/Qwen3-8B"
 
 [tasks.serve-gemma4]
-cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized --host 127.0.0.1 --port 8000 \
-  --served-model-name gemma4 --block-size 64 --max-num-seqs 4 --max-model-len 32768 \
+# Keep the served model name in sync with Pi's model ID.
+# The reasoning parser sends thinking to Pi separately from the answer.
+# The 200 MB trace region holds four decode traces, one per active row count.
+# decode_only uses the on-device top-k sampler in gemma4_tt/vllm_model.py.
+cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
+  --host 127.0.0.1 --port 8000 \
+  --served-model-name gemma4 \
+  --block-size 64 \
+  --max-num-seqs 4 \
+  --max-model-len 32768 \
+  --enable-auto-tool-choice --tool-call-parser gemma4 \
+  --reasoning-parser gemma4 \
+  --default-chat-template-kwargs '{"enable_thinking": true}' \
   --limit-mm-per-prompt '{"image": 0, "audio": 0, "video": 0}' \
   --additional-config '{"tt": {"trace_region_size": 200000000, "sample_on_device_mode": "decode_only"}}'"""
-# Decode captures one trace per active row count (1-4); the plugin's default
-# 50 MB trace region is sized for one. "Device" sampling routes decode sampling
-# through the model's top-k sampler (gemma4_tt/vllm_model.py:sample).
-env = { MESH_DEVICE = "N300", TT_MODEL_CLASS_OVERRIDES = "TTGemma4ForConditionalGeneration=gemma4_tt.vllm_model:Gemma4ForCausalLM" }
+
+[tasks.serve-gemma4.env]
+MESH_DEVICE = "N300"
+TT_MODEL_CLASS_OVERRIDES = "TTGemma4ForConditionalGeneration=gemma4_tt.vllm_model:Gemma4ForCausalLM"
