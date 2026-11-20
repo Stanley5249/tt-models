@@ -7,7 +7,12 @@ Needs a running `pixi run serve-gemma4`. Every check compares greedy token ids
 with the same request run alone:
 
 - isolation: four chat requests at once, stopping at different lengths, so decode
-  replays every active row count while the others are mid-sequence;
+  replays every active row count while the others are mid-sequence. One row
+  runs the fused batch-1 kernels and 2-4 rows the batched ones, which round
+  differently, and which one computed a step depends on arrival timing; so a
+  request may take the other branch at a near-tie later on. Cross-request
+  contamination garbles a request at once, so this check needs the first 16
+  tokens to agree and reports later divergences;
 - raw: a raw token prompt (no <bos>, flat logits, the investigation's failing
   case), with temperature 0 set explicitly;
 - arrival: an 8K-token prompt arrives while a stream decodes; reports the
@@ -93,7 +98,8 @@ def stream(url: str, prompt: list[int], max_tokens: int, stop_after: int | None 
 def compare(name: str, ref: list[int], got: list[int], need: int | None = None) -> bool:
     agree = next((i for i, (a, b) in enumerate(zip(ref, got)) if a != b), min(len(ref), len(got)))
     ok = agree >= (need if need is not None else max(len(ref), len(got)))
-    print(f"[{'same' if ok else 'DIFF'}] {name}: {agree}/{len(ref)} tokens agree", flush=True)
+    label = "DIFF" if not ok else "same" if agree == max(len(ref), len(got)) else "near-tie"
+    print(f"[{label}] {name}: {agree}/{len(ref)} tokens agree", flush=True)
     return ok
 
 
@@ -116,7 +122,7 @@ def check_isolation(url):
         with ThreadPoolExecutor(len(PROMPTS)) as pool:
             together = list(pool.map(lambda pn: chat(url, *pn), zip(PROMPTS, LENGTHS)))
         for p, a, b in zip(PROMPTS, alone, together):
-            ok &= compare(f"concurrent round {rnd}: {p[:40]!r}", a, b)
+            ok &= compare(f"concurrent round {rnd}: {p[:40]!r}", a, b, need=min(16, len(a)))
     return ok
 
 
