@@ -1,0 +1,9 @@
+params active: attn 1.110B mlp 0.535B experts 1.427B router 0.0108B lm 0.738B total 3.82B
+experts total 22.84B params
+ours (bfp4 exp, bfp8 dense+head): 3.36 GB/token (experts 0.80, dense 1.75, head 0.78); all-expert residency 12.8 GB
+canonical QB2 (bfp8 exp, bf16 dense+head): 6.31 GB/token (experts 1.52, dense 3.29, head 1.48); all-expert residency 24.3 GB
+canonical T3K (bf16 all, assumed): 7.64 GB/token (experts 2.85, dense 3.29, head 1.48); all-expert residency 45.7 GB
+ours N300 dev 15.63ms: floor 5.83 ms at nominal 576 GB/s; effective 215 GB/s = 37% of nominal
+ours vLLM 18.72ms: floor 5.83 ms at nominal 576 GB/s; effective 179 GB/s = 31% of nominal
+QB2 gate 1000/45.69: floor 3.08 ms at nominal 2048 GB/s; effective 288 GB/s = 14% of nominal
+T3K demo 1000/19.9: floor 3.32 ms at nominal 2304 GB/s; effective 152 GB/s = 7% of nominal

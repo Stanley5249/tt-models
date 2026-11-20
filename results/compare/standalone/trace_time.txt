@@ -1,0 +1,13 @@
+HEAD a527dad 2026-11-19T13:29:31+08:00 governor performance
+2026-11-19 13:29:38.603 | warning  |              Op | Allocating semaphores in L1, which may fragment L1 and reduce headroom for subsequent op allocations. Pass a non-zero l1_small_size to ttnn.open_device / ttnn.open_mesh_device to reserve an L1_SMALL region for them. (ccl_common.cpp:175)
+2026-11-19 13:29:38.604 | warning  |              Op | Fabric packet size 4352 B is suboptimal for transporting 2048 B pages. Configure 6144 B packet size to maximize throughput. (ccl_common.cpp:82)
+2026-11-19 13:29:38.707 | warning  |              Op | Allocating semaphores in L1, which may fragment L1 and reduce headroom for subsequent op allocations. Pass a non-zero l1_small_size to ttnn.open_device / ttnn.open_mesh_device to reserve an L1_SMALL region for them. (ccl_common.cpp:175)
+out Shape([1, 1, 1, 131072]) Layout.ROW_MAJOR TensorMemoryLayout.INTERLEAVED
+copies+sync 0.466 execute 15.55 read 0.536 pipelined copies+execute+read 16.507 softcap 1.134 argmax 0.215 softcap 1 thread 0.22
+2026-11-19 13:29:40.392 | info     |    BuildKernels | JIT cache stats: 863/863 hits (100.0%) [863 cached, 752 build-once dedup, 0 merged artifacts, 0 merged genfiles] (build_cache_telemetry.cpp:362)
+2026-11-19 13:29:40.392 | info     |    BuildKernels | JIT telemetry: 33 registered TelemetryTokens (build_cache_telemetry.cpp:510)
+2026-11-19 13:29:40.398 | info     |          Device | Closing user mode device drivers (tt_cluster.cpp:563)
+2026-11-19 13:29:40.398 | info     |             UMD | Closing devices in cluster (cluster.cpp:1469)
+2026-11-19 13:29:40.404 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1479)
+2026-11-19 13:29:40.404 | info     |             UMD | Cluster destructor started. (cluster.cpp:1200)
+2026-11-19 13:29:40.404 | info     |             UMD | Cluster destructor completed. (cluster.cpp:1213)
