@@ -74,8 +74,10 @@ TT_CACHE_PATH = "$PIXI_PROJECT_ROOT/cache/Qwen3-8B"
 [tasks.serve-gemma4]
 # Keep the served model name in sync with Pi's model ID.
 # The reasoning parser sends thinking to Pi separately from the answer.
-# Prefix caching and chunked prefill are on (vLLM defaults the model allows);
-# a 2048-token chunk bounds how long one prefill step holds up running streams.
+# Prefix caching and chunked prefill are on (vLLM defaults the model allows).
+# One decode step after every 2048-token prefill chunk bounds a running
+# stream's gap at ~1.7 s while an 8K prompt prefills, with the same TTFT as two
+# chunks per step (3.4 s gap). 1024-token chunks give 1.0 s at 10% more TTFT.
 # The 200 MB trace region holds four decode traces, one per active row count.
 # decode_only uses the model-side top-k sampler in gemma4_tt/vllm_model.py.
 cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
@@ -89,7 +91,7 @@ cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
   --reasoning-parser gemma4 \
   --default-chat-template-kwargs '{"enable_thinking": true}' \
   --limit-mm-per-prompt '{"image": 0, "audio": 0, "video": 0}' \
-  --additional-config '{"tt": {"trace_region_size": 200000000, "sample_on_device_mode": "decode_only"}}'"""
+  --additional-config '{"tt": {"trace_region_size": 200000000, "sample_on_device_mode": "decode_only", "decode_interleave_prefill_steps": 1}}'"""
 
 [tasks.serve-gemma4.env]
 MESH_DEVICE = "N300"
