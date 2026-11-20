@@ -8,3 +8,5 @@ Completed the [Gemma 4 serving investigation](/home/st418/repo/tt-vllm/docs/gemm
 The plan starts with correctness and lifecycle checks, then prioritizes chunked prefill and multi-row decode profiling. It evaluates prefix caching against measured N300d memory headroom before changing KV ownership.
 
 [Raw measurements](/home/st418/repo/tt-vllm/results/serving-investigation/measurements.json) and [prefill timings](/home/st418/repo/tt-vllm/results/serving-investigation/prefill-timing.log) are saved alongside the report. The server stopped and released the device. No reset or dependency update was needed. The three investigation files and the pre-existing workspace changes are uncommitted.
+
+Implementation, results and remaining work: [docs/serving.md](serving.md).

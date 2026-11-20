@@ -274,8 +274,8 @@ class ExpertStream:
     def down(self, act, ids, w_down, out, compact_chunk0: int | None = None):
         """act: gate_up's output; w_down: the interleaved [1, E, 352, 3072] BFP4 weight.
 
-        out: a [1, 1, 1, H] BF16 row-form tensor, or with compact_chunk0 a compact FP32 tensor
-        (boundary.py) whose chunks compact_chunk0 .. receive the sum, padding chunks zeroed."""
+        out: a [1, 1, rows, H] BF16 row-form tensor (out_tensor), or with compact_chunk0 (one row) a
+        compact FP32 tensor (boundary.py) whose chunks compact_chunk0 .. receive the sum, padding chunks zeroed."""
         return down_op(
             self.down_assign, self.down_cores, act, ids, w_down, out,
             slots=self.slots, kt=self.kt, cols=self.down_cols, banks=self.banks, bank_cols=self.bank_cols,
