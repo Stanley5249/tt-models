@@ -50,7 +50,7 @@ def run_reference(ckpt, ids, dtype, quant):
 
 def run_tt(ckpt, ids, args):
     from gemma4_tt.mesh import open_n300
-    from gemma4_tt.tt.model import Gemma4TT, Precision
+    from gemma4_tt.tt.model import Gemma4TT
 
     with open_n300() as mesh:
         model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, precision=args.precision)

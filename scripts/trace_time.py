@@ -10,7 +10,7 @@ with open_n300(trace_region_size=300_000_000) as mesh:
     m.decode(torch.tensor([5]), torch.tensor([64]), tables, trace=True)
     tid, dev, out = m.traces[1]
     print("out", out.shape, out.layout, out.memory_config().memory_layout)
-    host = m._decode_inputs(torch.tensor([5]), torch.tensor([70]), pts, torch.arange(1))
+    host = m._decode_inputs(torch.tensor([5]), torch.tensor([70]), tables)
     r, c, e, full, sc, am, sc1 = [], [], [], [], [], [], []
     for i in range(20):
         ttnn.synchronize_device(mesh)

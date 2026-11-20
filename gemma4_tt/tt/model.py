@@ -24,7 +24,6 @@ from gemma4_tt.tt.kv_cache import KvCache
 from gemma4_tt.tt.common import (
     DRAM,
     HIFI2,
-    HIFI4,
     TILE,
     WeightLoader,
     all_gather_compact,
