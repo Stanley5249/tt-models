@@ -379,6 +379,8 @@ class Gemma4TT:
 
     def _decode_rows(self, tokens, positions, tables, trace) -> torch.Tensor:
         """Decode rows that are all active."""
+        if tokens.shape[0] > self.max_batch:
+            raise ValueError(f"{tokens.shape[0]} active decode rows; the model was built for {self.max_batch}")
         host = self._decode_inputs(tokens, positions, tables)
         if not trace:
             dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}

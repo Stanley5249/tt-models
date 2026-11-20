@@ -234,7 +234,7 @@ def down_op(
 class ExpertStream:
     """Routed experts of one layer for `rows` decode tokens (one op pair for all of them)."""
 
-    def __init__(self, mesh, hidden: int, expert_local: int, top_k: int, n_experts: int, rows: int = 1, gate_up_readers=4, down_readers=2):
+    def __init__(self, mesh, hidden: int, expert_local: int, top_k: int, n_experts: int, gate_up_readers=4, down_readers=2, *, rows: int = 1):
         self.mesh = mesh
         self.banks = mesh.dram_grid_size().x
         self.hidden, self.top_k, self.n_experts, self.rows = hidden, top_k, n_experts, rows
