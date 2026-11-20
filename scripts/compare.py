@@ -103,25 +103,26 @@ def main():
         model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, num_layers=args.layers)
         print(f"model loaded in {time.time() - t0:.0f}s", flush=True)
         if args.perturb:
-            plain, gen = model.embed, torch.Generator().manual_seed(args.perturb)
+            plain = model.embed
 
             def embed(t):
+                # Noise keyed by the call's tokens, so calls the model makes for itself
+                # (trace warm-up) do not shift the noise of the measured steps.
                 x = plain(t)
+                gen = torch.Generator().manual_seed(args.perturb * 1_000_003 + int((t.long() * (torch.arange(t.numel()) + 1)).sum()))
                 return (x.float() * (1 + 2**-9 * torch.randn(x.shape, generator=gen))).to(x.dtype)
 
             model.embed = embed
-        blocks = -(-(total + 64) // model.block_size)
-        model.allocate_kv_cache(blocks)
-        pt = torch.arange(blocks, dtype=torch.int32)
+        pt = model.allocate_kv_cache(1, total)
         for offset, ids, ref in segments:
             t0 = time.time()
-            logits = model.prefill(ids[: args.prompt_len], pt, slot=0)
+            logits = model.prefill(ids[: args.prompt_len], 0, pt[:, 0])
             print(f"prefill {args.prompt_len} tokens at {offset}: {time.time() - t0:.2f}s", flush=True)
             rows.append({"offset": offset, "pos": args.prompt_len - 1, **metrics(logits, ref[0])})
             for step in range(args.decode_steps):
                 pos = args.prompt_len + step
                 t0 = time.time()
-                logits = model.decode(ids[pos : pos + 1], torch.tensor([pos]), pt[None], trace=args.trace)
+                logits = model.decode(ids[pos : pos + 1], torch.tensor([pos]), pt, trace=args.trace)
                 dt = time.time() - t0
                 rows.append({"offset": offset, "pos": pos, "sec": round(dt, 3), **metrics(logits[0], ref[step + 1])})
         ttnn.synchronize_device(mesh)

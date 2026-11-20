@@ -1,19 +1,25 @@
 """A random-weight stand-in for Checkpoint with the real Gemma 4 26B-A4B shapes."""
 
-import copy
 import zlib
 
 import torch
 from transformers import AutoConfig
 
-from gemma4_tt.checkpoint import resolve_snapshot
+from gemma4_tt.checkpoint import attention_dims, resolve_snapshot
 
 
 class FakeCheckpoint:
     def __init__(self, layer_types: list[str] | None = None, seed: int = 0):
-        cfg = copy.deepcopy(AutoConfig.from_pretrained(resolve_snapshot()).get_text_config())
+        cfg = AutoConfig.from_pretrained(resolve_snapshot()).get_text_config()
         if layer_types:
-            cfg.layer_types = list(layer_types) + cfg.layer_types[len(layer_types) :]
+            # per_layer_config holds the global layers' head_dim and KV heads by
+            # index, so it is rebuilt to follow the new layer types.
+            d = cfg.to_dict()
+            d["layer_types"] = list(layer_types) + cfg.layer_types[len(layer_types) :]
+            full = next(cfg.per_layer_config[i] for i, t in enumerate(cfg.layer_types) if t == "full_attention")
+            values = {"head_dim": full.head_dim, "num_key_value_heads": full.num_key_value_heads}
+            d["per_layer_config"] = {f"{i:02d}": values for i, t in enumerate(d["layer_types"]) if t == "full_attention"}
+            cfg = type(cfg)(**d)
         self.config = cfg
         self.seed = seed
         self._cache = {}
@@ -27,9 +33,7 @@ class FakeCheckpoint:
             return (H,), 0.1
         idx = int(name.split(".")[1])
         key = name.split(".", 2)[2]
-        sliding = c.layer_types[idx] == "sliding_attention"
-        hd = c.head_dim if sliding else c.global_head_dim
-        nkv = c.num_key_value_heads if sliding else c.num_global_key_value_heads
+        hd, nkv = attention_dims(c)[c.layer_types[idx]]
         nq = c.num_attention_heads
         table = {
             "self_attn.q_proj.weight": ((nq * hd, H), H**-0.5),

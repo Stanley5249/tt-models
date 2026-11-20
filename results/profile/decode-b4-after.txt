@@ -1,0 +1,32 @@
+tt-scope tracy capture artifacts/runs/20261121-023453-profile-workload (git-excluded)
+pixi run tt-scope tracy scripts/profile_workload.py --programs 8000 -- --batch 4 --decode-steps 2 --trace
+Phase decode1 (one traced batch-4 step), chip 0, device kernel time grouped by op and input widths.
+
+                                                ops  total ms  mean us
+OP CODE                         shape                                 
+GenericOpDeviceOperation        768x2816 c44     30     5.739    191.3
+                                3072x11264 c24   30     2.593     86.4
+LayerNormDeviceOperation        2816x32 c8      151     2.079     13.8
+TopkRouterGptDeviceOperation    2816x128 c12     30     2.061     68.7
+MatmulDeviceOperation           2816x8192 c64    16     1.872    117.0
+                                2816x4096 c64    25     1.704     68.1
+                                2816x2304 c36    30     1.634     54.5
+BinaryNgDeviceOperation         256x256 c64     210     0.985      4.7
+SdpaDecodeDeviceOperation       256x256 c64      25     0.924     36.9
+MatmulDeviceOperation           2048x2816 c64    25     0.900     36.0
+                                1152x3072 c48    30     0.882     29.4
+PagedUpdateCacheDeviceOperation 256x256 c4       50     0.547     10.9
+MatmulDeviceOperation           2816x5120 c54     5     0.392     78.5
+BinaryNgDeviceOperation         2816x2816 c64    60     0.369      6.2
+MatmulDeviceOperation           256x256 c16      25     0.318     12.7
+                                4096x2816 c64     5     0.314     62.9
+BinaryNgDeviceOperation         1152x1152 c64    30     0.215      7.2
+SdpaDecodeDeviceOperation       512x256 c64       5     0.188     37.6
+ConcatDeviceOperation           2816x2816 c64    30     0.135      4.5
+                                8192x8192 c4      1     0.118    117.9
+
+ops 1898, kernel total 31.45 ms
+
+scripts/trace_breakdown.py artifacts/runs/20261121-023453-profile-workload --phase decode1:
+decode1 chip 0.0: 1898 ops, span 33.68 ms, FW 53.86 ms, kernel 31.45 ms, gaps 0.75 ms (0.39 us/op)
+decode1 chip 1.0: 1898 ops, span 34.22 ms, FW 54.85 ms, kernel 31.96 ms, gaps 0.78 ms (0.41 us/op)

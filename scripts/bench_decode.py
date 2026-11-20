@@ -37,13 +37,11 @@ def main():
         t0 = time.time()
         model = Gemma4TT(mesh, ckpt, max_batch=args.batch, num_layers=args.layers, precision=Precision.parse(args.precision))
         print(f"model loaded in {time.time() - t0:.0f}s", flush=True)
-        per_user = -(-(args.prompt_len + args.steps + 64) // model.block_size)
-        model.allocate_kv_cache(per_user * args.batch + 1)
-        pts = torch.arange(per_user * args.batch, dtype=torch.int32).reshape(args.batch, per_user)
+        pts = model.allocate_kv_cache(args.batch, args.prompt_len + args.steps + 1)
         torch.manual_seed(0)
         ids = torch.randint(100, 20000, (args.prompt_len,))
         for b in range(args.batch):
-            logits = model.prefill(ids, pts[b], slot=b)
+            logits = model.prefill(ids, 0, pts[:, b])
         tok = torch.full((args.batch,), int(logits.argmax()))
         times = []
         for step in range(args.steps + 1):

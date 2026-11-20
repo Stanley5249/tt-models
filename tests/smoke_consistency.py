@@ -1,7 +1,7 @@
 """Device smoke test with random weights: decode(L) must match prefill(L+1).
 
     pixi run python tests/smoke_consistency.py --prompt-len 64
-    pixi run python tests/smoke_consistency.py --prompt-len 1100   # exercises the sliding ring
+    pixi run python tests/smoke_consistency.py --prompt-len 1100   # past the sliding window
 """
 
 import argparse
@@ -39,21 +39,19 @@ def main():
         t0 = time.time()
         model = Gemma4TT(mesh, ckpt, cache_root=cache_root, max_batch=args.batch, num_layers=args.layers)
         print(f"load {time.time() - t0:.0f}s", flush=True)
-        per_user = -(-(max(lens) + args.steps + 64) // model.block_size)
-        model.allocate_kv_cache(per_user * args.batch)
-        pts = torch.arange(per_user * args.batch, dtype=torch.int32).reshape(args.batch, per_user)
+        tables = model.allocate_kv_cache(args.batch, max(lens) + args.steps)
         for b in range(args.batch):
-            model.prefill(seqs[b][: lens[b]], pts[b], slot=b)
+            model.prefill(seqs[b][: lens[b]], 0, tables[:, b])
         decoded = []
         for i in range(args.steps):
             toks = torch.stack([seqs[b][lens[b] + i] for b in range(args.batch)])
             pos = torch.tensor([lens[b] + i for b in range(args.batch)])
             t0 = time.time()
-            decoded.append(model.decode(toks, pos, pts))
+            decoded.append(model.decode(toks, pos, tables))
             print(f"decode step {i}: {time.time() - t0:.2f}s", flush=True)
         for b in range(args.batch):
             for i in range(args.steps):
-                ref = model.prefill(seqs[b][: lens[b] + i + 1], pts[b], slot=b)
+                ref = model.prefill(seqs[b][: lens[b] + i + 1], 0, tables[:, b])
                 got = decoded[i][b]
                 print(f"user {b} pos {lens[b] + i}: decode vs prefill pcc={pcc(got, ref):.5f} top1 {got.argmax().item()} {ref.argmax().item()}")
 

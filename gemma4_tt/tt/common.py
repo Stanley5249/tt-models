@@ -108,25 +108,23 @@ _SEMAPHORES: dict[int, _Semaphores] = {}
 
 
 def init_ccl(mesh: ttnn.MeshDevice):
-    """Allocate the CCL semaphores; call before any trace capture (see Gemma4TT._decode_constants)."""
+    """Allocate the CCL semaphores; call before any trace capture (see Gemma4TT._prepare_traces)."""
     if id(mesh) not in _SEMAPHORES:
         _SEMAPHORES[id(mesh)] = _Semaphores(mesh)
 
 
 def all_reduce(x: ttnn.Tensor) -> ttnn.Tensor:
-    """Sum x over the two chips.
+    """Sum x over the two chips: gather both partials, then add them locally.
 
-    Decode rows (one tile) gather both partial tiles and add them locally:
-    all_gather_async + fast_reduce_nc takes 34 us on [32, 2816] and 58 us on
-    [32, 5632], against 43 and 71 us for ttnn.all_reduce's reduce-scatter plus
-    all-gather (scripts/bench_ccl_async.py). Prefill keeps ttnn.all_reduce.
+    all_gather_async + fast_reduce_nc takes 34 us on a [32, 2816] decode row and
+    58 us on [32, 5632], against 43 and 71 us for ttnn.all_reduce's reduce-scatter
+    plus all-gather (scripts/bench_ccl_async.py). Prefill takes the same path in
+    DRAM: ttnn.all_reduce caches semaphores and buffers per new shape, and one
+    cached after a decode trace capture is overwritten by the trace's replays.
     """
     mesh = x.device()
-    if x.shape[2] > TILE or id(mesh) not in _SEMAPHORES:
-        out = ttnn.all_reduce(x, cluster_axis=1, memory_config=DRAM)
-        x.deallocate(True)
-        return out
     shape = x.shape
+    mem = L1 if shape[2] <= TILE else DRAM
     gather_sems, barrier = _SEMAPHORES[id(mesh)].next()
     g = ttnn.experimental.all_gather_async(
         x,
@@ -136,7 +134,7 @@ def all_reduce(x: ttnn.Tensor) -> ttnn.Tensor:
         num_links=1,
         cluster_axis=1,
         topology=ttnn.Topology.Linear,
-        memory_config=L1,
+        memory_config=mem,
         barrier_semaphore=barrier,
         chunks_per_sync=10,
         num_workers_per_link=2,
@@ -144,7 +142,7 @@ def all_reduce(x: ttnn.Tensor) -> ttnn.Tensor:
     )
     x.deallocate(True)
     # Gather on dim 1: fast_reduce_nc over dim 0 summed only the first row of a [2, 1, 32, W] tile correctly.
-    out = ttnn.experimental.fast_reduce_nc(g, dims=[1], compute_kernel_config=HIFI4, memory_config=L1)
+    out = ttnn.experimental.fast_reduce_nc(g, dims=[1], compute_kernel_config=HIFI4, memory_config=mem)
     g.deallocate(True)
     if out.shape != shape:  # the gather drops the logical row count; restoring it is metadata only
         out = ttnn.reshape(out, shape, out.padded_shape)

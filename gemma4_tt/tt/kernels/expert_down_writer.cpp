@@ -1,10 +1,11 @@
 // Activation gather and output scatter (BRISC, NOC1) of the routed-expert down stream.
 //
-// 1. Copies row 0 of the 8 * 11 act tiles (already scaled by the routing weights) into cb_in0.
-// 2. For each output column tile n = bank + 12 j < n_tiles: with compact = 0, writes row 0 of the BF16
-//    output tile to tile n of a [32, H] BF16 tensor; with compact = 1, writes the two FP32 chunks of row 0
-//    to compact chunks chunk0 + 2 n + f (compact.hpp), and the core with zero_chunks > 0 also writes the
-//    vector's zero padding chunks.
+// 1. Copies the token rows (0 .. rows - 1) of each slot's 11 act tiles (already scaled by the routing
+//    weights) into cb_in0, one slot at a time, so the buffer holds two slots whatever the batch.
+// 2. For each output column tile n = bank + 12 j < n_tiles: with compact = 0, writes the token rows of the
+//    BF16 output tile to tile n of a [32, H] BF16 tensor; with compact = 1 (one row), writes the two FP32
+//    chunks of row 0 to compact chunks chunk0 + 2 n + f (compact.hpp), and the core with zero_chunks > 0
+//    also writes the vector's zero padding chunks.
 //
 // runtime args: [act_addr, out_addr, bank, j0, zero_chunk0, zero_chunks]
 
@@ -21,29 +22,34 @@ void kernel_main() {
 
     constexpr uint32_t cb_in0 = get_compile_time_arg_val(0);
     constexpr uint32_t cb_out = get_compile_time_arg_val(1);
-    constexpr uint32_t kin = get_compile_time_arg_val(2);  // act tiles (slots * 11)
+    constexpr uint32_t slots = get_compile_time_arg_val(2);
     constexpr uint32_t cols = get_compile_time_arg_val(3);
     constexpr uint32_t banks = get_compile_time_arg_val(4);
     constexpr uint32_t n_tiles = get_compile_time_arg_val(5);
     constexpr uint32_t compact = get_compile_time_arg_val(6);
     constexpr uint32_t chunk0 = get_compile_time_arg_val(7);
     constexpr uint32_t cb_zero = get_compile_time_arg_val(8);
-    constexpr auto act_args = TensorAccessorArgs<9>();
+    constexpr uint32_t kt = get_compile_time_arg_val(9);  // act tiles per slot
+    constexpr uint32_t rows = get_compile_time_arg_val(10);
+    constexpr auto act_args = TensorAccessorArgs<11>();
+    constexpr uint32_t row_bytes = rows * ROW0_FACE_BYTES;
     constexpr auto out_args = TensorAccessorArgs<act_args.next_compile_time_args_offset()>();
 
     const auto s_act = TensorAccessor(act_args, act_addr, TILE_BYTES_BF16);
     const auto s_out = TensorAccessor(out_args, out_addr, compact ? COMPACT_TILE : TILE_BYTES_BF16);
 
-    cb_reserve_back(cb_in0, kin);
-    const uint32_t in0 = get_write_ptr(cb_in0);
-    for (uint32_t k = 0; k < kin; ++k) {
-        const uint64_t src = s_act.get_noc_addr(k);
-        const uint32_t dst = in0 + k * TILE_BYTES_BF16;
-        noc_async_read(src, dst, ROW0_FACE_BYTES);
-        noc_async_read(src + FACE1_OFFSET, dst + FACE1_OFFSET, ROW0_FACE_BYTES);
+    for (uint32_t e = 0; e < slots; ++e) {
+        cb_reserve_back(cb_in0, kt);
+        const uint32_t in0 = get_write_ptr(cb_in0);
+        for (uint32_t k = 0; k < kt; ++k) {
+            const uint64_t src = s_act.get_noc_addr(e * kt + k);
+            const uint32_t dst = in0 + k * TILE_BYTES_BF16;
+            noc_async_read(src, dst, row_bytes);
+            noc_async_read(src + FACE1_OFFSET, dst + FACE1_OFFSET, row_bytes);
+        }
+        noc_async_read_barrier();
+        cb_push_back(cb_in0, kt);
     }
-    noc_async_read_barrier();
-    cb_push_back(cb_in0, kin);
 
     if constexpr (compact) {
         if (zero_chunks) {
@@ -69,8 +75,8 @@ void kernel_main() {
                 noc_async_write(src + RF::face_bytes, compact_chunk_addr(s_out, chunk0 + 2 * n + 1), COMPACT_CHUNK);
             } else {
                 const uint64_t dst = s_out.get_noc_addr(n);
-                noc_async_write(src, dst, ROW0_FACE_BYTES);
-                noc_async_write(src + FACE1_OFFSET, dst + FACE1_OFFSET, ROW0_FACE_BYTES);
+                noc_async_write(src, dst, row_bytes);
+                noc_async_write(src + FACE1_OFFSET, dst + FACE1_OFFSET, row_bytes);
             }
             noc_async_writes_flushed();
         }

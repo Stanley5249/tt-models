@@ -5,13 +5,12 @@ from gemma4_tt.mesh import open_n300
 from gemma4_tt.tt.model import Gemma4TT
 with open_n300(trace_region_size=300_000_000) as mesh:
     m = Gemma4TT(mesh, Checkpoint(), max_batch=1)
-    m.allocate_kv_cache(8)
-    pts = torch.arange(4, dtype=torch.int32)[None]
-    m.prefill(torch.randint(100, 2000, (64,)), pts[0], slot=0)
-    m.decode(torch.tensor([5]), torch.tensor([64]), pts, trace=True)
+    tables = m.allocate_kv_cache(1, 128)
+    m.prefill(torch.randint(100, 2000, (64,)), 0, tables[:, 0])
+    m.decode(torch.tensor([5]), torch.tensor([64]), tables, trace=True)
     tid, dev, out = m.traces[1]
     print("out", out.shape, out.layout, out.memory_config().memory_layout)
-    host = m._decode_inputs(torch.tensor([5]), torch.tensor([70]), pts, torch.arange(1))
+    host = m._decode_inputs(torch.tensor([5]), torch.tensor([70]), tables)
     r, c, e, full, sc, am, sc1 = [], [], [], [], [], [], []
     for i in range(20):
         ttnn.synchronize_device(mesh)

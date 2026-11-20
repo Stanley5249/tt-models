@@ -4,19 +4,32 @@ Register it for a launch with
 
     TT_MODEL_CLASS_OVERRIDES=TTGemma4ForConditionalGeneration=gemma4_tt.vllm_model:Gemma4ForCausalLM
 
-vLLM pages only the 5 global-attention layers. The 25 sliding layers keep a
-per-slot ring of 1024 tokens that the adapter owns, so the KV spec announced
-to vLLM describes one global layer (2 KV heads of 512) without a window.
+vLLM pages all 30 layers through its hybrid KV-cache manager: the sliding
+layers as SlidingWindowSpec, the global ones as FullAttentionSpec (layout in
+gemma4_tt/tt/kv_cache.py). The model keeps no per-request state, so prefix
+caching, chunked prefill, preemption and row moves need no adapter hooks:
+release_request and slot_remap have nothing to act on.
+
+Prefill starts on the KV block grid (128 tokens with --block-size 64), where
+vLLM's prefix hits and the plugin's chunk ends fall. vLLM's Python
+streaming-input sessions can resume off that grid and are not supported.
 """
 
+import math
 import os
 import time
 
 import torch
 from loguru import logger
 
-from gemma4_tt.checkpoint import Checkpoint
+from gemma4_tt.checkpoint import Checkpoint, attention_dims
+from gemma4_tt.tt.kv_cache import KvCache, kv_groups
 from gemma4_tt.tt.model import Gemma4TT
+
+# Device DRAM per chip for the shared KV pool. Weights take 8.0 of 11.87 GiB;
+# the rest holds prefill activations, decode traces and their inputs.
+KV_POOL_BYTES = int(2.5 * 2**30)
+BFP8_BYTES = 1088 / 1024  # per value: BFP8 tiles carry one shared exponent per 16 values
 
 # Largest top-k the model-side sampler takes; requests with no top-k (or a
 # larger one) and a temperature fall back to vLLM's host sampler.
@@ -68,8 +81,8 @@ def sample(logits: torch.Tensor, params, positions: torch.Tensor, rows_idx=None)
 
 class Gemma4ForCausalLM:
     model_capabilities = {
-        "supports_prefix_caching": False,
-        "supports_chunked_prefill": False,
+        "supports_prefix_caching": True,
+        "supports_chunked_prefill": True,
         "supports_async_decode": False,
         # "Device" sampling here is the host-side top-k sampler above, which the
         # plugin calls through decode_forward(sampling_params=...).
@@ -99,54 +112,94 @@ class Gemma4ForCausalLM:
         return cls(model)
 
     @classmethod
-    def get_max_tokens_all_users(cls, model_name="", num_devices=2, tt_data_parallel=1, max_model_len=32768, max_num_seqs=4, **_):
-        return max_model_len * max_num_seqs
+    def get_max_tokens_all_users(cls, model_name="", num_devices=2, **_):
+        """Token slots of the KV pool: KV_POOL_BYTES over the bytes one token slot
+        costs on a chip, a K and a V row in each buffer a KV-cache group spans."""
+        cfg = Checkpoint(model_name).config if model_name else Checkpoint().config
+        per_token = max(heads // min(num_devices, heads) * head_dim for head_dim, heads in attention_dims(cfg).values())
+        layers_per_group = kv_groups(cfg.layer_types).count(0)
+        return int(KV_POOL_BYTES / (layers_per_group * 2 * per_token * BFP8_BYTES))
 
     @classmethod
     def get_kv_cache_spec(cls, vllm_config):
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
+        """One spec per layer, so vLLM forms sliding and global KV-cache groups. The
+        dtype only sizes vLLM's page accounting; the device stores BFP8."""
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
         text = vllm_config.model_config.hf_config.get_text_config()
-        spec = FullAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
-            num_kv_heads=text.num_global_key_value_heads,
-            head_size=text.global_head_dim,
-            dtype=torch.bfloat16,
-        )
-        return {"foo": spec}
+        dims = attention_dims(text)
+        block = vllm_config.cache_config.block_size
+        cls._check_chunk_grid(vllm_config, dims)
+        specs = {}
+        for i, kind in enumerate(text.layer_types):
+            head_dim, heads = dims[kind]
+            common = {"block_size": block, "num_kv_heads": heads, "head_size": head_dim, "dtype": torch.bfloat16}
+            if kind == "sliding_attention":
+                specs[f"model.layers.{i}.self_attn"] = SlidingWindowSpec(**common, sliding_window=text.sliding_window)
+            else:
+                specs[f"model.layers.{i}.self_attn"] = FullAttentionSpec(**common)
+        return specs
 
-    def allocate_kv_cache(self, kv_cache_shape, dtype, num_layers):
-        num_blocks, _, block_size, _ = kv_cache_shape
-        self.model.block_size = block_size
-        logger.info(f"Gemma4 N300: KV pool of {num_blocks} blocks x {block_size} tokens for the global layers")
-        return self.model.allocate_kv_cache(num_blocks)
+    @staticmethod
+    def _check_chunk_grid(vllm_config, dims):
+        """Prefill must start on the KV block grid, the lcm of the group block sizes
+        (Gemma4TT.prefill). vLLM's prefix hits fall on it; partial chunks end on the
+        plugin's prefill_chunk_alignment, which must therefore be a multiple of it."""
+        from vllm_tt_plugin.config import get_tt_prefill_chunk_alignment
+
+        block = vllm_config.cache_config.block_size
+        per_token = [heads * head_dim for head_dim, heads in dims.values()]
+        grid = math.lcm(*(block * max(per_token) // t for t in per_token))
+        if vllm_config.scheduler_config.enable_chunked_prefill:
+            align = get_tt_prefill_chunk_alignment(vllm_config)
+            if align == 0 or align % grid:
+                raise ValueError(
+                    f"--block-size {block} puts the KV block grid at {grid} tokens; set "
+                    f"additional_config tt.prefill_chunk_alignment to a multiple of it (now {align})"
+                )
 
     def allocate_kv_cache_per_layer(self, per_layer_specs):
-        shape, dtype, _ = per_layer_specs[0]
-        return self.allocate_kv_cache(shape, dtype, len(per_layer_specs))
+        """per_layer_specs: (shape, dtype, buffer index) per layer from vLLM's plan."""
+        m = self.model
+        shapes = [tuple(shape) for shape, _, _ in per_layer_specs]
+        buffers = [idx for _, _, idx in per_layer_specs]
+        m.use_kv(KvCache(m.mesh, m.cfg.layer_types, shapes, buffers, kv_groups(m.cfg.layer_types), m.precision.kv_cache))
+        # one layer of each group, whose vLLM page table stands for the group's
+        self._group_layer = [next(i for i, kv in enumerate(m.kv.layers) if kv.group == g) for g in range(m.kv.groups)]
+        logger.info(
+            f"Gemma4 N300: KV pool of {m.kv.num_blocks} blocks, {len(set(buffers))} shared K/V buffers, "
+            f"{m.kv.groups} groups with block sizes {m.kv.block_sizes}"
+        )
+        return m.kv
+
+    def _group_tables(self, per_layer: list[torch.Tensor], rows: int, check: bool = False) -> torch.Tensor:
+        """vLLM's per-layer page tables as int32 [groups, rows, width]."""
+        tables = torch.stack([per_layer[i][:rows] for i in self._group_layer]).to(torch.int32)
+        if check:  # the model's grouping must match vLLM's (see kv_groups)
+            for i, kv in enumerate(self.model.kv.layers):
+                if not torch.equal(per_layer[i][:rows].to(torch.int32), tables[kv.group, :, : per_layer[i].shape[1]]):
+                    raise RuntimeError(f"layer {i} page table differs from its KV-cache group {kv.group}; kv_groups no longer matches vLLM")
+        return tables
 
     # -- execution -----------------------------------------------------------
 
-    def prefill_forward(self, tokens, start_pos, prompt_lens, page_table, kv_cache, enable_trace=False, empty_slots=None, **_):
-        rows = []
-        for i in range(tokens.shape[0]):
+    def prefill_forward(self, tokens, start_pos, prompt_lens, page_table, kv_cache, page_tables_per_layer=None, **_):
+        """Row i computes tokens[i, start_pos[i]:prompt_lens[i]]; the cache holds the positions before."""
+        rows = tokens.shape[0]
+        tables = self._group_tables(page_tables_per_layer, rows, check=True)
+        out = []
+        for i in range(rows):
             start, end = int(start_pos[i]), int(prompt_lens[i])
-            if start != 0:
-                raise NotImplementedError(f"prefill must start at position 0, got {start}")
-            slot = int(empty_slots[i]) if empty_slots is not None else i
             t0 = time.perf_counter()
-            rows.append(self.model.prefill(tokens[i, :end], page_table[i], slot=slot))
+            out.append(self.model.prefill(tokens[i, :end], start, tables[:, i]))
             if self.timing:
-                logger.info(f"Gemma4 prefill: {end} tokens in slot {slot}, {(time.perf_counter() - t0) * 1e3:.0f} ms")
-        return torch.stack(rows)[:, None, :]
+                logger.info(f"Gemma4 prefill: positions {start}-{end}, {(time.perf_counter() - t0) * 1e3:.0f} ms")
+        return torch.stack(out)[:, None, :]
 
-    def decode_forward(
-        self, tokens, start_pos, page_table, kv_cache, enable_trace=False, read_from_device=True, slot_remap=None, sampling_params=None, **_
-    ):
-        if slot_remap is not None:
-            self.model.remap_slots(slot_remap)
+    def decode_forward(self, tokens, start_pos, page_table, kv_cache, enable_trace=False, page_tables_per_layer=None, sampling_params=None, **_):
+        tables = self._group_tables(page_tables_per_layer, tokens.shape[0])
         t0 = time.perf_counter()
-        active, logits = self.model.decode_active(tokens[:, 0], start_pos, page_table, trace=enable_trace)
+        active, logits = self.model.decode_active(tokens[:, 0], start_pos, tables, trace=enable_trace)
         if self.timing:
             t1 = time.perf_counter()
             outside = (t0 - self._last_return) * 1e3 if self._last_return else float("nan")
@@ -173,22 +226,23 @@ class Gemma4ForCausalLM:
     # -- lifecycle -------------------------------------------------------------
 
     def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, **_):
-        """Compile the prefill programs once on a short dummy prompt."""
-        blocks = torch.zeros(self.model.max_seq_len // self.model.block_size, dtype=torch.int32)
-        self.model.prefill(torch.zeros(32, dtype=torch.long), blocks, slot=0)
+        """Compile the prefill programs on a short prompt from position 0 and a
+        continuation chunk, which reads the paged cache. The pool holds no request yet."""
+        grid = self.model.kv.grid
+        tables = self.model.page_tables(1, 4 * grid)[:, 0]
+        tokens = torch.zeros(grid + 32, dtype=torch.long)
+        self.model.prefill(tokens[:32], 0, tables)
+        self.model.prefill(tokens, grid, tables)
 
     def warmup_model_decode(self, kv_cache, max_batch_size, num_blocks, can_sample_on_device, enable_trace, **_):
         """Compile (and capture) one decode program per active row count, since
-        decode drops inactive rows; position 0 of slot 0 is rewritten by any prefill."""
+        decode drops inactive rows."""
         tokens = torch.zeros(max_batch_size, dtype=torch.long)
-        page_table = torch.zeros(max_batch_size, num_blocks, dtype=torch.int32)
+        tables = self.model.page_tables(max_batch_size, 64)
         for active in range(1, max_batch_size + 1):
             positions = torch.full((max_batch_size,), -1, dtype=torch.long)
             positions[:active] = 0
-            self.model.decode(tokens, positions, page_table, trace=enable_trace)
-
-    def release_request(self, slot):
-        pass  # the slot's sliding ring is rewritten by the next prefill into it
+            self.model.decode(tokens, positions, tables, trace=enable_trace)
 
     def release_persistent_capture(self):
         self.model.release_traces()

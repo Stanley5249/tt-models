@@ -32,13 +32,11 @@ def main():
         report(mesh, "mesh open")
         model = Gemma4TT(mesh, Checkpoint(), max_batch=args.users, max_seq_len=args.context)
         report(mesh, "weights")
-        blocks = args.users * args.context // model.block_size + 4
-        model.allocate_kv_cache(blocks)
-        report(mesh, f"kv {blocks} blocks")
-        pt = torch.arange(blocks - 4, dtype=torch.int32).reshape(args.users, -1)
-        model.decode(torch.zeros(args.users, dtype=torch.long), torch.zeros(args.users, dtype=torch.long), pt, trace=True)
+        tables = model.allocate_kv_cache(args.users, args.context)
+        report(mesh, f"kv {model.kv.num_blocks} blocks")
+        model.decode(torch.zeros(args.users, dtype=torch.long), torch.zeros(args.users, dtype=torch.long), tables, trace=True)
         report(mesh, f"decode trace B={args.users}")
-        model.prefill(torch.randint(100, 1000, (args.prefill,)), pt[0], slot=0)
+        model.prefill(torch.randint(100, 1000, (args.prefill,)), 0, tables[:, 0])
         report(mesh, f"after prefill {args.prefill}")
 
 

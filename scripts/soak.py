@@ -26,17 +26,15 @@ def main():
     args = ap.parse_args()
     with open_n300(trace_region_size=300_000_000) as mesh:
         m = Gemma4TT(mesh, Checkpoint(), max_batch=4)
-        per = -(-(128 + args.steps + 64) // m.block_size)
-        m.allocate_kv_cache(4 * per + 1)
-        pts = torch.arange(4 * per, dtype=torch.int32).reshape(4, per)
+        pts = m.allocate_kv_cache(4, 128 + args.steps + 1)
         ids = torch.randint(100, 20000, (128,))
         for b in range(4):
-            m.prefill(ids, pts[b], slot=b)
+            m.prefill(ids, 0, pts[:, b])
         tok = torch.tensor([5])
         start = None
         t0 = time.time()
         for s in range(args.steps):
-            lg = m.decode(tok, torch.tensor([128 + s]), pts[:1], trace=True)
+            lg = m.decode(tok, torch.tensor([128 + s]), pts[:, :1], trace=True)
             tok = lg.argmax(-1)
             if s == 10:
                 start = used(mesh)

@@ -29,13 +29,11 @@ def main():
         ids = tok(args.prompt, return_tensors="pt").input_ids[0]
     with open_n300(trace_region_size=200_000_000 if args.trace else 0) as mesh:
         model = Gemma4TT(mesh, ckpt, max_batch=1)
-        blocks = -(-(ids.shape[0] + args.tokens + 64) // model.block_size)
-        model.allocate_kv_cache(blocks)
-        pt = torch.arange(blocks, dtype=torch.int32)
-        out = [int(model.prefill(ids, pt, slot=0).argmax())]
+        pt = model.allocate_kv_cache(1, ids.shape[0] + args.tokens)
+        out = [int(model.prefill(ids, 0, pt[:, 0]).argmax())]
         for i in range(args.tokens - 1):
             pos = ids.shape[0] + i
-            logits = model.decode(torch.tensor([out[-1]]), torch.tensor([pos]), pt[None], trace=args.trace)
+            logits = model.decode(torch.tensor([out[-1]]), torch.tensor([pos]), pt, trace=args.trace)
             out.append(int(logits[0].argmax()))
         model.release_traces()
     print("PROMPT", repr(tok.decode(ids)))

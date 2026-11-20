@@ -39,7 +39,7 @@ torchvision = { version = "==0.26.*", index = "https://download.pytorch.org/whl/
 # PyPI's vLLM wheels are CUDA builds, its CPU wheels since 0.30 need glibc 2.39,
 # and its sdist states the CUDA requirements statically. A git checkout makes
 # the resolver build the metadata, which lists requirements/common.txt.
-vllm = { git = "https://github.com/vllm-project/vllm.git", tag = "v0.31.0" }
+vllm = { git = "https://github.com/vllm-project/vllm.git", tag = "v0.32.0" }
 # Profiling front end (tracy, memory, noc, serve captures); same fork ttnn as above.
 tt-scope = { git = "https://github.com/Stanley5249/tt-scope.git", tag = "v0.4.0" }
 # Follows plugin main; pixi.lock holds the commit until `pixi update vllm-tt-plugin`.
@@ -51,8 +51,8 @@ vllm-tt-plugin = { git = "https://github.com/tenstorrent/vllm-tt-plugin.git", br
 [pypi-options.dependency-overrides]
 # vLLM asks for >=4.13, which needs numpy 2 (vllm-tt-plugin docs/vllm-overrides.txt).
 opencv-python-headless = "==4.11.*"
-# vllm-tt-plugin's supported range; vLLM alone allows up to 5.18.
-transformers = ">=5.10.4,<5.15"
+# vllm-tt-plugin's supported range (docs/vllm-overrides.txt).
+transformers = ">=5.16.1,<5.17"
 
 # Both tasks bind to 127.0.0.1:8000, so run one at a time.
 # Pi sends tool_choice=auto. vLLM requires both auto tool choice and a tool parser.
@@ -74,19 +74,24 @@ TT_CACHE_PATH = "$PIXI_PROJECT_ROOT/cache/Qwen3-8B"
 [tasks.serve-gemma4]
 # Keep the served model name in sync with Pi's model ID.
 # The reasoning parser sends thinking to Pi separately from the answer.
+# Prefix caching and chunked prefill are on (vLLM defaults the model allows).
+# One decode step after every 2048-token prefill chunk bounds a running
+# stream's gap at ~1.7 s while an 8K prompt prefills, with the same TTFT as two
+# chunks per step (3.4 s gap). 1024-token chunks give 1.0 s at 10% more TTFT.
 # The 200 MB trace region holds four decode traces, one per active row count.
-# decode_only uses the on-device top-k sampler in gemma4_tt/vllm_model.py.
+# decode_only uses the model-side top-k sampler in gemma4_tt/vllm_model.py.
 cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
   --host 127.0.0.1 --port 8000 \
   --served-model-name gemma4 \
   --block-size 64 \
   --max-num-seqs 4 \
   --max-model-len 32768 \
+  --max-num-batched-tokens 2048 \
   --enable-auto-tool-choice --tool-call-parser gemma4 \
   --reasoning-parser gemma4 \
   --default-chat-template-kwargs '{"enable_thinking": true}' \
   --limit-mm-per-prompt '{"image": 0, "audio": 0, "video": 0}' \
-  --additional-config '{"tt": {"trace_region_size": 200000000, "sample_on_device_mode": "decode_only"}}'"""
+  --additional-config '{"tt": {"trace_region_size": 200000000, "sample_on_device_mode": "decode_only", "decode_interleave_prefill_steps": 1}}'"""
 
 [tasks.serve-gemma4.env]
 MESH_DEVICE = "N300"

@@ -1,5 +1,6 @@
-// Routed-expert down matmul (TRISC) for Gemma 4 batch-1 decode: for each of this core's J output
-// columns, out = sum over slots e and K tiles k of act[e, k] . Wd_e[k, col], accumulated in FP32 dest.
+// Routed-expert down matmul (TRISC) for Gemma 4 decode: for each of this core's J output columns,
+// out = sum over slots e and K tiles k of act[e, k] . Wd_e[k, col], accumulated in FP32 dest. A slot's
+// act tiles arrive as kt tiles of cb_in0 (the writer streams them slot by slot).
 
 #include <cstdint>
 
@@ -17,16 +18,17 @@ void kernel_main() {
 
     compute_kernel_hw_startup<SrcOrder::Reverse>(cb_in0, cb_w, cb_out);
     matmul_init(cb_in0, cb_w);
-    cb_wait_front(cb_in0, slots * kt);
     tile_regs_acquire();
     for (uint32_t e = 0; e < slots; ++e) {
+        cb_wait_front(cb_in0, kt);
         cb_wait_front(cb_w, kt * cols);
         for (uint32_t k = 0; k < kt; ++k) {
             for (uint32_t c = 0; c < cols; ++c) {
-                matmul_tiles(cb_in0, cb_w, e * kt + k, k * cols + c, c);
+                matmul_tiles(cb_in0, cb_w, k, k * cols + c, c);
             }
         }
         cb_pop_front(cb_w, kt * cols);
+        cb_pop_front(cb_in0, kt);
     }
     tile_regs_commit();
     cb_reserve_back(cb_out, cols);
@@ -36,5 +38,4 @@ void kernel_main() {
     }
     tile_regs_release();
     cb_push_back(cb_out, cols);
-    cb_pop_front(cb_in0, slots * kt);
 }

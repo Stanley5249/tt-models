@@ -50,13 +50,12 @@ def run_reference(ckpt, ids, dtype, quant):
 
 def run_tt(ckpt, ids, args):
     from gemma4_tt.mesh import open_n300
-    from gemma4_tt.tt.model import Gemma4TT, Precision
+    from gemma4_tt.tt.model import Gemma4TT
 
     with open_n300() as mesh:
         model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, precision=args.precision)
-        blocks = -(-(ids.shape[0] + 64) // model.block_size)
-        model.allocate_kv_cache(blocks)
-        return model.prefill(ids, torch.arange(blocks, dtype=torch.int32), slot=0, all_logits=True)
+        tables = model.allocate_kv_cache(1, ids.shape[0])
+        return model.prefill(ids, 0, tables[:, 0], all_logits=True)
 
 
 def score(logits, base, ids):
