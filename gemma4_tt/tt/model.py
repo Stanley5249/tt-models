@@ -188,6 +188,7 @@ class Gemma4TT:
         self.rope = self._rope_tables(max_seq_len)
         self.kv_caches = None
         self.traces = {}
+        self._trace_inputs: dict[int, dict[str, ttnn.Tensor]] = {}
         self._pt_last, self._pt_src = {}, {}
         init_ccl(mesh)
 
@@ -372,11 +373,10 @@ class Gemma4TT:
                 t.deallocate(True)
             return logits
         key = tokens.shape[0]
-        if not self.traces:
-            self._decode_constants()
+        if not self._trace_inputs:
+            self._prepare_traces()
         if key not in self.traces:
-            dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
-            self._decode_device(dev).deallocate(True)  # compile outside the capture
+            dev = self._trace_inputs[key]
             tid = ttnn.begin_trace_capture(self.mesh, cq_id=0)
             out = self._decode_device(dev)
             ttnn.end_trace_capture(self.mesh, tid, cq_id=0)
@@ -395,17 +395,28 @@ class Gemma4TT:
         ttnn.execute_trace(self.mesh, tid, cq_id=0, blocking=False)
         return self._read_logits(out)
 
-    def _decode_constants(self):
-        """Create every batch size's decode constants before the first trace capture.
+    def _prepare_traces(self):
+        """Allocate every batch size's trace inputs and run its decode once, eagerly,
+        before the first capture.
 
         A buffer allocated after a capture can overlap that trace's intermediates,
-        and replaying the trace then overwrites it. Per-step inputs are rewritten
-        before each replay, but these constants are not.
+        and replaying the trace then overwrites it. Constants are never rewritten,
+        and unchanged page tables are skipped before a replay. A constant that an op
+        creates on first use (rotate_half's matrix, a batch size's MoE masks) and a
+        batch size's inputs allocated after another batch size's capture both read
+        corrupted values: wrong tokens, or expert ids that send a read out of
+        bounds and hang the device. The eager run also compiles the programs.
         """
+        width = min(self.max_seq_len // self.block_size, self.num_blocks - 1)
         for batch in range(1, self.max_batch + 1):
             for layer in self.layers:
                 layer.attn.head_weights(batch)
                 layer.ff.decode_constants(batch)
+            zeros = torch.zeros(batch, dtype=torch.long)
+            host = self._decode_inputs(zeros, zeros, torch.zeros(batch, width, dtype=torch.int32), torch.arange(batch))
+            self._trace_inputs[batch] = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
+        for dev in self._trace_inputs.values():
+            self._decode_device(dev).deallocate(True)
 
     def _host(self, t: torch.Tensor, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT) -> ttnn.Tensor:
         return ttnn.from_torch(t, dtype=dtype, layout=layout, mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh))
@@ -536,7 +547,8 @@ class Gemma4TT:
         return logits
 
     def release_traces(self):
-        for tid, dev, out in self.traces.values():
+        """Release the captures; their inputs stay allocated for the next capture."""
+        for tid, _, _ in self.traces.values():
             ttnn.release_trace(self.mesh, tid)
         self.traces = {}
         self._pt_last = {}

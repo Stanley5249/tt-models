@@ -241,7 +241,7 @@ class FeedForward:
         return self._combine_masks[tokens]
 
     def decode_constants(self, tokens: int):
-        """Allocate the decode constants for `tokens` rows now (see Gemma4TT._decode_constants)."""
+        """Allocate the decode constants for `tokens` rows now (see Gemma4TT._prepare_traces)."""
         self._bias(tokens)
         if tokens > 1:
             self._combine_mask(tokens)

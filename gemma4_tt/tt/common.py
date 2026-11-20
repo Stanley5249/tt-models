@@ -108,7 +108,7 @@ _SEMAPHORES: dict[int, _Semaphores] = {}
 
 
 def init_ccl(mesh: ttnn.MeshDevice):
-    """Allocate the CCL semaphores; call before any trace capture (see Gemma4TT._decode_constants)."""
+    """Allocate the CCL semaphores; call before any trace capture (see Gemma4TT._prepare_traces)."""
     if id(mesh) not in _SEMAPHORES:
         _SEMAPHORES[id(mesh)] = _Semaphores(mesh)
 
