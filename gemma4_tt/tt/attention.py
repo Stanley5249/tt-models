@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
+from gemma4_tt.checkpoint import attention_dims
 from gemma4_tt.tt.boundary import QkRope
 from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, dram_sharded, norm_weight, width_sharded_l1
 
@@ -33,10 +34,10 @@ class AttnShape:
 
 
 def attn_shape(cfg, layer_idx: int, tp: int) -> AttnShape:
-    sliding = cfg.layer_types[layer_idx] == "sliding_attention"
-    if sliding:
-        return AttnShape(True, cfg.head_dim, cfg.num_attention_heads // tp, cfg.num_key_value_heads // tp, cfg.sliding_window)
-    return AttnShape(False, cfg.global_head_dim, cfg.num_attention_heads // tp, cfg.num_global_key_value_heads // tp, None)
+    kind = cfg.layer_types[layer_idx]
+    head_dim, n_kv = attention_dims(cfg)[kind]
+    sliding = kind == "sliding_attention"
+    return AttnShape(sliding, head_dim, cfg.num_attention_heads // tp, n_kv // tp, cfg.sliding_window if sliding else None)
 
 
 def ring_selection(seq_len: int, padded_len: int, window: int) -> tuple[int, torch.Tensor] | None:

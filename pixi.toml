@@ -39,7 +39,7 @@ torchvision = { version = "==0.26.*", index = "https://download.pytorch.org/whl/
 # PyPI's vLLM wheels are CUDA builds, its CPU wheels since 0.30 need glibc 2.39,
 # and its sdist states the CUDA requirements statically. A git checkout makes
 # the resolver build the metadata, which lists requirements/common.txt.
-vllm = { git = "https://github.com/vllm-project/vllm.git", tag = "v0.31.0" }
+vllm = { git = "https://github.com/vllm-project/vllm.git", tag = "v0.32.0" }
 # Profiling front end (tracy, memory, noc, serve captures); same fork ttnn as above.
 tt-scope = { git = "https://github.com/Stanley5249/tt-scope.git", tag = "v0.4.0" }
 # Follows plugin main; pixi.lock holds the commit until `pixi update vllm-tt-plugin`.
@@ -51,8 +51,8 @@ vllm-tt-plugin = { git = "https://github.com/tenstorrent/vllm-tt-plugin.git", br
 [pypi-options.dependency-overrides]
 # vLLM asks for >=4.13, which needs numpy 2 (vllm-tt-plugin docs/vllm-overrides.txt).
 opencv-python-headless = "==4.11.*"
-# vllm-tt-plugin's supported range; vLLM alone allows up to 5.18.
-transformers = ">=5.10.4,<5.15"
+# vllm-tt-plugin's supported range (docs/vllm-overrides.txt).
+transformers = ">=5.16.1,<5.17"
 
 # Both tasks bind to 127.0.0.1:8000, so run one at a time.
 # Pi sends tool_choice=auto. vLLM requires both auto tool choice and a tool parser.

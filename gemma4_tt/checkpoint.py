@@ -30,6 +30,19 @@ def resolve_snapshot(model: str = DEFAULT_MODEL) -> Path:
     return Path(snapshot_download(model, local_files_only=True, allow_patterns=["*.json", "*.jinja", "*.md"]))
 
 
+def attention_dims(cfg) -> dict[str, tuple[int, int]]:
+    """(head_dim, num_kv_heads) per layer type.
+
+    transformers >= 5.15 keeps the global layers' values in per_layer_config
+    and refuses the old global attributes, such as cfg.head_dim.
+    """
+    dims = {}
+    for i, kind in enumerate(cfg.layer_types):
+        layer = cfg.per_layer_config[i]
+        dims.setdefault(kind, (layer.head_dim, layer.num_key_value_heads))
+    return dims
+
+
 class Checkpoint:
     def __init__(self, model: str = DEFAULT_MODEL):
         self.root = resolve_snapshot(model)
