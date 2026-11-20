@@ -20,7 +20,10 @@ with the same request run alone:
 - cancel: a stream closed after its first token, then a request in its place;
 - prefix: a second chat turn that extends the first, with the prefix cache and
   with a cache_salt that misses it; reports TTFT and the agreeing tokens;
-- seeded: a sampled request with a seed, twice.
+- seeded: a sampled request with a seed, twice;
+- preempt (not in the default set): four requests that outgrow a small KV pool
+  together, so vLLM preempts and resumes some; needs the server started with a
+  small pool, see check_preempt.
 
 The prefix check compares a cache hit with a fresh prefill: the hit reads BFP8
 K/V from the cache where the fresh prefill used BF16 rows, so a near-tie can
@@ -66,10 +69,15 @@ def complete(url: str, prompt: list[int], max_tokens: int, **extra) -> list[int]
     return post(url, "/v1/completions", body)["choices"][0]["token_ids"]
 
 
-def prefix_hits(url: str) -> float:
-    """Prompt tokens served from the prefix cache so far (vLLM's counter)."""
+def metric(url: str, name: str) -> float:
+    """A vLLM counter from /metrics, summed over its labels."""
     text = urllib.request.urlopen(f"{url}/metrics", timeout=30).read().decode()
-    return sum(float(line.rsplit(" ", 1)[1]) for line in text.splitlines() if line.startswith("vllm:prefix_cache_hits_total"))
+    return sum(float(line.rsplit(" ", 1)[1]) for line in text.splitlines() if line.startswith(name + "{") or line.startswith(name + " "))
+
+
+def prefix_hits(url: str) -> float:
+    """Prompt tokens served from the prefix cache so far."""
+    return metric(url, "vllm:prefix_cache_hits_total")
 
 
 def stream(url: str, prompt: list[int], max_tokens: int, stop_after: int | None = None, first=None) -> tuple[list[int], list[float]]:
@@ -198,6 +206,38 @@ def check_seeded(url):
     return compare("seeded sampling, twice", a, b)
 
 
+def check_preempt(url):
+    """Start the server with a pool too small for four of these requests:
+
+        GEMMA4_KV_POOL_GIB=0.2 pixi run serve-gemma4 --max-model-len 4096
+
+    vLLM admits a request only when its prompt fits, so the four short prompts
+    start together and run out of KV pages as they grow: at 1,560 tokens each
+    needs about 98 pages (13 global, 17 per sliding group), against the 313 that
+    0.2 GiB holds. vLLM then preempts the newest request and later recomputes it
+    from its prompt and the tokens it had. Listing numbers has a clear next token
+    at every step, so batch numerics do not flip it and the outputs must agree."""
+    starts = [1, 5000, 20000, 70000]
+    prompts = [f"Write every integer from {n} to {n + 700} on its own line. Do not write code; output only the numbers." for n in starts]
+    salts = [f"preempt-{random.random()}" for _ in prompts]  # no prefix hits between the runs
+    run = {"chat_template_kwargs": {"enable_thinking": False}}
+    alone = [chat(url, p, 1536, cache_salt=s, **run) for p, s in zip(prompts, salts)]
+    short = [n for n, a in zip(starts, alone) if len(a) < 1536]
+    if short:  # each request must outlive the page shortage to cover the resume
+        print(f"[DIFF] the lists from {short} ended early; pick other start values", flush=True)
+    before = metric(url, "vllm:num_preemptions_total")
+    with ThreadPoolExecutor(len(prompts)) as pool:
+        together = list(pool.map(lambda ps: chat(url, ps[0], 1536, cache_salt=ps[1] + "-b", **run), zip(prompts, salts)))
+    preempted = metric(url, "vllm:num_preemptions_total") - before
+    print(f"    {preempted:.0f} preemptions during the concurrent run", flush=True)
+    ok = preempted > 0 and not short
+    if not preempted:
+        print("[DIFF] no request was preempted; start the server with a smaller pool", flush=True)
+    for n, a, b in zip(starts, alone, together):
+        ok &= compare(f"numbers from {n} with preemption vs alone", a, b)
+    return ok
+
+
 CHECKS = {
     "isolation": check_isolation,
     "raw": check_raw,
@@ -206,17 +246,19 @@ CHECKS = {
     "prefix": check_prefix,
     "seeded": check_seeded,
 }
+EXTRA_CHECKS = {"preempt": check_preempt}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:8000")
-    ap.add_argument("checks", nargs="*", help=f"any of {', '.join(CHECKS)} (default: all)")
+    ap.add_argument("checks", nargs="*", help=f"any of {', '.join(CHECKS | EXTRA_CHECKS)} (default: {', '.join(CHECKS)})")
     args = ap.parse_args()
-    unknown = set(args.checks) - set(CHECKS)
+    known = CHECKS | EXTRA_CHECKS
+    unknown = set(args.checks) - set(known)
     if unknown:
         ap.error(f"unknown checks: {', '.join(sorted(unknown))}")
-    failed = [name for name in args.checks or CHECKS if not CHECKS[name](args.url)]
+    failed = [name for name in args.checks or CHECKS if not known[name](args.url)]
     print("PASS" if not failed else f"FAIL: {', '.join(failed)}")
     sys.exit(1 if failed else 0)
 

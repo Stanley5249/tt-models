@@ -28,7 +28,8 @@ from gemma4_tt.tt.model import Gemma4TT
 
 # Device DRAM per chip for the shared KV pool. Weights take 8.0 of 11.87 GiB;
 # the rest holds prefill activations, decode traces and their inputs.
-KV_POOL_BYTES = int(2.5 * 2**30)
+# GEMMA4_KV_POOL_GIB overrides it, for example to force preemption in a test.
+KV_POOL_BYTES = int(float(os.environ.get("GEMMA4_KV_POOL_GIB", "2.5")) * 2**30)
 BFP8_BYTES = 1088 / 1024  # per value: BFP8 tiles carry one shared exponent per 16 values
 
 # Largest top-k the model-side sampler takes; requests with no top-k (or a
