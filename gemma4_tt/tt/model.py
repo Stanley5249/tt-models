@@ -364,19 +364,20 @@ class Gemma4TT:
         out[active] = logits
         return out
 
-    def decode_active(self, tokens, positions, tables, trace: bool = False):
+    def decode_active(self, tokens, positions, tables, trace: bool = False, softcap: bool = True):
         """decode() without the inactive rows: (active row indices, float logits [A, V]).
 
         Building the zero-filled [B, V] result of decode() costs ~1 ms per step; the vLLM
-        adapter samples only the active rows."""
+        adapter samples only the active rows. softcap=False returns the logits before
+        the final softcap (see softcap()), for a caller that caps only what it needs."""
         active = torch.nonzero(positions >= 0).flatten()
         if len(active) == tokens.shape[0]:
-            return active, self._decode_rows(tokens, positions, tables, trace)
+            return active, self._decode_rows(tokens, positions, tables, trace, softcap)
         if not len(active):
             return active, torch.zeros(0, self.vocab)
-        return active, self._decode_rows(tokens[active], positions[active], tables[:, active], trace)
+        return active, self._decode_rows(tokens[active], positions[active], tables[:, active], trace, softcap)
 
-    def _decode_rows(self, tokens, positions, tables, trace) -> torch.Tensor:
+    def _decode_rows(self, tokens, positions, tables, trace, softcap: bool = True) -> torch.Tensor:
         """Decode rows that are all active."""
         if tokens.shape[0] > self.max_batch:
             raise ValueError(f"{tokens.shape[0]} active decode rows; the model was built for {self.max_batch}")
@@ -384,7 +385,7 @@ class Gemma4TT:
         if not trace:
             dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
             out = self._decode_device(dev)
-            logits = self._read_logits(out)
+            logits = self._read_logits(out, softcap)
             out.deallocate(True)
             for t in dev.values():
                 t.deallocate(True)
@@ -410,7 +411,7 @@ class Gemma4TT:
                 last[k] = src.clone()
             ttnn.copy_host_to_device_tensor(v, dev[k])
         ttnn.execute_trace(self.mesh, tid, cq_id=0, blocking=False)
-        return self._read_logits(out)
+        return self._read_logits(out, softcap)
 
     def _prepare_traces(self):
         """Allocate every batch size's trace inputs and run its decode once, eagerly,
@@ -546,14 +547,22 @@ class Gemma4TT:
             o.deallocate(True)
         return out
 
-    def _read_logits(self, out: ttnn.Tensor) -> torch.Tensor:
-        logits = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float()
+    def _read_logits(self, out: ttnn.Tensor, softcap: bool = True) -> torch.Tensor:
+        """fp32 logits [rows, V] of a row-major [1, 1, rows, V/tp] per-chip output.
+        (Copying into a kept host tensor and converting its shards was slower:
+        1.0 ms against 0.66 ms for one row.)"""
+        logits = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float().reshape(-1, self.vocab)
+        return self.softcap(logits) if softcap else logits
+
+    def softcap(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply the final logit softcap in place (cap * tanh(x / cap)) and return logits.
+
+        It costs 0.34 ms for one row of 262,144 logits and 1.35 ms for four, and it
+        keeps the order, so greedy and top-k sampling can cap only their candidates.
+        numpy ufuncs run on this thread: torch's pool sleeps during the device wait,
+        and waking it once made the same softcap take 1 ms instead of 0.2 ms."""
         cap = self.cfg.final_logit_softcapping
-        logits = logits.reshape(-1, self.vocab)
         if cap:
-            # numpy ufuncs run on this thread. torch's pool sleeps during the ~30 ms
-            # device wait, and waking it made the same in-place softcap take 1 ms
-            # instead of 0.2 ms.
             arr = logits.numpy()
             np.divide(arr, cap, out=arr)
             np.tanh(arr, out=arr)

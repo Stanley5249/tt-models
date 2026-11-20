@@ -38,10 +38,13 @@ MAX_TOP_K = 1024
 LOGPROBS_K = 32
 
 
-def sample(logits: torch.Tensor, params, positions: torch.Tensor, rows_idx=None):
+def sample(logits: torch.Tensor, params, positions: torch.Tensor, rows_idx=None, softcap=None):
     """Sample one token per row from float logits [B, V] with vLLM's semantics.
 
     rows_idx: the batch rows these logits belong to (their sampling params); default 0..B-1.
+    softcap: the model's in-place final softcap when `logits` are taken before it.
+    The softcap keeps the order, so greedy and top-k work on the raw logits and only
+    the k candidates are capped; logprobs need the whole capped row.
 
     vLLM's CPU sampler sorts the whole 262k vocabulary whenever top-p is set
     (14 ms per row on one thread, which vLLM's worker uses). Top-k first and
@@ -55,11 +58,16 @@ def sample(logits: torch.Tensor, params, positions: torch.Tensor, rows_idx=None)
     rows = logits.shape[0]
     idx = list(range(rows)) if rows_idx is None else [int(r) for r in rows_idx]
     temps = [float(params.temperature[r]) for r in idx]
-    if all(t == 0.0 for t in temps) and (params.enable_log_probs is None or not any(params.enable_log_probs[r] for r in idx)):
+    want_log_probs = params.enable_log_probs is not None and any(params.enable_log_probs[r] for r in idx)
+    if all(t == 0.0 for t in temps) and not want_log_probs:
         return logits.argmax(-1, keepdim=True), None  # greedy: no top-k sort
+    if want_log_probs and softcap is not None:
+        logits, softcap = softcap(logits), None
     top_ks = [int(params.top_k[r]) if int(params.top_k[r]) > 0 else MAX_TOP_K for r in idx]
     k_max = min(max(top_ks + [1]), MAX_TOP_K)
     vals, ids = logits.topk(k_max, dim=-1)  # sorted, largest first
+    if softcap is not None:
+        vals = softcap(vals.contiguous())
     out = ids[:, :1].clone()
     for i, r in enumerate(idx):
         if temps[i] == 0.0:
@@ -74,7 +82,7 @@ def sample(logits: torch.Tensor, params, positions: torch.Tensor, rows_idx=None)
         gen = None if seed is None else torch.Generator().manual_seed((int(seed) * 1_000_003 + int(positions[i])) % 2**63)
         out[i, 0] = ids[i, torch.multinomial(probs, 1, generator=gen)]
     log_probs = None
-    if params.enable_log_probs is not None and any(params.enable_log_probs[r] for r in idx):
+    if want_log_probs:
         lp, lp_ids = torch.log_softmax(logits, dim=-1).topk(LOGPROBS_K, dim=-1)
         log_probs = (lp, lp_ids)
     return out, log_probs
@@ -200,7 +208,9 @@ class Gemma4ForCausalLM:
     def decode_forward(self, tokens, start_pos, page_table, kv_cache, enable_trace=False, page_tables_per_layer=None, sampling_params=None, **_):
         tables = self._group_tables(page_tables_per_layer, tokens.shape[0])
         t0 = time.perf_counter()
-        active, logits = self.model.decode_active(tokens[:, 0], start_pos, tables, trace=enable_trace)
+        # The model-side sampler caps only what it needs (see sample()).
+        raw = sampling_params is not None
+        active, logits = self.model.decode_active(tokens[:, 0], start_pos, tables, trace=enable_trace, softcap=not raw)
         if self.timing:
             t1 = time.perf_counter()
             outside = (t0 - self._last_return) * 1e3 if self._last_return else float("nan")
@@ -212,7 +222,7 @@ class Gemma4ForCausalLM:
             ids = torch.zeros(rows, 1, dtype=torch.long)
             log_probs = None
             if len(active):
-                got, lp = sample(logits, sampling_params, start_pos[active], rows_idx=active)
+                got, lp = sample(logits, sampling_params, start_pos[active], rows_idx=active, softcap=self.model.softcap)
                 ids[active] = got
                 if lp is not None:
                     vals = torch.zeros(rows, LOGPROBS_K)
