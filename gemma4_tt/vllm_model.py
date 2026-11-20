@@ -9,8 +9,13 @@ layers as SlidingWindowSpec, the global ones as FullAttentionSpec (layout in
 gemma4_tt/tt/kv_cache.py). The model keeps no per-request state, so prefix
 caching, chunked prefill, preemption and row moves need no adapter hooks:
 release_request and slot_remap have nothing to act on.
+
+Prefill starts on the KV block grid (128 tokens with --block-size 64), where
+vLLM's prefix hits and the plugin's chunk ends fall. vLLM's Python
+streaming-input sessions can resume off that grid and are not supported.
 """
 
+import math
 import os
 import time
 
@@ -124,6 +129,7 @@ class Gemma4ForCausalLM:
         text = vllm_config.model_config.hf_config.get_text_config()
         dims = attention_dims(text)
         block = vllm_config.cache_config.block_size
+        cls._check_chunk_grid(vllm_config, dims)
         specs = {}
         for i, kind in enumerate(text.layer_types):
             head_dim, heads = dims[kind]
@@ -133,6 +139,24 @@ class Gemma4ForCausalLM:
             else:
                 specs[f"model.layers.{i}.self_attn"] = FullAttentionSpec(**common)
         return specs
+
+    @staticmethod
+    def _check_chunk_grid(vllm_config, dims):
+        """Prefill must start on the KV block grid, the lcm of the group block sizes
+        (Gemma4TT.prefill). vLLM's prefix hits fall on it; partial chunks end on the
+        plugin's prefill_chunk_alignment, which must therefore be a multiple of it."""
+        from vllm_tt_plugin.config import get_tt_prefill_chunk_alignment
+
+        block = vllm_config.cache_config.block_size
+        per_token = [heads * head_dim for head_dim, heads in dims.values()]
+        grid = math.lcm(*(block * max(per_token) // t for t in per_token))
+        if vllm_config.scheduler_config.enable_chunked_prefill:
+            align = get_tt_prefill_chunk_alignment(vllm_config)
+            if align == 0 or align % grid:
+                raise ValueError(
+                    f"--block-size {block} puts the KV block grid at {grid} tokens; set "
+                    f"additional_config tt.prefill_chunk_alignment to a multiple of it (now {align})"
+                )
 
     def allocate_kv_cache_per_layer(self, per_layer_specs):
         """per_layer_specs: (shape, dtype, buffer index) per layer from vLLM's plan."""
@@ -204,10 +228,11 @@ class Gemma4ForCausalLM:
     def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, **_):
         """Compile the prefill programs on a short prompt from position 0 and a
         continuation chunk, which reads the paged cache. The pool holds no request yet."""
-        tables = self.model.page_tables(1, 512)[:, 0]
-        tokens = torch.zeros(160, dtype=torch.long)
+        grid = self.model.kv.grid
+        tables = self.model.page_tables(1, 4 * grid)[:, 0]
+        tokens = torch.zeros(grid + 32, dtype=torch.long)
         self.model.prefill(tokens[:32], 0, tables)
-        self.model.prefill(tokens, 128, tables)
+        self.model.prefill(tokens, grid, tables)
 
     def warmup_model_decode(self, kv_cache, max_batch_size, num_blocks, can_sample_on_device, enable_trace, **_):
         """Compile (and capture) one decode program per active row count, since

@@ -80,9 +80,10 @@ def stream(url: str, prompt: list[int], max_tokens: int, stop_after: int | None 
             if not line.startswith(b"data: ") or line == b"data: [DONE]":
                 continue
             choice = json.loads(line[6:])["choices"][0]
-            ids += choice.get("token_ids") or []
+            new = choice.get("token_ids") or []
+            ids += new
             times.append(time.perf_counter())
-            if first is not None:
+            if first is not None and new:
                 first.set()
             if stop_after is not None and len(ids) >= stop_after:
                 break
@@ -132,7 +133,9 @@ def check_arrival(url):
     decoding = threading.Event()
     with ThreadPoolExecutor(2) as pool:
         streamed = pool.submit(stream, url, short, 128, first=decoding)
-        decoding.wait()
+        if not decoding.wait(timeout=120):
+            streamed.result(timeout=1)  # surfaces the stream's error, if it failed
+            raise TimeoutError("the stream produced no token within 120 s")
         t0 = time.perf_counter()
         # A fresh cache_salt keeps an earlier run's blocks from serving this prompt.
         arrived = pool.submit(lambda: (complete(url, long, 1, cache_salt=f"arrival-{random.random()}"), time.perf_counter() - t0)[1])
