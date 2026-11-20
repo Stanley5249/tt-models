@@ -42,6 +42,11 @@ LM_CORES = 8
 # Longest piece of a prompt one prefill pass computes. It bounds activation memory
 # (the expert-major MoE gathers k = 8 rows per token) whatever chunk vLLM schedules.
 PREFILL_CHUNK = 4096
+# Prefill pieces are padded to a multiple of this many rows, so their programs are
+# built once per bucket (32 up to PREFILL_CHUNK, warmed at startup) instead of once
+# per prompt length: a never-seen length cost 0.6 s more on its first prefill. The
+# padding costs about 0.5 ms per row; 256-row buckets cost a 300-token prompt 0.16 s.
+PREFILL_BUCKET = 128
 
 from gemma4_tt.tt.moe import STREAM_ROWS, FeedForward  # noqa: E402
 
@@ -195,8 +200,8 @@ class Gemma4TT:
         self.input_ln0 = self.layers[0]._raw["input_layernorm"]
         self.embed_table = ckpt.get("embed_tokens.weight")  # BF16 [V, H] on host
         self.embed_scale = torch.tensor(embed_scale(self.hidden), dtype=torch.bfloat16)
-        # A chunk's padding can run CHUNK_ALIGN rows past the last position.
-        self.rope = self._rope_tables(max_seq_len + CHUNK_ALIGN)
+        # A piece's padding can run PREFILL_BUCKET rows past the last position.
+        self.rope = self._rope_tables(max_seq_len + PREFILL_BUCKET)
         self.kv: KvCache | None = None
         self.traces = {}
         self._trace_inputs: dict[int, dict[str, ttnn.Tensor]] = {}
@@ -262,7 +267,7 @@ class Gemma4TT:
         """Take the KV cache, once: decode traces bind its buffers and table width."""
         if self.kv is not None:
             raise RuntimeError("the KV cache is set once per model")
-        if kv.grid % CHUNK_ALIGN or PREFILL_CHUNK % kv.grid:
+        if kv.grid % CHUNK_ALIGN or PREFILL_CHUNK % kv.grid or PREFILL_BUCKET % CHUNK_ALIGN:
             raise ValueError(f"a {kv.grid}-token block grid does not fit chunked prefill's {CHUNK_ALIGN}-token SDPA chunks")
         self.kv = kv
 
@@ -316,9 +321,7 @@ class Gemma4TT:
         """Run positions [c0, c1) through every layer, writing their K/V. Returns the
         final hidden rows, padded."""
         n = c1 - c0
-        # Chunked SDPA works on whole q chunks; the first chunk only needs whole tiles.
-        pad = TILE if c0 == 0 else CHUNK_ALIGN
-        padded = -(-n // pad) * pad
+        padded = -(-n // PREFILL_BUCKET) * PREFILL_BUCKET  # also whole SDPA q chunks
         ids = torch.zeros(padded, dtype=torch.long)
         ids[:n] = tokens[c0:c1]
         x = self._to_device(self.embed(ids).reshape(1, 1, padded, self.hidden))
@@ -329,7 +332,8 @@ class Gemma4TT:
 
         def table(t: torch.Tensor) -> ttnn.Tensor:
             # Chunked SDPA with a device chunk start reads rows of a multiple of 32 bytes.
-            row = torch.zeros(1, -(-t.shape[0] // 8) * 8, dtype=torch.int32)
+            # Every table keeps the full width, so a new chunk offset builds no new programs.
+            row = torch.zeros(1, -(-tables.shape[1] // 8) * 8, dtype=torch.int32)
             row[0, : t.shape[0]] = t
             return self._to_device(row, ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
 

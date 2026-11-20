@@ -24,7 +24,7 @@ from loguru import logger
 
 from gemma4_tt.checkpoint import Checkpoint, attention_dims
 from gemma4_tt.tt.kv_cache import KvCache, kv_groups
-from gemma4_tt.tt.model import Gemma4TT
+from gemma4_tt.tt.model import PREFILL_BUCKET, PREFILL_CHUNK, Gemma4TT
 
 # Device DRAM per chip for the shared KV pool. Weights take 8.0 of 11.87 GiB;
 # the rest holds prefill activations, decode traces and their inputs.
@@ -101,8 +101,13 @@ class Gemma4ForCausalLM:
         "supports_device_grammar": False,
     }
 
+    # The longest prefill piece the scheduler sends, set by get_kv_cache_spec (the
+    # plugin passes no scheduler settings to the model itself).
+    longest_prefill = PREFILL_CHUNK
+
     def __init__(self, model: Gemma4TT):
         self.model = model
+        self._prefill_warmed = False
         self.model_capabilities = dict(type(self).model_capabilities)
         # GEMMA4_TIMING=1 logs the model's share of every step, to separate it from vLLM's.
         self.timing = os.environ.get("GEMMA4_TIMING") == "1"
@@ -139,6 +144,9 @@ class Gemma4ForCausalLM:
         dims = attention_dims(text)
         block = vllm_config.cache_config.block_size
         cls._check_chunk_grid(vllm_config, dims)
+        sched = vllm_config.scheduler_config
+        if sched.enable_chunked_prefill:  # else whole prompts, in Gemma4TT.prefill's PREFILL_CHUNK pieces
+            cls.longest_prefill = min(PREFILL_CHUNK, -(-sched.max_num_batched_tokens // PREFILL_BUCKET) * PREFILL_BUCKET)
         specs = {}
         for i, kind in enumerate(text.layer_types):
             head_dim, heads = dims[kind]
@@ -237,13 +245,34 @@ class Gemma4ForCausalLM:
     # -- lifecycle -------------------------------------------------------------
 
     def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, **_):
-        """Compile the prefill programs on a short prompt from position 0 and a
-        continuation chunk, which reads the paged cache. The pool holds no request yet."""
-        grid = self.model.kv.grid
-        tables = self.model.page_tables(1, 4 * grid)[:, 0]
-        tokens = torch.zeros(grid + 32, dtype=torch.long)
-        self.model.prefill(tokens[:32], 0, tables)
-        self.model.prefill(tokens, grid, tables)
+        """Build the prefill programs of every PREFILL_BUCKET length, for a piece from
+        position 0 and a continuation piece, which reads the paged cache. A program
+        built later, after the decode traces are captured, would cost the first request
+        of that length and could allocate into trace memory. The pool holds no request
+        yet; a small pool (GEMMA4_KV_POOL_GIB) warms only the lengths it fits.
+
+        The plugin calls it again with enable_trace=True; prefill is not traced, so
+        the programs from the first call serve."""
+        if self._prefill_warmed:
+            return
+        self._prefill_warmed = True
+        m = self.model
+        grid = m.kv.grid
+        for longest in range(self.longest_prefill, 0, -PREFILL_BUCKET):
+            try:
+                tables = m.page_tables(1, grid + longest)[:, 0]
+                break
+            except ValueError:
+                continue
+        else:
+            logger.warning("Gemma4 N300: the KV pool is too small to warm any prefill length")
+            return
+        t0 = time.perf_counter()
+        tokens = torch.zeros(grid + longest, dtype=torch.long)
+        for n in range(PREFILL_BUCKET, longest + 1, PREFILL_BUCKET):
+            m.prefill(tokens[:n], 0, tables)
+            m.prefill(tokens[: grid + n], grid, tables)
+        logger.info(f"Gemma4 N300: prefill programs for pieces up to {longest} tokens built in {time.perf_counter() - t0:.0f} s")
 
     def warmup_model_decode(self, kv_cache, max_batch_size, num_blocks, can_sample_on_device, enable_trace, **_):
         """Compile (and capture) one decode program per active row count, since
