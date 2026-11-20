@@ -26,6 +26,7 @@ import argparse
 import json
 import random
 import sys
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -60,9 +61,16 @@ def complete(url: str, prompt: list[int], max_tokens: int, **extra) -> list[int]
     return post(url, "/v1/completions", body)["choices"][0]["token_ids"]
 
 
-def stream(url: str, prompt: list[int], max_tokens: int, stop_after: int | None = None) -> tuple[list[int], list[float]]:
+def prefix_hits(url: str) -> float:
+    """Prompt tokens served from the prefix cache so far (vLLM's counter)."""
+    text = urllib.request.urlopen(f"{url}/metrics", timeout=30).read().decode()
+    return sum(float(line.rsplit(" ", 1)[1]) for line in text.splitlines() if line.startswith("vllm:prefix_cache_hits_total"))
+
+
+def stream(url: str, prompt: list[int], max_tokens: int, stop_after: int | None = None, first=None) -> tuple[list[int], list[float]]:
     """Stream a raw-token greedy completion; returns its token ids and arrival times.
-    stop_after closes the connection after that many tokens, which aborts the request."""
+    stop_after closes the connection after that many tokens, which aborts the request.
+    first, a threading.Event, is set when the first token arrives."""
     body = {"model": MODEL, "prompt": prompt, "max_tokens": max_tokens, "stream": True, "return_token_ids": True, **GREEDY}
     resp = post(url, "/v1/completions", body, stream=True)
     ids, times = [], []
@@ -74,6 +82,8 @@ def stream(url: str, prompt: list[int], max_tokens: int, stop_after: int | None 
             choice = json.loads(line[6:])["choices"][0]
             ids += choice.get("token_ids") or []
             times.append(time.perf_counter())
+            if first is not None:
+                first.set()
             if stop_after is not None and len(ids) >= stop_after:
                 break
     return ids, times
@@ -119,14 +129,21 @@ def check_arrival(url):
     short = tokens(url, "Count from one to fifty in English words, separated by commas:", bos=True)
     ref = complete(url, short, 128)
     long = tokens(url, document(40000), bos=True)[:8192]
+    decoding = threading.Event()
     with ThreadPoolExecutor(2) as pool:
-        streamed = pool.submit(stream, url, short, 128)
-        time.sleep(0.5)  # the stream is decoding when the long prompt arrives
-        arrived = pool.submit(complete, url, long, 16)
+        streamed = pool.submit(stream, url, short, 128, first=decoding)
+        decoding.wait()
+        t0 = time.perf_counter()
+        # A fresh cache_salt keeps an earlier run's blocks from serving this prompt.
+        arrived = pool.submit(lambda: (complete(url, long, 1, cache_salt=f"arrival-{random.random()}"), time.perf_counter() - t0)[1])
         ids, times = streamed.result()
-        arrived.result()
+        long_ttft = arrived.result()
     gaps = [b - a for a, b in zip(times, times[1:])]
-    print(f"    stream gaps: median {sorted(gaps)[len(gaps) // 2] * 1e3:.1f} ms, max {max(gaps) * 1e3:.0f} ms", flush=True)
+    print(
+        f"    stream gaps: median {sorted(gaps)[len(gaps) // 2] * 1e3:.1f} ms, max {max(gaps) * 1e3:.0f} ms;"
+        f" the 8192-token request's first token after {long_ttft:.2f} s",
+        flush=True,
+    )
     return compare("stream while an 8192-token prompt arrives", ref, ids)
 
 
@@ -146,14 +163,23 @@ def check_prefix(url):
         {"role": "assistant", "content": answer.get("content") or ""},
         {"role": "user", "content": "Now name one function that touches the KV cache."},
     ]
+    h0 = prefix_hits(url)
     t0 = time.perf_counter()
     hit = chat(url, turn2, 48)
     t_hit = time.perf_counter() - t0
+    h1 = prefix_hits(url)
     t0 = time.perf_counter()
     fresh = chat(url, turn2, 48, cache_salt=f"miss-{random.random()}")
     t_fresh = time.perf_counter() - t0
-    print(f"    turn 2 with the prefix cache {t_hit:.2f} s, without {t_fresh:.2f} s (48 tokens each)", flush=True)
-    return compare("turn 2 from the prefix cache vs fresh", fresh, hit, need=16)
+    h2 = prefix_hits(url)
+    print(
+        f"    turn 2 from the cache: {h1 - h0:.0f} prompt tokens hit, {t_hit:.2f} s; fresh: {h2 - h1:.0f} hit, {t_fresh:.2f} s (48 tokens each)",
+        flush=True,
+    )
+    ok = h1 - h0 > 0 and h2 == h1
+    if not ok:
+        print("[DIFF] the cached turn missed the prefix cache, or the salted turn hit it", flush=True)
+    return compare("turn 2 from the prefix cache vs fresh", fresh, hit, need=16) and ok
 
 
 def check_seeded(url):

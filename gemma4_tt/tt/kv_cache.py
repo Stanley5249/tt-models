@@ -16,6 +16,7 @@ sliding groups free blocks that leave the window (vLLM's null block 0 takes
 their place), and prefix caching keeps freed blocks until they are evicted.
 """
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -106,6 +107,8 @@ class KvCache:
             geometry = None if same else ttnn.PagedCacheGeometryOverride(block_size=block, num_kv_heads=n_kv)
             self.layers.append(LayerKv(k, v, group, block, n_kv, geometry))
             self.block_sizes[group] = block
+        # vLLM schedules on the lcm of the block sizes: prefix hits and chunk ends fall on it.
+        self.grid = math.lcm(*self.block_sizes)
 
     @classmethod
     def standalone(cls, mesh, layer_types: list[str], attn_shapes, block_size: int, dtype, rows: int, tokens: int, ring_tokens: int) -> "KvCache":

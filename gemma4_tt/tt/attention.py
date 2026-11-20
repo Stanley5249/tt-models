@@ -47,20 +47,18 @@ def attn_shape(cfg, layer_idx: int, tp: int) -> AttnShape:
 
 @dataclass
 class PrefillChunk:
-    """Positions [start, start + rows) of one sequence, as tile-padded rows of x.
+    """Positions [start, start + rows) of one sequence, as padded rows of x.
 
-    start is a multiple of every block size and SDPA chunk. tables holds each
-    group's page table of the sequence, fill_tables the same tables from the block
-    each group writes first, at row fill_rows[group] of the chunk: rows before it
-    are already in the cache (shared prefix blocks must not be rewritten).
+    start is a multiple of every block size and of the SDPA chunk. tables holds
+    each group's page table of the sequence (None for a chunk at 0, which reads
+    no cache), fill_tables the same tables from the block holding `start`.
     """
 
     start: int
     rows: int
     start_tensor: ttnn.Tensor | None  # start on the device, so new offsets reuse the compiled programs
-    tables: list[ttnn.Tensor]
+    tables: list[ttnn.Tensor | None]
     fill_tables: list[ttnn.Tensor]
-    fill_rows: list[int]
 
 
 _QK_ROPE = {}
@@ -213,12 +211,14 @@ class Attention:
 
     @staticmethod
     def _fill(k: ttnn.Tensor, v: ttnn.Tensor, kv: LayerKv, chunk: PrefillChunk):
-        """Write the chunk's K/V rows from the first block this layer's group owns."""
-        first = chunk.fill_rows[kv.group]
+        """Write the chunk's K/V rows up to the last tile holding a real position, which
+        lies in the block of the chunk's last position: padding never reaches a block
+        vLLM did not allocate (the plugin pads tables with the null block 0)."""
+        live = -(-chunk.rows // TILE) * TILE
         table = chunk.fill_tables[kv.group]
         for t, cache in ((k, kv.k), (v, kv.v)):
             # A slice covering the whole tensor returns the input itself; never free k/v.
-            rows = t if first == 0 else ttnn.slice(t, [0, 0, first, 0], [1, t.shape[1], t.shape[2], t.shape[3]])
+            rows = t if live == t.shape[2] else ttnn.slice(t, [0, 0, 0, 0], [1, t.shape[1], live, t.shape[3]])
             t8 = ttnn.typecast(rows, cache.dtype)
             if rows is not t:
                 rows.deallocate(True)

@@ -254,8 +254,16 @@ class Gemma4TT:
         [groups, rows, width]. The adapter builds `kv` from vLLM's plan instead."""
         shapes = [layer.attn.shape for layer in self.layers]
         types = self.cfg.layer_types[: self.num_layers]
-        self.kv = KvCache.standalone(self.mesh, types, shapes, self.block_size, self.precision.kv_cache, rows, tokens, self._ring_tokens)
+        self.use_kv(KvCache.standalone(self.mesh, types, shapes, self.block_size, self.precision.kv_cache, rows, tokens, self._ring_tokens))
         return self.page_tables(rows, tokens)
+
+    def use_kv(self, kv: KvCache):
+        """Take the KV cache, once: decode traces bind its buffers and table width."""
+        if self.kv is not None:
+            raise RuntimeError("the KV cache is set once per model")
+        if kv.grid % CHUNK_ALIGN or PREFILL_CHUNK % kv.grid:
+            raise ValueError(f"a {kv.grid}-token block grid does not fit chunked prefill's {CHUNK_ALIGN}-token SDPA chunks")
+        self.kv = kv
 
     @property
     def table_width(self) -> int:
@@ -284,28 +292,28 @@ class Gemma4TT:
         the last position, or [S, V] of every position from `start` with `all_logits`
         (accuracy studies).
 
-        Work restarts on the CHUNK_ALIGN grid below `start`; the recomputed rows are
-        not written back where a group's block lies wholly before `start`, since
-        such a block can be a prefix-cache block that other requests read.
+        `start` must lie on the block grid (kv.grid): every group then writes from
+        the start of a block of its own and never into a block before `start`,
+        which can be a prefix-cache block that other requests read. vLLM's prefix
+        hits and chunk ends are multiples of that grid.
         """
         end = tokens.shape[0]
-        if not 0 <= start < end:
-            raise ValueError(f"prefill of positions [{start}, {end})")
-        first = start // CHUNK_ALIGN * CHUNK_ALIGN
+        if not 0 <= start < end or start % self.kv.grid:
+            raise ValueError(f"prefill of positions [{start}, {end}) must start on the {self.kv.grid}-token block grid")
         out = []
-        for c0 in range(first, end, PREFILL_CHUNK):
+        for c0 in range(start, end, PREFILL_CHUNK):
             c1 = min(c0 + PREFILL_CHUNK, end)
-            x = self._prefill_chunk(tokens, c0, c1, max(start, c0), tables)
+            x = self._prefill_chunk(tokens, c0, c1, tables)
             if all_logits or c1 == end:
-                lo = max(start, c0) - c0 if all_logits else c1 - 1 - c0
+                lo = 0 if all_logits else c1 - 1 - c0
                 last = ttnn.slice(x, [0, 0, lo, 0], [1, 1, c1 - c0, self.hidden])
                 out.append(self._logits(last))
             x.deallocate(True)  # `last` can be x itself or a view of it
         return torch.cat(out) if all_logits else out[-1][-1]
 
-    def _prefill_chunk(self, tokens, c0: int, c1: int, keep: int, tables: torch.Tensor) -> ttnn.Tensor:
-        """Run positions [c0, c1) through every layer, writing K/V from `keep` on (per
-        group, from the start of keep's block). Returns the final hidden rows, padded."""
+    def _prefill_chunk(self, tokens, c0: int, c1: int, tables: torch.Tensor) -> ttnn.Tensor:
+        """Run positions [c0, c1) through every layer, writing their K/V. Returns the
+        final hidden rows, padded."""
         n = c1 - c0
         # Chunked SDPA works on whole q chunks; the first chunk only needs whole tiles.
         pad = TILE if c0 == 0 else CHUNK_ALIGN
@@ -324,14 +332,10 @@ class Gemma4TT:
             row[0, : t.shape[0]] = t
             return self._to_device(row, ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
 
-        fill_rows, fill_tables, whole = [], [], []
-        for g, block in enumerate(self.kv.block_sizes):
-            fill_start = keep // block * block  # >= c0: c0 is on the CHUNK_ALIGN grid
-            fill_rows.append(fill_start - c0)
-            fill_tables.append(table(tables[g, fill_start // block :]))
-            whole.append(table(tables[g]) if c0 else None)
+        fill_tables = [table(tables[g, c0 // block :]) for g, block in enumerate(self.kv.block_sizes)]
+        whole = [table(tables[g]) if c0 else None for g in range(self.kv.groups)]
         start = self._to_device(torch.tensor([c0], dtype=torch.int32), ttnn.int32, ttnn.ROW_MAJOR_LAYOUT) if c0 else None
-        chunk = PrefillChunk(c0, n, start, whole, fill_tables, fill_rows)
+        chunk = PrefillChunk(c0, n, start, whole, fill_tables)
         for layer, kv in zip(self.layers, self.kv.layers):
             kind = "sliding_attention" if layer.sliding else "full_attention"
             x = layer.prefill(x, ropes[kind], kv, chunk)
@@ -415,7 +419,9 @@ class Gemma4TT:
         creates on first use (rotate_half's matrix, a batch size's MoE masks) and a
         batch size's inputs allocated after another batch size's capture both read
         corrupted values: wrong tokens, or expert ids that send a read out of
-        bounds and hang the device. The eager run also compiles the programs.
+        bounds and hang the device. The eager run also compiles the programs. Its
+        zero page tables send every row's K/V write to the null block 0, which
+        holds no request's data.
         """
         width = self.table_width
         for batch in range(1, self.max_batch + 1):

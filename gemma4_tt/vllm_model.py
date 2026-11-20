@@ -139,7 +139,7 @@ class Gemma4ForCausalLM:
         m = self.model
         shapes = [tuple(shape) for shape, _, _ in per_layer_specs]
         buffers = [idx for _, _, idx in per_layer_specs]
-        m.kv = KvCache(m.mesh, m.cfg.layer_types, shapes, buffers, kv_groups(m.cfg.layer_types), m.precision.kv_cache)
+        m.use_kv(KvCache(m.mesh, m.cfg.layer_types, shapes, buffers, kv_groups(m.cfg.layer_types), m.precision.kv_cache))
         # one layer of each group, whose vLLM page table stands for the group's
         self._group_layer = [next(i for i, kv in enumerate(m.kv.layers) if kv.group == g) for g in range(m.kv.groups)]
         logger.info(
