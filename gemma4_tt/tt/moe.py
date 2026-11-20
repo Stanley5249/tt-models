@@ -332,11 +332,19 @@ class FeedForward:
             )
         return self._chunk_cfgs[rows]
 
+    def chunk_rows(self, tokens: int) -> int:
+        """Rows per expert chunk for a prefill piece of `tokens` tokens.
+
+        One tile of rows wastes the least on padding, and the sparse matmuls' time
+        follows their rows: a 2,048-token piece takes 1.28 s with 32-row chunks,
+        1.34 s with 64 and 1.54 s with 128 (README text, see docs/serving.md)."""
+        return TILE
+
     def _plan_chunks(self, ids: torch.Tensor, weights: torch.Tensor, rows: int):
         """Host layout of expert-major prefill for top-k ids/weights [T, k].
 
         Each expert's (token, slot) pairs fill chunks of `rows` rows; padding rows
-        gather token T (a zero row) and get weight 0. The chunk count rounds up to a
+        gather token 0 and get weight 0, which zeroes their results. The chunk count rounds up to a
         multiple of CHUNK_GRANULE with zero chunks: it depends on the routing, and
         every new count would compile new programs. Returns the gather index into
         the token rows [C * rows], the row weights [C * rows], the expert of every
@@ -357,7 +365,7 @@ class FeedForward:
         rank = torch.arange(flat.numel()) - (torch.cumsum(counts, 0) - counts)[sorted_e]
         row_of_sorted = region[sorted_e] + rank
         total = (real + extra) * rows
-        gather = torch.full((total,), tokens, dtype=torch.int32)
+        gather = torch.zeros(total, dtype=torch.int32)
         row_w = torch.zeros(total)
         gather[row_of_sorted] = (order // k).int()
         row_w[row_of_sorted] = weights.flatten()[order].float()
@@ -382,8 +390,7 @@ class FeedForward:
         id_host = ttnn.to_torch(ttnn.get_device_tensors(ids)[0]).reshape(-1, k)[:tokens].long()
         weights.deallocate(True)
         ids.deallocate(True)
-        per_expert = tokens * k / self.n_experts
-        rows = 32 if per_expert <= 48 else 64 if per_expert <= 96 else 128
+        rows = self.chunk_rows(tokens)
         gather, row_w, chunk_expert, back = self._plan_chunks(id_host, w_host, rows)
         n_chunks = chunk_expert.numel()
 
@@ -392,25 +399,18 @@ class FeedForward:
         def up(t, dtype, layout=ttnn.ROW_MAJOR_LAYOUT):
             return ttnn.from_torch(t, dtype=dtype, layout=layout, device=self.mesh, mesh_mapper=rep, memory_config=DRAM)
 
-        zero = ttnn.zeros([1, 1, TILE, self.hidden], dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.mesh, memory_config=DRAM)
-        padded = ttnn.concat([x, zero], dim=2)  # row `tokens` is zero (x rows past it are never gathered)
-        zero.deallocate(True)
-        table = ttnn.to_layout(ttnn.reshape(padded, (tokens + TILE, self.hidden)), ttnn.ROW_MAJOR_LAYOUT)
-        padded.deallocate(True)
-        g = up(gather[None], ttnn.uint32)
-        xs = ttnn.embedding(g, table, layout=ttnn.TILE_LAYOUT)  # [1, C * rows, H]
-        g.deallocate(True)
-        table.deallocate(True)
-        xs = ttnn.reshape(xs, (1, n_chunks, rows, self.hidden))
-        w_dev = up(row_w.reshape(1, n_chunks, rows, 1), ttnn.bfloat16, ttnn.TILE_LAYOUT)
+        table = ttnn.to_layout(ttnn.reshape(x, (tokens, self.hidden)), ttnn.ROW_MAJOR_LAYOUT)
         gate_up_cfg, down_cfg = self._chunk_config(rows)
 
         outs = []
         for c0 in range(0, n_chunks, self.n_experts):  # indexed mode takes at most E slots per call
             c1 = min(c0 + self.n_experts, n_chunks)
+            # Gathering each call's rows separately saves slicing one big gather.
+            g = up(gather[c0 * rows : c1 * rows][None], ttnn.uint32)
+            xc = ttnn.reshape(ttnn.embedding(g, table, layout=ttnn.TILE_LAYOUT), (1, c1 - c0, rows, self.hidden))
+            g.deallocate(True)
+            wc = up(row_w[c0 * rows : c1 * rows].reshape(1, c1 - c0, rows, 1), ttnn.bfloat16, ttnn.TILE_LAYOUT)
             idx = up(chunk_expert[c0:c1][None].int(), ttnn.uint16)
-            xc = xs if (c0, c1) == (0, n_chunks) else ttnn.slice(xs, [0, c0, 0, 0], [1, c1, rows, self.hidden])
-            wc = w_dev if (c0, c1) == (0, n_chunks) else ttnn.slice(w_dev, [0, c0, 0, 0], [1, c1, rows, 1])
             gu = ttnn.sparse_matmul(
                 xc,
                 self.exp_gate_up,
@@ -447,8 +447,9 @@ class FeedForward:
             )  # [1, c, rows, H]
             hw.deallocate(True)
             idx.deallocate(True)
-        xs.deallocate(True)
-        w_dev.deallocate(True)
+            xc.deallocate(True)
+            wc.deallocate(True)
+        table.deallocate(True)
         down = outs[0] if len(outs) == 1 else ttnn.concat(outs, dim=1)
         if len(outs) > 1:
             for o in outs:
