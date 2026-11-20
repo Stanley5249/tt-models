@@ -51,6 +51,7 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "summary.json").unlink(missing_ok=True)  # a failed rerun must not leave the old summary
     task, cases = load_gpqa(args.count)
     rows = []
     with httpx.Client(base_url=args.url, timeout=3600) as client, (args.out / "responses.jsonl").open("w") as log:

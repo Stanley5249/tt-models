@@ -62,9 +62,9 @@ that disagreed from their first token.
 | Continuous batching, dynamic admission, 1-4 concurrent requests | Supported (more than 4 rows is refused at load) |
 | Prefix caching | Supported (vLLM automatic prefix caching, 128-token hit granularity) |
 | Chunked prefill with decode interleave | Supported; one decode step after every 2,048-token chunk |
-| Preemption and resumption | Supported (vLLM recomputes from cached blocks) |
+| Preemption and resumption | Supported by design (no request state in the model; vLLM recomputes from cached blocks), not exercised by a test |
 | Streaming, stop sequences, EOS, cancellation | Supported |
-| Sampling: temperature, top-k <= 1,024, top-p, seed | Model-side sampler on the host |
+| Sampling: temperature, top-k <= 1,024, top-p, seed | Model-side sampler on the host. A seeded request can draw differently when another request in the same step forces vLLM's host sampler (the two samplers seed differently) |
 | Penalties, min-p, larger top-k, logprobs | vLLM's host sampler (the plugin falls back per step) |
 | Structured output, tool calls, reasoning parser | Supported through vLLM (host grammar, gemma4 parsers) |
 | `prompt_logprobs` | Not supported (refused by the TT plugin) |
@@ -134,11 +134,14 @@ ignore-EOS, greedy), mean of 3 runs. Before: `results/compare/tis-match/`
   against 17.54 ms), so the cost is host work for six KV groups instead of
   one, including the plugin padding the global group's table every step.
 - Shared 6,144-token prefix plus 256 new tokens, 1 user: 323 ms median TTFT
-  once the prefix is cached, against about 4.5 s to prefill 6.4K tokens.
+  once the prefix is cached. Prefilling 6.4K tokens takes about 4.5 s
+  (estimated from the 8K TTFT; the run named `miss` reuses the prefix after
+  its first request and is not a matched uncached baseline).
   An 8K-token chat turn's follow-up: 1.31-1.69 s with the cache, 7.4-7.8 s
   without, same 48 tokens.
-- Standalone traced decode: batch 1 17.50 ms, batch 2 28.92 ms, batch 4
-  35.42 ms (was 56.49 ms; kernel time 50.9 -> 31.5 ms per step).
+- Standalone traced decode (`scripts/bench_decode.py --trace`, figures in the
+  commit messages): batch 1 17.50 ms, batch 2 28.92 ms, batch 4 35.42 ms
+  (was 56.49 ms; kernel time 50.9 -> 31.5 ms per step).
 
 ## Known limits and next steps
 
