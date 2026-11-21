@@ -9,6 +9,7 @@ export PIXI_LOCKED := "true"
 export MESH_DEVICE := env("MESH_DEVICE", "N300")
 host := env("HOST", "127.0.0.1")
 port := env("PORT", "8000")
+qwen3 := "Qwen/Qwen3-8B"
 
 # Install the runtime environment.
 install:
@@ -34,12 +35,11 @@ serve-gemma4 *args:
         --additional-config '{"tt": {"trace_region_size": 200000000, "sample_on_device_mode": "decode_only", "decode_interleave_prefill_steps": 1}}' \
         "$@"
 
-# tt_transformers reads HF_MODEL, so keep it in sync with the model ID.
+# tt_transformers reads the model ID from HF_MODEL.
 [doc("Serve tt_transformers' Qwen3-8B; extra vllm serve flags pass through.")]
-[env("HF_MODEL", "Qwen/Qwen3-8B")]
 [env("TT_CACHE_PATH", "cache/Qwen3-8B")]
 serve-qwen3-8b *args:
-    pixi run vllm serve Qwen/Qwen3-8B \
+    HF_MODEL="{{ qwen3 }}" pixi run vllm serve "{{ qwen3 }}" \
         --host "{{ host }}" --port "{{ port }}" \
         --block-size 64 \
         --max-num-seqs 32 \

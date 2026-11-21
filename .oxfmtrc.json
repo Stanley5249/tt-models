@@ -5,6 +5,7 @@
     "**/*.toml",
     "pixi.lock",
     "docs/experiments/*/**/*.json",
+    "docs/experiments/*/**/*.yaml",
     "scripts/accuracy/greedy-base.json"
   ]
 }

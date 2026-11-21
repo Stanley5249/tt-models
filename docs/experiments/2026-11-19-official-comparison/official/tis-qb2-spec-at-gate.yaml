@@ -9,9 +9,9 @@
     # needs a larger trace region even with lean warmup.
     - device: P300X2
       max_concurrency: 32
-      max_context: 262144 # the model's max_position_embeddings; the pool below holds 5 users at 256K
-      default_impl: false # the dedicated gemma4_26b_a4b_qb2 profile is the QB2 default; select this one with --impl tt-transformers
-      tensor_cache_timeout: 7200.0 # cold TT-cache conversion of the weights takes ~95 min on the QB2 runner; the readiness backstop adds 30 min
+      max_context: 262144  # the model's max_position_embeddings; the pool below holds 5 users at 256K
+      default_impl: false  # the dedicated gemma4_26b_a4b_qb2 profile is the QB2 default; select this one with --impl tt-transformers
+      tensor_cache_timeout: 7200.0  # cold TT-cache conversion of the weights takes ~95 min on the QB2 runner; the readiness backstop adds 30 min
       env_vars:
         # Text + image + video: the multimodal serving class for the checkpoint's architecture
         # (same text path; adds the on-device vision tower and vLLM's multimodal processor).
@@ -40,7 +40,7 @@
         sample_on_device_mode: decode_only
         # Collective semaphores go to this region instead of worker L1 (see the BLACKHOLE_GALAXY entry).
         l1_small_size: 65536
-        decode_interleave_prefill_steps: 1 # one decode-only step after every prefill step (see the Galaxy entry)
+        decode_interleave_prefill_steps: 1  # one decode-only step after every prefill step (see the Galaxy entry)
       vllm_args:
         # 128-token blocks: prefix-cache hits land on the SDPA chunk alignment, so a continuation never
         # re-prefills a shared cached block or reaches past the sliding window the allocator keeps.
@@ -56,5 +56,5 @@
         enable_chunked_prefill: true
         max_num_batched_tokens: 4096
         long_prefill_token_threshold: 4096
-        enable_prompt_tokens_details: true # usage.prompt_tokens_details.cached_tokens (prefix-cache visibility)
-        limit-mm-per-prompt: '{"image": 8, "video": 1}' # MMMU-Pro items carry up to 7 images
+        enable_prompt_tokens_details: true  # usage.prompt_tokens_details.cached_tokens (prefix-cache visibility)
+        limit-mm-per-prompt: '{"image": 8, "video": 1}'  # MMMU-Pro items carry up to 7 images
