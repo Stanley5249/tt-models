@@ -12,8 +12,9 @@ repeating their numbers.
 
 The adapter is `src/tt_models/models/gemma4/vllm_adapter.py`.
 `src/tt_models/vllm_plugin.py`, a `vllm.general_plugins` entry point,
-registers it and the tool parser in every vLLM process, and the model code (`model.py`, `layer.py`, `attention.py`, `moe.py`) runs on a 1x2 mesh
-with tensor parallelism over the two chips.
+registers it and the tool parser in every vLLM process. The model code
+(`model.py`, `layer.py`, `attention.py`, `moe.py`) runs on a 1x2 mesh with
+tensor parallelism over the two chips.
 
 ### KV cache
 
