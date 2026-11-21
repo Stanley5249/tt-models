@@ -212,6 +212,18 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fb/76/641ae371508676492379f16e2fa48f4e2c11741bd63c48be4b12a6b09cba/aiosignal-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fc/16/963096d224b80909432dc16561a615fd33d2d13beef3ce4c63fa25e40867/huggingface_hub-1.33.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fc/f4/dadfec469313c7f428efa7e84b4aba9732f813c13ea7131a24b7b008ef57/kiwisolver-1.5.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+  tools:
+    channels:
+    - url: https://conda.anaconda.org/conda-forge/
+    packages:
+      linux-64-glibc-2-34:
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/just-1.59.0-hf19af3b_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_7.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.5.0-hf19af3b_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/ruff-0.17.6-hf19af3b_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/tombi-1.11.3-hf19af3b_0.conda
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
   build_number: 20
@@ -258,6 +270,18 @@ packages:
     - gmp >=6.3.0,<7.0a0
   size: 493498
   timestamp: 1786629164954
+- conda: https://conda.anaconda.org/conda-forge/linux-64/just-1.59.0-hf19af3b_0.conda
+  sha256: bd0d0be0073c0f3158bbe436a82fcab61faac2e5355501ed107725484a58bf77
+  md5: cfac9e4efbe6d0050da7c18190e13b2a
+  depends:
+  - libgcc >=15
+  - __glibc >=2.17,<3.0.a0
+  constrains:
+  - __glibc >=2.17
+  license: CC0-1.0
+  run_exports: {}
+  size: 2025606
+  timestamp: 1792056974524
 - conda: https://conda.anaconda.org/conda-forge/linux-64/ld_impl_linux-64-2.46.1-default_hbd61a6d_103.conda
   sha256: 901649b1edbe841fd4ee7e2d491a05184ed540eb01cdae506872f344babc1d28
   md5: 2362c70e7e79827c32db35547d9c179b
@@ -583,6 +607,19 @@ packages:
     - openssl >=3.6.5,<4.0a0
   size: 3195299
   timestamp: 1791098052301
+- conda: https://conda.anaconda.org/conda-forge/linux-64/pyrefly-1.5.0-hf19af3b_0.conda
+  sha256: ea8b318155f5d4196af2961cac6e0211281804bf2e2f87cef1b4acad22a7d4d6
+  md5: 4fbb4e75d00ec316b6f06a3c7768e58c
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=15
+  constrains:
+  - __glibc >=2.17
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 14123881
+  timestamp: 1795073537914
 - conda: https://conda.anaconda.org/conda-forge/linux-64/python-3.12.16-h5f976f7_0_cpython.conda
   sha256: a40188b47c3995bc42a33820be4d780af5c11cc295409413fb925549f0abfe92
   md5: bef9f5422e5246840497b4ae3d968001
@@ -631,6 +668,19 @@ packages:
     - readline >=8.3,<9.0a0
   size: 348899
   timestamp: 1787033801506
+- conda: https://conda.anaconda.org/conda-forge/linux-64/ruff-0.17.6-hf19af3b_0.conda
+  sha256: 8ab84a2195359a2463e4d056697b0387a819a90444531cbfeac70fb7fb9aa0ef
+  md5: f2ea5df9b278c8cdffff20cdb5504ac2
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=15
+  constrains:
+  - __glibc >=2.17
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 8932450
+  timestamp: 1795120717477
 - conda: https://conda.anaconda.org/conda-forge/linux-64/tk-8.6.13-noxft_h1df4ec4_4.conda
   build_number: 104
   sha256: a1a241d172c1ccab067ba245206dd048bc3c2d1b84504b53c9468e99adfc16a1
@@ -648,6 +698,19 @@ packages:
     - tk >=8.6.13,<8.7.0a0
   size: 3566806
   timestamp: 1787272857910
+- conda: https://conda.anaconda.org/conda-forge/linux-64/tombi-1.11.3-hf19af3b_0.conda
+  sha256: 0da800098bcad34be8551cae9d4268f56713f3b4132bdb965ce5741436c49d16
+  md5: 411afefb7c1a3a28cbbe5ab8d298fb2b
+  depends:
+  - libgcc >=15
+  - __glibc >=2.17,<3.0.a0
+  constrains:
+  - __glibc >=2.17
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 7615188
+  timestamp: 1794854842912
 - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_7.conda
   sha256: 47d682b9f6d6ec9eb1a6e6c3e75ea6273e899e78fb7fc59f81d39745009fbc60
   md5: aa459086047c0e5e27023ab19f8cb86a
