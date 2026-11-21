@@ -106,7 +106,7 @@ def sample(
 
 
 class Gemma4ForCausalLM:
-    model_capabilities = {
+    model_capabilities = {  # noqa: RUF012 - copied per instance
         "supports_prefix_caching": True,
         "supports_chunked_prefill": True,
         "supports_async_decode": False,

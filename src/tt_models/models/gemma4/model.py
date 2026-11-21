@@ -88,12 +88,10 @@ class Gemma4TT:
         final_raw = ckpt.get("norm.weight").float()
         for i, layer in enumerate(self.layers):
             nxt = (
-                self.layers[i + 1]._raw["input_layernorm"]
-                if i + 1 < len(self.layers)
-                else final_raw
+                self.layers[i + 1].input_norm if i + 1 < len(self.layers) else final_raw
             )
             layer.boundary_weights(mesh, nxt)
-        self.input_ln0 = self.layers[0]._raw["input_layernorm"]
+        self.input_ln0 = self.layers[0].input_norm
         self.embed_table = ckpt.get("embed_tokens.weight")  # BF16 [V, H] on host
         self.embed_scale = torch.tensor(embed_scale(self.hidden), dtype=torch.bfloat16)
         # A piece's padding can run PREFILL_BUCKET rows past the last position.

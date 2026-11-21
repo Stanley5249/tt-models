@@ -55,6 +55,10 @@ class DecoderLayer:
             )
         }
 
+    @property
+    def input_norm(self) -> torch.Tensor:
+        return self._raw["input_layernorm"]
+
     def boundary_weights(self, mesh, next_norm: torch.Tensor):
         """Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's input norm (or the final norm)."""
         r = self._raw

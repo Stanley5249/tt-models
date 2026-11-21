@@ -96,7 +96,7 @@ class Reference:
         self.dtype = dtype
         self.quant = quant or {}
         config = self.ckpt.config
-        config._attn_implementation = "sdpa"
+        config._attn_implementation = "sdpa"  # noqa: SLF001 - Transformers setting
         self.config = config
         self.rotary = hf.Gemma4TextRotaryEmbedding(config)
 
