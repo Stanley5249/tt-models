@@ -1,9 +1,11 @@
+# Environments and caches
 .pixi/
+__pycache__/
+
+# Local runtime state: weight caches, script outputs, logs
 cache/
-# Script outputs and profiler runs; results that back a decision move to docs/experiments/.
 artifacts/
 logs/
-build/
-__pycache__/
-# Local settings for the justfile; .env.example lists them.
+
+# Machine settings for the justfile (see .env.example)
 .env
