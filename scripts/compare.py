@@ -79,10 +79,13 @@ def main():
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--trace", action="store_true")
     ap.add_argument("--offsets", type=int, nargs="+", default=[0])
+    ap.add_argument("--batch", type=int, default=1, help="decode this many identical rows and score row 0 (the batch-B decode path)")
     ap.add_argument(
         "--perturb", type=int, default=0, help="seed of a 2^-9 relative noise on the embeddings (0: none), to sample the noise floor"
     )
     args = ap.parse_args()
+    if args.batch < 1:
+        ap.error("--batch must be at least 1")
 
     ckpt = Checkpoint()
     total = args.prompt_len + args.decode_steps
@@ -100,7 +103,7 @@ def main():
     rows = []
     with open_n300(trace_region_size=200_000_000 if args.trace else 0) as mesh:
         t0 = time.time()
-        model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, num_layers=args.layers)
+        model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=args.batch, num_layers=args.layers)
         print(f"model loaded in {time.time() - t0:.0f}s", flush=True)
         if args.perturb:
             plain = model.embed
@@ -113,16 +116,18 @@ def main():
                 return (x.float() * (1 + 2**-9 * torch.randn(x.shape, generator=gen))).to(x.dtype)
 
             model.embed = embed
-        pt = model.allocate_kv_cache(1, total)
+        pt = model.allocate_kv_cache(args.batch, total)
         for offset, ids, ref in segments:
             t0 = time.time()
-            logits = model.prefill(ids[: args.prompt_len], 0, pt[:, 0])
+            for row in range(args.batch):
+                logits = model.prefill(ids[: args.prompt_len], 0, pt[:, row])
             print(f"prefill {args.prompt_len} tokens at {offset}: {time.time() - t0:.2f}s", flush=True)
             rows.append({"offset": offset, "pos": args.prompt_len - 1, **metrics(logits, ref[0])})
             for step in range(args.decode_steps):
                 pos = args.prompt_len + step
                 t0 = time.time()
-                logits = model.decode(ids[pos : pos + 1], torch.tensor([pos]), pt, trace=args.trace)
+                tokens = ids[pos : pos + 1].repeat(args.batch)
+                logits = model.decode(tokens, torch.full((args.batch,), pos), pt, trace=args.trace)
                 dt = time.time() - t0
                 rows.append({"offset": offset, "pos": pos, "sec": round(dt, 3), **metrics(logits[0], ref[step + 1])})
         ttnn.synchronize_device(mesh)

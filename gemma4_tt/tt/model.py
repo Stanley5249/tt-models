@@ -42,6 +42,19 @@ LM_CORES = 8
 # Longest piece of a prompt one prefill pass computes. It bounds activation memory
 # (the expert-major MoE gathers k = 8 rows per token) whatever chunk vLLM schedules.
 PREFILL_CHUNK = 4096
+# Prefill pieces are padded to a multiple of this many rows, so their programs are
+# built once per bucket (warmed at startup) instead of once per prompt length: a
+# never-seen length cost 0.6 s more on its first prefill. The padding costs about
+# 0.5 ms per row, so a short piece from position 0 (up to SHORT_PIECE tokens) pads
+# only to whole tiles; a later piece needs whole 128-row SDPA chunks anyway.
+PREFILL_BUCKET = 128
+SHORT_PIECE = 512
+
+
+def prefill_rows(tokens: int, start: int) -> int:
+    """The rows a prefill piece of `tokens` positions from `start` is padded to."""
+    step = TILE if start == 0 and tokens <= SHORT_PIECE else PREFILL_BUCKET
+    return -(-tokens // step) * step
 
 from gemma4_tt.tt.moe import STREAM_ROWS, FeedForward  # noqa: E402
 
@@ -195,8 +208,8 @@ class Gemma4TT:
         self.input_ln0 = self.layers[0]._raw["input_layernorm"]
         self.embed_table = ckpt.get("embed_tokens.weight")  # BF16 [V, H] on host
         self.embed_scale = torch.tensor(embed_scale(self.hidden), dtype=torch.bfloat16)
-        # A chunk's padding can run CHUNK_ALIGN rows past the last position.
-        self.rope = self._rope_tables(max_seq_len + CHUNK_ALIGN)
+        # A piece's padding can run PREFILL_BUCKET rows past the last position.
+        self.rope = self._rope_tables(max_seq_len + PREFILL_BUCKET)
         self.kv: KvCache | None = None
         self.traces = {}
         self._trace_inputs: dict[int, dict[str, ttnn.Tensor]] = {}
@@ -262,7 +275,7 @@ class Gemma4TT:
         """Take the KV cache, once: decode traces bind its buffers and table width."""
         if self.kv is not None:
             raise RuntimeError("the KV cache is set once per model")
-        if kv.grid % CHUNK_ALIGN or PREFILL_CHUNK % kv.grid:
+        if kv.grid % CHUNK_ALIGN or PREFILL_CHUNK % kv.grid or PREFILL_BUCKET % CHUNK_ALIGN:
             raise ValueError(f"a {kv.grid}-token block grid does not fit chunked prefill's {CHUNK_ALIGN}-token SDPA chunks")
         self.kv = kv
 
@@ -316,9 +329,7 @@ class Gemma4TT:
         """Run positions [c0, c1) through every layer, writing their K/V. Returns the
         final hidden rows, padded."""
         n = c1 - c0
-        # Chunked SDPA works on whole q chunks; the first chunk only needs whole tiles.
-        pad = TILE if c0 == 0 else CHUNK_ALIGN
-        padded = -(-n // pad) * pad
+        padded = prefill_rows(n, c0)
         ids = torch.zeros(padded, dtype=torch.long)
         ids[:n] = tokens[c0:c1]
         x = self._to_device(self.embed(ids).reshape(1, 1, padded, self.hidden))
@@ -329,7 +340,8 @@ class Gemma4TT:
 
         def table(t: torch.Tensor) -> ttnn.Tensor:
             # Chunked SDPA with a device chunk start reads rows of a multiple of 32 bytes.
-            row = torch.zeros(1, -(-t.shape[0] // 8) * 8, dtype=torch.int32)
+            # Every table keeps the full width, so a new chunk offset builds no new programs.
+            row = torch.zeros(1, -(-tables.shape[1] // 8) * 8, dtype=torch.int32)
             row[0, : t.shape[0]] = t
             return self._to_device(row, ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
 
@@ -364,19 +376,20 @@ class Gemma4TT:
         out[active] = logits
         return out
 
-    def decode_active(self, tokens, positions, tables, trace: bool = False):
+    def decode_active(self, tokens, positions, tables, trace: bool = False, softcap: bool = True):
         """decode() without the inactive rows: (active row indices, float logits [A, V]).
 
         Building the zero-filled [B, V] result of decode() costs ~1 ms per step; the vLLM
-        adapter samples only the active rows."""
+        adapter samples only the active rows. softcap=False returns the logits before
+        the final softcap (see softcap()), for a caller that caps only what it needs."""
         active = torch.nonzero(positions >= 0).flatten()
         if len(active) == tokens.shape[0]:
-            return active, self._decode_rows(tokens, positions, tables, trace)
+            return active, self._decode_rows(tokens, positions, tables, trace, softcap)
         if not len(active):
             return active, torch.zeros(0, self.vocab)
-        return active, self._decode_rows(tokens[active], positions[active], tables[:, active], trace)
+        return active, self._decode_rows(tokens[active], positions[active], tables[:, active], trace, softcap)
 
-    def _decode_rows(self, tokens, positions, tables, trace) -> torch.Tensor:
+    def _decode_rows(self, tokens, positions, tables, trace, softcap: bool = True) -> torch.Tensor:
         """Decode rows that are all active."""
         if tokens.shape[0] > self.max_batch:
             raise ValueError(f"{tokens.shape[0]} active decode rows; the model was built for {self.max_batch}")
@@ -384,7 +397,7 @@ class Gemma4TT:
         if not trace:
             dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
             out = self._decode_device(dev)
-            logits = self._read_logits(out)
+            logits = self._read_logits(out, softcap)
             out.deallocate(True)
             for t in dev.values():
                 t.deallocate(True)
@@ -410,7 +423,7 @@ class Gemma4TT:
                 last[k] = src.clone()
             ttnn.copy_host_to_device_tensor(v, dev[k])
         ttnn.execute_trace(self.mesh, tid, cq_id=0, blocking=False)
-        return self._read_logits(out)
+        return self._read_logits(out, softcap)
 
     def _prepare_traces(self):
         """Allocate every batch size's trace inputs and run its decode once, eagerly,
@@ -546,14 +559,22 @@ class Gemma4TT:
             o.deallocate(True)
         return out
 
-    def _read_logits(self, out: ttnn.Tensor) -> torch.Tensor:
-        logits = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float()
+    def _read_logits(self, out: ttnn.Tensor, softcap: bool = True) -> torch.Tensor:
+        """fp32 logits [rows, V] of a row-major [1, 1, rows, V/tp] per-chip output.
+        (Copying into a kept host tensor and converting its shards was slower:
+        1.0 ms against 0.66 ms for one row.)"""
+        logits = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float().reshape(-1, self.vocab)
+        return self.softcap(logits) if softcap else logits
+
+    def softcap(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply the final logit softcap in place (cap * tanh(x / cap)) and return logits.
+
+        It costs 0.34 ms for one row of 262,144 logits and 1.35 ms for four, and it
+        keeps the order, so greedy and top-k sampling can cap only their candidates.
+        numpy ufuncs run on this thread: torch's pool sleeps during the device wait,
+        and waking it once made the same softcap take 1 ms instead of 0.2 ms."""
         cap = self.cfg.final_logit_softcapping
-        logits = logits.reshape(-1, self.vocab)
         if cap:
-            # numpy ufuncs run on this thread. torch's pool sleeps during the ~30 ms
-            # device wait, and waking it made the same in-place softcap take 1 ms
-            # instead of 0.2 ms.
             arr = logits.numpy()
             np.divide(arr, cap, out=arr)
             np.tanh(arr, out=arr)

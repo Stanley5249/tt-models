@@ -1,0 +1,32 @@
+tt-scope v0.4.0 tracy capture, run artifacts/runs/20261121-072809-prefill2048 (git-excluded):
+  pixi run tt-scope tracy scripts/profile_workload.py --name prefill2048 --programs 12000 -- --prompt-len 2048 --decode-steps 0
+One 2,048-token prefill of random tokens, chip 0, ops grouped by type (kernel time):
+
+ops 3499  kernel 1109.5 ms  device span 1255.3 ms  gaps 145.7 ms
+                                      count       ms  share
+OP CODE                                                    
+SparseMatmulDeviceOperation             300  368.453  0.332
+AllGatherAsyncDeviceOperation            60  162.228  0.146
+MatmulDeviceOperation                   226  113.369  0.102
+EmbeddingsDeviceOperation               180   80.307  0.072
+BinaryNgDeviceOperation                 750   68.380  0.062
+SDPAOperation                            30   65.673  0.059
+UnaryDeviceOperation                    300   49.175  0.044
+UntilizeCodegenDeviceOperation           61   47.151  0.042
+ConcatDeviceOperation                    61   41.280  0.037
+LayerNormDeviceOperation                271   32.289  0.029
+FastReduceNCDeviceOperation              90   31.947  0.029
+SliceDeviceOperation                    481   29.725  0.027
+NlpCreateHeadsDeviceOperation            30    5.246  0.005
+NLPConcatHeadsDeviceOperation            30    3.117  0.003
+TypecastDeviceOperation                 214    2.779  0.003
+TilizeWithValPaddingDeviceOperation     151    2.330  0.002
+PagedFillCacheDeviceOperation            60    1.396  0.001
+GatherCodegenDeviceOperation             30    1.362  0.001
+FillPadDeviceOperation                   60    1.343  0.001
+TopKDeviceOperation                      30    0.924  0.001
+SoftmaxDeviceOperation                   30    0.494  0.000
+TilizeDeviceOperation                     5    0.304  0.000
+UntilizeWithUnpaddingDeviceOperation     16    0.141  0.000
+ReduceDeviceOperation                    30    0.112  0.000
+InterleavedToShardedDeviceOperation       2    0.005  0.000
