@@ -12,9 +12,9 @@ export MESH_DEVICE := env("MESH_DEVICE", "N300")
 host := env("HOST", "127.0.0.1")
 port := env("PORT", "8000")
 
-# Install the runtime and tools environments.
+# Install the runtime environment.
 install:
-    pixi install --all
+    pixi install
 
 # Chunked prefill with one decode step after each chunk, and one decode trace
 # per active row count in the trace region: docs/serving.md and
@@ -22,7 +22,7 @@ install:
 # model-side sampler. The served name must match the client's model ID.
 [doc("Serve Gemma 4 26B-A4B as model \"gemma4\"; extra vllm serve flags pass through.")]
 serve-gemma4 *args:
-    pixi run -e default vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
+    pixi run vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
         --host "{{ host }}" --port "{{ port }}" \
         --served-model-name gemma4 \
         --block-size 64 \
@@ -41,7 +41,7 @@ serve-gemma4 *args:
 [env("HF_MODEL", "Qwen/Qwen3-8B")]
 [env("TT_CACHE_PATH", "cache/Qwen3-8B")]
 serve-qwen3-8b *args:
-    pixi run -e default vllm serve Qwen/Qwen3-8B \
+    pixi run vllm serve Qwen/Qwen3-8B \
         --host "{{ host }}" --port "{{ port }}" \
         --block-size 64 \
         --max-num-seqs 32 \
@@ -56,15 +56,15 @@ fmt: _fmt-ruff _fmt-tombi _fmt-oxfmt _fmt-just
 
 # Format, then apply the linter's automatic fixes.
 fix: fmt
-    pixi run -e tools ruff check --fix --quiet
+    ruff check --fix --quiet
 
 # Lint Python, warnings as errors.
 lint *args:
-    pixi run -e tools ruff check --quiet {{ args }}
+    ruff check --quiet {{ args }}
 
 # Type-check Python against the runtime environment.
 typecheck *args:
-    pixi run -e tools pyrefly check {{ args }}
+    pixi run pyrefly check {{ args }}
 
 # Fast local gate: format checks, lint and type check.
 [parallel]
@@ -72,11 +72,11 @@ check: (_fmt-ruff "--check") (_fmt-tombi "--check") (_fmt-oxfmt "--check") (_fmt
 
 # Host tests; pytest flags pass through.
 test *args:
-    pixi run -e default pytest {{ args }}
+    pixi run pytest {{ args }}
 
 # Device tests on the N300.
 test-device *args:
-    pixi run -e default pytest -m device {{ args }}
+    pixi run pytest -m device {{ args }}
 
 # Everything CI would run: the gate, the lockfile and the host tests.
 ci: check lock-check test
@@ -86,10 +86,10 @@ lock-check:
     pixi lock --check --dry-run
 
 _fmt-ruff *args:
-    pixi run -e tools ruff format --quiet {{ args }}
+    ruff format --quiet {{ args }}
 
 _fmt-tombi *args:
-    pixi run -e tools tombi format --quiet {{ args }} .
+    tombi format --quiet {{ args }} .
 
 _fmt-oxfmt *args:
     bunx oxfmt {{ args }}

@@ -75,22 +75,9 @@ transformers = ">=5.16.1,<5.17"
 # named tool choice. The API is otherwise unchanged.
 xgrammar = "==0.2.9"
 
-# Command-line tools the justfile and CI call, in their own environment so
-# their pins never move the runtime libraries. oxfmt runs through bunx.
-[tool.pixi.feature.tools.dependencies]
-just = "*"
-ruff = "*"
-tombi = "*"
-pyrefly = "*"
-
-[tool.pixi.environments]
-tools = { features = ["tools"], no-default-feature = true }
-
 [tool.pyrefly]
 preset = "strict"
 project-includes = ["src", "scripts", "tests"]
-# The tools environment has no runtime packages; resolve imports in the default one.
-python-interpreter-path = ".pixi/envs/default/bin/python"
 # ttnn registers its ops at import time, so static analysis sees few of its
 # attributes; treat it as untyped rather than report every op.
 replace-imports-with-any = ["ttnn", "ttnn.*"]
