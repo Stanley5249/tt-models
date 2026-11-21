@@ -85,7 +85,7 @@ Accuracy needs 3 seeds and speed a same-day baseline ([experiments](experiments/
 ## Profiling
 
     pixi run tt-scope tracy scripts/profile/workload.py --programs 8000 -- --batch 4 --decode-steps 2 --trace
-    pixi run python scripts/profile/trace_breakdown.py artifacts/runs/<run> --phase decode1
+    pixi run python scripts/profile/trace_breakdown.py "artifacts/runs/$RUN" --phase decode1   # RUN: the capture's folder name
 
 `trace_breakdown.py` recomputes op time and gaps from device firmware cycles, because tt-scope's op-to-op latency is host time under trace replay ([tt-scope findings](experiments/2026-11-19-tt-scope-findings.md)). Other tools: `scripts/bench/trace_time.py` (blocking trace time), `scripts/profile/memory_report.py` (per-chip DRAM), `scripts/bench/soak.py` (DRAM growth over many traced steps), and server logs with `GEMMA4_TIMING=1` (per-chunk prefill and per-step decode time).
 

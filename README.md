@@ -4,15 +4,19 @@ TTNN model implementations served through vLLM on Tenstorrent hardware. The one 
 
 ## Setup
 
-The environment is a [pixi](https://pixi.sh) workspace, configured in `pyproject.toml`: Python 3.12, a Tracy-enabled ttnn wheel, CPU torch, vLLM and vllm-tt-plugin, and this package installed editable. [just](https://just.systems) runs every recurring command (`just --list`), and reads machine-specific settings from a git-ignored `.env` (see `.env.example`). The checks call [ruff](https://docs.astral.sh/ruff/) and [pyrefly](https://pyrefly.org) from `PATH` and run oxfmt through [bun](https://bun.sh)'s `bunx`, so install those globally, for example with `pixi global install`.
+Requirements: Linux x86-64 with glibc 2.34 or newer, a Wormhole N300 with the Tenstorrent kernel driver and tt-smi, [pixi](https://pixi.sh) 0.81 or newer, [just](https://just.systems), and for the checks [ruff](https://docs.astral.sh/ruff/), [pyrefly](https://pyrefly.org) and [bun](https://bun.sh) on `PATH` (for example through `pixi global install`).
+
+The pixi workspace in `pyproject.toml` holds Python 3.12, a Tracy-enabled ttnn wheel, CPU torch, vLLM, vllm-tt-plugin and this package, installed editable. `just --list` shows every recurring command; machine-specific settings go in a git-ignored `.env` (see `.env.example`).
 
     just install
-    just serve-gemma4          # OpenAI-compatible server on 127.0.0.1:8000
-    just serve-qwen3-8b        # tt_transformers' Qwen3-8B
+    pixi run hf download google/gemma-4-26B-A4B-it-qat-q4_0-unquantized
 
-The Gemma 4 code reads its checkpoint from the Hugging Face cache and never downloads it, so fetch it once with `pixi run hf download google/gemma-4-26B-A4B-it-qat-q4_0-unquantized`. The device tests use random weights but still read its `config.json`. `serve-qwen3-8b` loads through vLLM, which downloads Qwen3-8B on first use.
+The Gemma 4 code reads that checkpoint from the Hugging Face cache and never downloads it; the device tests use random weights but still read its `config.json`. Then start one of the two servers, which both listen on 127.0.0.1:8000:
 
-The first start converts the checkpoint into a ttnn weight cache under `cache/` and builds the prefill programs, which takes a while; later starts load the cache.
+    just serve-gemma4          # Gemma 4 26B-A4B as model "gemma4"
+    just serve-qwen3-8b        # tt_transformers' Qwen3-8B, downloaded by vLLM on first use
+
+The first Gemma start converts the checkpoint into a ttnn weight cache under `cache/` and builds the prefill programs, which takes a while; later starts load the cache.
 
 ## Layout
 
@@ -43,4 +47,4 @@ A new model goes in `src/tt_models/models/<name>/`, with its adapter class added
 
 ## License
 
-Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option. Files adapted from Apache-2.0 projects stay Apache-2.0 and say so in an SPDX header: `scripts/accuracy/gpqa_eval.py` and `src/tt_models/models/gemma4/kernels/stream_common.hpp`. `docs/experiments/2026-11-19-official-comparison/official/` holds copies of tt-inference-server files under its Apache-2.0 license.
+Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option. Files adapted from Apache-2.0 projects stay Apache-2.0 and say so in an SPDX header: `scripts/accuracy/gpqa_eval.py` and `src/tt_models/models/gemma4/kernels/stream_common.hpp`. `docs/experiments/2026-11-19-official-comparison/official/` holds extracts of tt-inference-server files under its Apache-2.0 license, listed in its README.
