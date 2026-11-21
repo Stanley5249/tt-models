@@ -5,11 +5,12 @@ optimized and measured, and what is left. Stack: vLLM 0.32.0, vllm-tt-plugin
 `0c12fd0`, transformers 5.16.1, ttnn 0.81.1+conda.8, one N300d (two Wormhole
 chips, TP=2). The investigation that started this work is
 `docs/gemma4-serving-investigation.md`; the earlier single-user decode work is
-`docs/decode-optimization-report.md`. Three milestones are described here: the
+`docs/decode-optimization-report.md`. Four milestones are described here: the
 serving backend (`feat/serving`), the follow-up on compatibility, sampling,
-quality and prefill (`feat/quality-sampling`), and Q4_0 experts, device
-sampling and tool choice (`feat/quality-upstream`); sections say which one a
-result belongs to where it matters.
+quality and prefill (`feat/quality-sampling`), Q4_0 experts, device sampling
+and tool choice (`feat/quality-upstream`), and profiling-driven multi-user
+decode (`perf/profiling`); sections say which one a result belongs to where it
+matters.
 
     pixi run serve-gemma4                       # 127.0.0.1:8000, model "gemma4"
     pixi run python scripts/serve_check.py      # request lifecycle checks
@@ -74,16 +75,16 @@ granularity. Chunked prefill uses the plugin's scheduler with
 
 ### Multi-user decode
 
-Decode captures one metal trace per active row count (1-4).
+Decode captures one metal trace per active row count (1-4). Since
+`perf/profiling` every row count runs the fused path of the earlier batch-1
+work: compact FP32 boundaries with one tail op per boundary, the router op,
+and the expert and MLP streams (`gemma4_tt/tt/expert_stream.py`), where one
+op pair covers all `8 x B` expert slots (see below). Batch 1 keeps two
+specializations: the fused q/k norm and RoPE op, and the expert streams'
+one-token core placement. Batches 2-4 apply RoPE with generic ops.
 
-- **1 row**: the fused path from the earlier decode work (compact FP32
-  boundaries, fused tails, router op, expert and MLP streams). Unchanged.
-- **2-4 rows**: generic attention and norms, but the routed experts and the
-  dense MLP now run through the same DRAM-streaming kernels as batch 1
-  (`gemma4_tt/tt/expert_stream.py`). One op pair covers all `8 x B` expert
-  slots (see below).
-
-Batch 1 and batches 2-4 run different kernels, which round differently.
+Batch 1 and batches 2-4 still run some different kernels, which round
+differently.
 Which one computes a step depends on what else is running, so a greedy
 request can take a different branch at a near-tie (observed once in five
 concurrent rounds, at token 20). vLLM does not promise batch invariance on
@@ -222,6 +223,78 @@ Capping 262,144 logits on the host took 0.34 ms per row (1.35 ms at batch 4)
 on every step; greedy and top-k sampling now cap only their candidates (see
 Sampling). Serving TPOT: 18.46 -> 18.14 ms at 1 user, 37.75 -> 36.44 ms at 4.
 
+### Compact boundaries for 2-4 rows (`perf/profiling`)
+
+**Finding.** A tt-scope capture of one traced batch-4 step on `main`
+(`results/profile/decode-b4-main.txt`) put 32.4 ms of kernel time and 1,778
+ops on chip 0. Experts and dense matmuls aside, about 7 ms went to glue
+between the layers' matmuls: 211 LayerNorms, 300 binary ops, 120 reshapes,
+423 interleaved/sharded conversions, slices, concats and typecasts. The 60
+all-gathers took another 3.3 ms, because they moved 32-row tile tensors for 4
+real rows. Batch 1 had removed exactly this with its compact boundaries.
+
+**Change.** The batch-1 boundary path now serves 1-4 rows
+(`DecoderLayer.decode_compact`):
+- **Residual layout.** The residual is one compact FP32 vector per row (3
+  dense tiles each; vector b at chunk 64 V b).
+- **Compact outputs.** The o_proj pack (`compact_pack.cpp`) and the expert and
+  MLP down streams (`expert_down_writer.cpp`) write each row's vector, and
+  the all-gathers move 6-24 compact tiles.
+- **Tails.** One attention tail and one feed-forward tail per layer do the
+  chip sum, every RMSNorm, the residual adds and the layer scalar (the
+  feed-forward partials are laid out `[mlp rows | expert rows]`). Each row's
+  tail runs on its own group of 6 cores, whose reader packs just that row's
+  vectors (`tail_reader.cpp`), so the compute kernel is the batch-1 one.
+- **Old path removed.** The row-form decode path (Attention.decode,
+  DecoderLayer.decode, the feed-forward's 4-row branch) is gone.
+
+**Tail cost** (`tests/boundary_check.py --tail-cores 6`, trace replay):
+
+| Variant | Attention tail at 4 rows | FF tail at 4 rows |
+|---|---:|---:|
+| One row on its own | 27 us | 37 us |
+| All rows on every core | 69 us | 111 us |
+| One core group per row | 53 us | 105 us |
+| One core group per row, row-only reads | 34 us | 48 us |
+
+The first per-row version still read every row's gathered tiles on every
+core, and that cost more than the math.
+
+**Result.**
+- Device kernel time per batch-4 step fell from 32.4 to 24.8 ms (chip 0), and
+  ops from 1,778 to 784 (`results/profile/decode-b4-compact.txt`).
+- Standalone traced steps (`scripts/bench_decode.py --trace`, 128 steps):
+  batch 2 28.85 -> 22.67 ms, batch 3 31.80 -> 26.44, batch 4 34.95 -> 29.49,
+  batch 1 unchanged.
+- Serving numbers are under Measurements.
+
+### Router op for 2-4 rows (`perf/profiling`)
+
+**Change.** `topk_router_gpt` took 69-72 us per layer at any batch, plus four
+reshape and typecast ops to flatten its `[T, k]` output into the streams'
+token-major `[1, T k]` row. The batch-1 router op (`boundary.Router`) now
+takes 1-4 rows:
+- each core writes its B partial rows into rows `slot B + b` of the reducer
+  tile;
+- a 0/1 sum matrix (`J[b, r] = 1` when `r mod B = b mod B`) adds each token's
+  rows;
+- the reducer RISC picks every row's top 8;
+- the op writes the flat row directly.
+
+At 3-4 rows, 8 cores of 11 K tiles replace 11 of 8, so the partial rows fit
+one tile. A version that kept 11 cores and spread the rows over two reducer
+tiles was no faster and was dropped.
+
+**Cost** (`tests/router_check.py`): 37-42 us at 1-2 rows, 54-68 us at 3-4.
+
+**Accuracy.** Same expert sets as `topk_router_gpt` in 94-100% of rows. Where
+they differ, `topk_router_gpt` is the one that is off: max weight error
+against an fp32 reference is 0.0007 for the router op and 0.11 for
+`topk_router_gpt`.
+
+**Result.** Batch-4 step 34.8 -> 33.8 ms before the compact boundaries. In
+both paths it runs merged with the MLP gate|up, as at batch 1.
+
 ### Smaller changes
 
 - **Decode interleave.** An 8K prompt arriving during a stream was measured
@@ -239,6 +312,17 @@ Sampling). Serving TPOT: 18.46 -> 18.14 ms at 1 user, 37.75 -> 36.44 ms at 4.
   - Untilizing each expert call's output and concatenating row-major instead
     of a tile concat: no change.
   - BFP8 experts in a few layers: see Model quality.
+  - (`perf/profiling`) **One program per chip.** The two chips are harvested
+    differently (8 of 12 DRAM banks have a different nearest worker core).
+    Building the stream ops with each chip's own placement through a
+    `MeshProgramDescriptor` took chip 1's expert down from 29.8 to 25.5 us.
+    The batch-1 step span only fell 16.30 -> 16.18 ms, because the merged
+    router and MLP op got slower on chip 1. Reverted. The LM head, a ttnn
+    matmul, shows the same chip gap (117 vs 152 us) and is out of reach
+    without replacing it.
+  - (`perf/profiling`) **Gathering only the real rows** (untilize, row-major
+    all-gather, tilize): 12-17 us faster on the 5,632-wide gather, nothing
+    on the 2,816-wide one. The compact boundaries made it moot.
 
 ## Device sampling and async decode (evaluated, not built)
 
@@ -440,6 +524,25 @@ those, so exactness would need sparse corrections. Not built.
 - **Memory.** Keeping BFP4 for prefill next to Q4 for decode needs 6 GB more
   per chip.
 
+`perf/profiling` tried the cheapest remaining route to serving with a gate
+of 3.5 ms per layer. A dequantization kernel (one work item per expert, 32-K
+group and column tile) multiplies each integer tile by its step row
+(row-broadcast FPU multiply) and packs a temporary BFP4 tensor for today's
+sparse matmul. It worked once its reader stopped overrunning a circular
+buffer: 32-tile reservations in a ring that 24-tile pushes had misaligned
+needed three card resets to find.
+
+| Dequant output | Per layer | Per prefill chunk (30 layers) |
+|---|---:|---:|
+| BFP4 | 3.7 ms | ~110 ms |
+| BFP8 | 5.9 ms | ~180 ms |
+
+The packer truncates when it packs BFP formats, even with
+`bfp8_pack_precise`: only 57% of values matched host round-to-nearest. So
+the BFP4 output was less accurate than today's weights, and the BFP8 output
+would also slow the prefill matmuls. With 40-75% more TTFT on a 128-token
+prompt, the gate failed, and the kernel was not kept.
+
 A Q4 prefill therefore needs an expert-major kernel that dequantizes inside
 the matmul. To amortize the dequantization it must keep a weight tile for all
 of an expert's chunks; today's indexed sparse matmul re-reads the weights
@@ -447,6 +550,27 @@ per 32-row chunk. Until then, `Precision(expert_q4=True)` serves only
 accuracy runs (`scripts/compare.py --precision expert_q4=1`). In that mode
 prefill runs the batch-1 streams one token at a time, and batch 2-4 decode
 does the same.
+
+### Q4_0 for the dense weights (`perf/profiling`, emulation only)
+
+Every 2-D tensor in the checkpoint is Q4_0: attention, dense MLP, router and
+the tied embedding / LM head, all blocks factor. Their BFP8 copies are what
+the decode streams and LM head read most. BF16-compute emulation with BFP4
+experts, 512 tokens (`EMU_DENSE` in `scripts/q4_emulation.py`):
+
+| Dense weights | KL vs fp32 |
+|---|---:|
+| BFP8 (today) | 0.391 |
+| Q4_0, -8 clamped | 0.561 |
+| Q4_0, +1 shift where it fits | 0.348 |
+| Q4_0 exact | 0.311 |
+
+Q4_0 would cut those weights' traffic by about 40%, roughly 2 ms of a
+15.7 ms batch-1 step. But the clamp that is enough for the experts is worse
+than BFP8 here, so it would need the shift correction (an extra
+activation-sum matmul per block group). It would also need new stream kernels
+for QKV, o_proj and the 131,072-column LM head, plus BFP8 copies kept for
+prefill. Deferred.
 
 ## Profiling
 
@@ -494,6 +618,22 @@ findings are under Q4_0 decode experts. Wall-clock timing of the same
 script varied by up to 2x while a CPU emulation loaded the host, so only the
 tt-scope numbers were used.
 
+`perf/profiling` used tt-scope throughout:
+- **Baselines.** Captures of one traced batch-1 and batch-4 step on `main`
+  (`results/profile/decode-b1-now.txt`, `decode-b4-main.txt`).
+- **Batch-4 glue.** The batch-4 capture located the ~7 ms of glue and the
+  padded all-gathers behind the compact boundaries.
+- **Chip gaps.** The batch-1 capture showed chip 1 slower on the
+  DRAM-streaming ops (LM head 152 against 117 us, expert down 29.8 against
+  26.0 us). Swapping the stream placements between the chips moved that gap
+  (26.0 / 29.5 us with chip 0's placement, 42.6 / 25.8 with chip 1's), which
+  pinned it on core placement (see Not kept).
+- **Dequant timing.** Device time of the Q4 dequantization kernel.
+- **After the change.** A capture of the new batch-4 step
+  (`decode-b4-compact.txt`): 784 ops, 24.8 ms. The experts (8.3 ms, at the
+  DRAM limit for 32 slots), the merged router and MLP op (2.1 ms), the LM head
+  (1.9 ms) and the QKV matmuls (1.7 ms) now lead.
+
 **Other tools, not tt-scope:**
 
 - standalone timing: `scripts/bench_decode.py --trace` (per-step wall time),
@@ -505,6 +645,15 @@ tt-scope numbers were used.
 - server logs with `GEMMA4_TIMING=1`: per-chunk prefill time and per-step
   decode time, used for the interleave and compile findings;
 - `vllm bench serve` (`scripts/bench_tis.sh`) and `scripts/serve_check.py`.
+- `perf/profiling`:
+  - a host split of a batch-1 step: input build 0.43 ms, mostly nine
+    `from_torch` calls; logit readback 0.46 ms; host sampling 0.15 ms greedy,
+    0.41 ms top-k/p;
+  - server logs with `GEMMA4_TIMING=1`: 17.1-17.4 ms inside the model,
+    1.2-1.4 ms outside it per step, so about 0.9 ms is vLLM and the plugin;
+  - `tests/boundary_check.py --rows` and `tests/router_check.py --rows`;
+  - `scripts/bench_decode.py` against a worktree of `main`;
+  - `scripts/bench_tis.sh` against both servers.
 - `feat/quality-sampling`: a one-off host split of a traced step (input build,
   copies, execution, readback; the table under Device sampling), `ttnn.topk`
   and all-gather microbenchmarks, standalone prefill timing on README text,
@@ -528,6 +677,18 @@ discarded warm-up, CPU governor `performance`. Round 2:
 | 1 user, 8,192 / 128 | 6.95 / 5.15 / 4.36 s | 19.69 / 20.02 / 19.65 ms | 18.7 |
 | 2 users, 128 / 128 | - / 308 ms / - | ~42 / 30.74 ms / - | - |
 | 4 users, 128 / 128 | 736 / 694 / 695 ms | 57.95 / 37.75 / 36.19 ms | 96.7 (63.2, 93.2) |
+
+`perf/profiling` (`results/compare/perf-profiling{,-base}/`): `main` and this
+branch measured the same day, 128 in / 128 out.
+
+| Point | TPOT main -> now | Output tok/s main -> now | TTFT now |
+|---|---:|---:|---:|
+| 1 user | 18.07 -> 18.08 ms | 50.6 -> 50.6 | 231 ms |
+| 2 users | 29.6 -> 23.1 ms | 62.8 -> 79.1 | 300 ms |
+| 4 users | 36.17 -> 30.77 ms | 96.9 -> 111.3 | 691 ms |
+
+The 2-user `main` numbers come from a run's log; its files were lost to a
+mislabeled directory (`results/compare/perf-profiling/standalone-decode.txt`).
 
 Sampled (generation-config temperature 1, top-k 64, top-p 0.95), measured after
 the lazy softcap and before the prefill changes: TPOT 18.50 ms at 1 user,
@@ -562,7 +723,8 @@ follow-up turn 6.2-6.6 s (cached: 1.26 s).
 
 Standalone traced decode (`scripts/bench_decode.py --trace`, 128 steps,
 median): batch 1 17.54 -> 17.50 ms, batch 4 56.49 -> 35.42 ms (70.8 -> 112.9
-tok/s total), batch 2 28.92 ms.
+tok/s total), batch 2 28.92 ms. `perf/profiling`: batch 1 17.76 ms, batch 2
+22.67, batch 3 26.44, batch 4 29.49 (135.6 tok/s total).
 
 Uncertainty:
 
@@ -616,6 +778,30 @@ Uncertainty:
   matches its saved outputs 4/4 after the expert refactor, and
   `scripts/bench_q4_stream.py` checks the Q4 streams against host math.
 
+- `perf/profiling`:
+  - **Kernels.** `tests/boundary_check.py --rows 1 4` (PCC >= 0.999998 per
+    output) and `tests/router_check.py --rows 1 2 3 4`.
+  - **Smokes.** `tests/smoke_consistency.py` at batches 1-4 (decode vs
+    prefill PCC 0.99997-0.99998, same top-1), `smoke_chunked`,
+    `smoke_inactive`, `mlp_stream_check`.
+  - **Greedy.** `greedy_check` matches 4/4.
+  - **Accuracy.** Decode against fp32 (`results/accuracy/compact-rows/`, 3
+    seeds): batch 1 KL 0.457, top-1 0.758 (bit-identical to before); batch 4
+    KL 0.449, top-1 0.766 (the old batch-4 path: 0.423 and 0.772, inside the
+    0.04-0.07 noise).
+  - **Serving.** `serve_check.py` passes isolation, raw, arrival, cancel,
+    seeded and tools; `preempt` passes on a 0.2 GiB pool.
+  - **Prefix check.** `prefix` fails on both `main` and this branch, the same
+    way (13/48 tokens). Its prompt is built from repository files, which this
+    milestone changed, and the new prompt has a near-tie at token 13 between
+    the cached BFP8 K/V and the fresh prefill. It is not a regression of
+    this code.
+  - **Reviews.** An independent review (GPT-6.2 Sol) found a Q4-mode crash
+    with more than one row (now refused at load), a router output allocator
+    that could undersize its buffer (one allocator now), an emulation that
+    could mislabel unfactorable blocks (now raises; none exist), and
+    oversized tail buffers (now one row's worth).
+
 ## Capabilities
 
 | Capability | Status |
@@ -633,7 +819,7 @@ Uncertainty:
 | Embeddings endpoint | No (generative model only) |
 | `prompt_logprobs` | No (refused by the TT plugin) |
 | Async decode, device sampling, penalties or grammar | No: evaluated twice; the ttnn-op top-k path saves 1.2% at batch 1 (see Device sampling and async decode) |
-| Q4_0 experts (exact checkpoint integers) | Experimental, accuracy runs only: batch-1 decode kernels, no Q4 prefill (see Q4_0 decode experts) |
+| Q4_0 experts (exact checkpoint integers) | Experimental, accuracy runs only: batch-1 decode kernels (`max_batch=1`), no Q4 prefill (see Q4_0 decode experts) |
 | vLLM Python streaming-input sessions | No: can resume prefill off the block grid |
 | Multimodal, speculative decoding, data parallel | No (MTP: no heads in this checkpoint, see above) |
 | KV pool size | `GEMMA4_KV_POOL_GIB` (default 2.5 GiB per chip) |
@@ -653,10 +839,16 @@ Uncertainty:
 - **Device sampling and async decode.** ttnn ops give only 1.2% at batch 1. A
   fused LM-head top-k (per-core candidates written by the matmul's cores) and
   a device embedding are the prerequisites.
-- **Batch 2-4 decode.** The router (`topk_router_gpt`, 68 us per layer
-  against 36 us for the batch-1 router op, about 1 ms per step), 151 norm ops
-  per step and generic attention now lead; the batch-1 compact boundaries
-  could extend to 4 rows. Expert slots shared between users are read twice.
+- **Batch 2-4 decode.** The compact boundaries and the router op are done.
+  The step is now experts first (8.3 ms at 4 rows, at the DRAM limit).
+  Expert slots that several users share are still read once per user;
+  deduplicating them would save about 10% of the expert time for random
+  routing, more when users share experts. The router op's per-row top-k
+  costs 54-68 us at 3-4 rows. RoPE at 2-4 rows still uses generic ops.
+- **Host overhead at batch 1.** 2.7 ms per step outside the device: input
+  build 0.43, readback 0.46, sampling 0.15-0.41, vLLM and the plugin ~0.9.
+  Only async decode with device sampling and a device embedding removes most
+  of it (see Device sampling).
 - **Prefill.** About 1,700 tokens/s at 2,048. The all-gathers (15%) are
   link-bound on one Ethernet link; the gate|up sparse matmul uses 24 of 64
   cores; the expert row gathers and the gather back still cost 6 ms per layer.
@@ -680,6 +872,9 @@ Uncertainty:
     pixi run python scripts/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb 1 --batch 4
     pixi run python scripts/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb 1 --precision expert_q4=1
     pixi run python scripts/bench_q4_stream.py --seeds 2
+    pixi run python tests/boundary_check.py --rows 1 4
+    pixi run python tests/router_check.py --rows 1 2 3 4
+    pixi run bash scripts/bench_tis.sh <label> c1-128-128-n8 c2-128-128-n8 c4-128-128-n16
     pixi run python scripts/q4_emulation.py results/q4/emulation.json q4exact q4clamp bfp4
     uv run --no-project --with-requirements scripts/gpqa_eval.requirements.txt \
         python scripts/gpqa_eval.py --count 40 --out results/quality/gpqa-<label>

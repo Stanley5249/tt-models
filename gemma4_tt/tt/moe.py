@@ -36,10 +36,10 @@ def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:
     return _STREAMS[key]
 
 
-def router_op(mesh, cfg) -> Router:
-    key = ("router", id(mesh))
+def router_op(mesh, cfg, rows: int = 1) -> Router:
+    key = ("router", id(mesh), rows)
     if key not in _STREAMS:
-        _STREAMS[key] = Router(mesh, cfg.hidden_size, cfg.num_experts, cfg.top_k_experts)
+        _STREAMS[key] = Router(mesh, cfg.hidden_size, cfg.num_experts, cfg.top_k_experts, rows=rows)
     return _STREAMS[key]
 
 
@@ -256,29 +256,6 @@ class FeedForward:
             num_experts=self.n_experts,
         )
 
-    def _experts_stream(self, x: ttnn.Tensor, normed: ttnn.Tensor) -> ttnn.Tensor:
-        """T <= STREAM_ROWS decode tokens: router, then one gate|up and one down stream over all
-        T * k slots (expert_stream.py), slot 8 t + j for token t's j-th expert."""
-        tokens = x.shape[2]
-        if self.q4 is not None:
-            return self._experts_q4_rows(x, normed)
-        ids, weights = self._route(normed, tokens)
-        if tokens > 1:  # [T, k] -> [1, T * k]; a uint16 reshape that moves rows is unsupported
-            flat = ttnn.reshape(ttnn.typecast(ids, ttnn.uint32), (1, tokens * self.top_k))
-            ids.deallocate(True)
-            ids = ttnn.typecast(flat, ttnn.uint16)
-            flat.deallocate(True)
-            weights = ttnn.reshape(weights, (1, tokens * self.top_k))
-        st = self.stream if tokens == 1 else expert_stream(self.mesh, self.cfg, self.expert_local, tokens)
-        act = st.act_tensor()
-        st.gate_up(x, ids, weights, self.scale_row, self.exp_gate_up, act)
-        weights.deallocate(True)
-        out = st.out_tensor(L1)
-        st.down(act, ids, self.exp_down, out)
-        act.deallocate(True)
-        ids.deallocate(True)
-        return out
-
     def _experts_q4_rows(self, x: ttnn.Tensor, normed: ttnn.Tensor, group: int = 256) -> ttnn.Tensor:
         """Q4_0 experts for every row of x [1, 1, T, H], one batch-1 stream pair per row (slow).
 
@@ -316,17 +293,6 @@ class FeedForward:
         t.deallocate(True)
         return out
 
-    def _mlp_stream(self, x):
-        """Dense MLP for T <= STREAM_ROWS decode tokens through the stream kernels: row-form [1, 1, T, H]."""
-        tokens = x.shape[2]
-        ms = self.mlp_stream
-        h = ms.h_tensor(tokens)
-        ms.gate_up(x, self.mlp_gate_up, h, rows=tokens)
-        out = ms.out_tensor(tokens)
-        ms.down(h, self.mlp_down, out, compact_chunk0=None, rows=tokens)
-        h.deallocate(True)
-        return out
-
     def _mlp(self, x, dtype=None):
         gu = ttnn.linear(x, self.mlp_gate_up, compute_kernel_config=HIFI2, memory_config=DRAM)
         n = self.mlp_pad  # padding columns are zero in gate and up, so h carries zeros there
@@ -341,28 +307,34 @@ class FeedForward:
         h.deallocate(True)
         return self._unpad(out)
 
-    def decode_b1(self, normed, mlp_in, exp_in, boundary) -> ttnn.Tensor:
-        """One decode token on compact boundaries (boundary.py). normed, mlp_in, exp_in: row form BF16
-        from the attention tail. Returns this chip's [mlp | experts] partial sums, compact FP32."""
-        out = boundary.compact(2)
+    def decode_compact(self, normed, mlp_in, exp_in, boundary) -> ttnn.Tensor:
+        """1-4 decode tokens on compact boundaries (boundary.py). normed, mlp_in, exp_in: row form BF16
+        [1, 1, rows, H] from the attention tail. Returns this chip's [mlp rows | expert rows] partial sums,
+        compact FP32 (2 * rows vectors)."""
+        rows = normed.shape[2]
+        out = boundary.compact(2 * rows)
         ms = self.mlp_stream
-        h = ms.h_tensor()
-        router = router_op(self.mesh, self.cfg)
+        h = ms.h_tensor(rows)
+        router = router_op(self.mesh, self.cfg, rows)
         ids, weights = router.outputs()
         # The router is latency-bound and the MLP gate|up DRAM-bound: one merged op on disjoint cores.
-        run([router(normed, self.router, ids, weights, build=True), ms.gate_up(mlp_in, self.mlp_gate_up, h, build=True)])
-        ms.down(h, self.mlp_down, out, compact_chunk0=0)
+        run([router(normed, self.router, ids, weights, build=True), ms.gate_up(mlp_in, self.mlp_gate_up, h, rows=rows, build=True)])
+        ms.down(h, self.mlp_down, out, compact_chunk0=0, rows=rows)
         h.deallocate(True)
-        st = self.stream
+        # At 2-4 rows the router op replaced topk_router_gpt and the reshape and typecast ops that
+        # flattened its [T, k] output: a batch-4 step went from 34.8 to 33.8 ms.
+        st = self.stream if rows == 1 else expert_stream(self.mesh, self.cfg, self.expert_local, rows)
         act = st.act_tensor()
+        expert_chunk0 = rows * boundary.V * 64
         if self.q4 is not None:
+            assert rows == 1, "the Q4_0 experts are batch-1 only"
             self.q4.gate_up_op(exp_in, ids, weights, self.scale_row, act)
             weights.deallocate(True)
-            self.q4.down_op(act, ids, out, compact_chunk0=boundary.V * 64)
+            self.q4.down_op(act, ids, out, compact_chunk0=expert_chunk0)
         else:
             st.gate_up(exp_in, ids, weights, self.scale_row, self.exp_gate_up, act)
             weights.deallocate(True)
-            st.down(act, ids, self.exp_down, out, compact_chunk0=boundary.V * 64)
+            st.down(act, ids, self.exp_down, out, compact_chunk0=expert_chunk0)
         act.deallocate(True)
         ids.deallocate(True)
         return out
@@ -532,21 +504,16 @@ class FeedForward:
         return out
 
     def __call__(self, residual: ttnn.Tensor) -> ttnn.Tensor:
-        """residual [1, 1, T, H] replicated. Returns the block output to add to the residual."""
+        """Prefill: residual [1, 1, T, H] replicated. Returns the block output to add to the residual.
+        (Decode runs decode_compact.)"""
         t = residual.shape[2]
         normed = rms_norm(residual, None, self.eps)
-        # The streams read the token rows of every x tile from 36-44 cores, so x stays in L1.
-        decode = t <= STREAM_ROWS
-        mem = L1 if decode else DRAM
-        mlp_in = ttnn.mul(normed, self.pre_ff, memory_config=mem)
-        mlp = self._mlp_stream(mlp_in) if decode else self._mlp(mlp_in)
+        mlp_in = ttnn.mul(normed, self.pre_ff, memory_config=DRAM)
+        mlp = self._mlp(mlp_in)
         mlp_in.deallocate(True)
 
-        exp_in = ttnn.mul(normed, self.pre_ff2, memory_config=mem)
-        if self.q4 is not None:
-            experts = self._experts_q4_rows(exp_in, normed)
-        else:
-            experts = self._experts_stream(exp_in, normed) if decode else self._experts(exp_in, normed)
+        exp_in = ttnn.mul(normed, self.pre_ff2, memory_config=DRAM)
+        experts = self._experts_q4_rows(exp_in, normed) if self.q4 is not None else self._experts(exp_in, normed)
         exp_in.deallocate(True)
         normed.deallocate(True)
         if experts.shape[2] != t:

@@ -1,10 +1,11 @@
 // Router reduction and top-k (BRISC).
 //
-// Every core writes row 0 of its FP32 partial logit tiles into row `slot` of the reducer's cb_part tiles
-// and increments the reducer's semaphore. The reducer zeroes the unused rows, waits for all partials,
-// hands cb_part to compute, and from exp(logits) picks the top k (positive floats compare as integers),
+// Every core writes rows 0 .. rows - 1 (one per token) of its FP32 partial logit tiles into rows
+// slot * rows + b of the reducer's cb_part tiles and increments the reducer's semaphore. The reducer zeroes
+// the unused rows, waits for all partials, hands cb_part to compute (J @ partials puts token b's logits in
+// row b), and from row b of exp(logits) picks token b's top k (positive floats compare as integers),
 // normalizes them in software float (softmax over the k logits, as Gemma's softmax-top-k-renormalize),
-// and writes ids (uint16) and weights (BF16) as row-major rows.
+// and writes ids (uint16) and weights (BF16) into one row-major row, token-major (entry b * k + j).
 //
 // runtime args: [slot, reducer_x, reducer_y, is_reducer, ids_addr, wts_addr]
 
@@ -26,7 +27,10 @@ void kernel_main() {
     constexpr uint32_t n_parts = get_compile_time_arg_val(5);
     constexpr uint32_t top_k = get_compile_time_arg_val(6);
     constexpr uint32_t sem_id = get_compile_time_arg_val(7);
-    constexpr auto ids_args = TensorAccessorArgs<8>();
+    constexpr uint32_t rows = get_compile_time_arg_val(8);
+    constexpr uint32_t out_bytes = get_compile_time_arg_val(9);  // bytes of the ids / weights row written
+    constexpr auto ids_args = TensorAccessorArgs<10>();
+    static_assert(n_parts * rows <= 32 && rows * top_k <= 32, "partial rows and outputs fit a tile row");
     constexpr auto wts_args = TensorAccessorArgs<ids_args.next_compile_time_args_offset()>();
     constexpr uint32_t face = 1024;  // FP32
 
@@ -35,7 +39,7 @@ void kernel_main() {
     const uint32_t part = get_write_ptr(cb_part);  // same address on every core
     if (is_reducer) {
         for (uint32_t n = 0; n < n_tiles; ++n) {
-            for (uint32_t r = n_parts; r < 32; ++r) {
+            for (uint32_t r = n_parts * rows; r < 32; ++r) {
                 const uint32_t off = n * COMPACT_TILE + (r < 16 ? r * 64 : 2 * face + (r - 16) * 64);  // faces 0 / 2
                 volatile tt_l1_ptr uint32_t* p0 = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(part + off);
                 volatile tt_l1_ptr uint32_t* p1 = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(part + off + face);
@@ -49,11 +53,14 @@ void kernel_main() {
 
     cb_wait_front(cb_partial, n_tiles);
     const uint32_t src = get_read_ptr(cb_partial);
-    const uint32_t row_off = slot < 16 ? slot * 64 : 2 * face + (slot - 16) * 64;
-    for (uint32_t n = 0; n < n_tiles; ++n) {
-        for (uint32_t f = 0; f < 2; ++f) {
-            const uint64_t dst = get_noc_addr(red_x, red_y, part + n * COMPACT_TILE + f * face + row_off);
-            noc_async_write(src + n * COMPACT_TILE + f * face, dst, 64);
+    for (uint32_t b = 0; b < rows; ++b) {
+        const uint32_t r = slot * rows + b;
+        const uint32_t row_off = r < 16 ? r * 64 : 2 * face + (r - 16) * 64;
+        for (uint32_t n = 0; n < n_tiles; ++n) {
+            for (uint32_t f = 0; f < 2; ++f) {
+                const uint64_t dst = get_noc_addr(red_x, red_y, part + n * COMPACT_TILE + f * face + row_off);
+                noc_async_write(src + n * COMPACT_TILE + f * face + b * 64, dst, 64);
+            }
         }
     }
     noc_async_write_barrier();
@@ -71,65 +78,66 @@ void kernel_main() {
 
     cb_wait_front(cb_e, n_tiles);
     const uint32_t e = get_read_ptr(cb_e);
-    uint32_t best_v[top_k], best_i[top_k];
-    for (uint32_t j = 0; j < top_k; ++j) {
-        best_v[j] = 0;
-        best_i[j] = 0;
-    }
-    for (uint32_t n = 0; n < n_tiles; ++n) {
-        for (uint32_t f = 0; f < 2; ++f) {
-            volatile tt_l1_ptr uint32_t* row = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(e + n * COMPACT_TILE + f * face);
-            for (uint32_t c = 0; c < 16; ++c) {
-                const uint32_t v = row[c];
-                if (v <= best_v[top_k - 1]) {
-                    continue;
-                }
-                uint32_t j = top_k - 1;
-                while (j > 0 && best_v[j - 1] < v) {
-                    best_v[j] = best_v[j - 1];
-                    best_i[j] = best_i[j - 1];
-                    --j;
-                }
-                best_v[j] = v;
-                best_i[j] = n * 32 + f * 16 + c;
-            }
-        }
-    }
-    cb_pop_front(cb_e, n_tiles);
-
-    float sum = 0.0f;
-    float vals[top_k];
-    for (uint32_t j = 0; j < top_k; ++j) {
-        union {
-            uint32_t u;
-            float f;
-        } cv;
-        cv.u = best_v[j];
-        vals[j] = cv.f;
-        sum += cv.f;
-    }
     cb_reserve_back(cb_out, 1);
     const uint32_t out = get_write_ptr(cb_out);
     volatile tt_l1_ptr uint16_t* ids = reinterpret_cast<volatile tt_l1_ptr uint16_t*>(out);
     volatile tt_l1_ptr uint16_t* wts = reinterpret_cast<volatile tt_l1_ptr uint16_t*>(out + 64);
-    const float inv = 1.0f / sum;
-    for (uint32_t j = 0; j < 16; ++j) {
-        if (j < top_k) {
+    for (uint32_t j = 0; j < 32; ++j) {
+        ids[j] = 0;
+        wts[j] = 0;
+    }
+    for (uint32_t b = 0; b < rows; ++b) {
+        uint32_t best_v[top_k], best_i[top_k];
+        for (uint32_t j = 0; j < top_k; ++j) {
+            best_v[j] = 0;
+            best_i[j] = 0;
+        }
+        for (uint32_t n = 0; n < n_tiles; ++n) {
+            for (uint32_t f = 0; f < 2; ++f) {
+                volatile tt_l1_ptr uint32_t* row =
+                    reinterpret_cast<volatile tt_l1_ptr uint32_t*>(e + n * COMPACT_TILE + f * face + b * 64);
+                for (uint32_t c = 0; c < 16; ++c) {
+                    const uint32_t v = row[c];
+                    if (v <= best_v[top_k - 1]) {
+                        continue;
+                    }
+                    uint32_t j = top_k - 1;
+                    while (j > 0 && best_v[j - 1] < v) {
+                        best_v[j] = best_v[j - 1];
+                        best_i[j] = best_i[j - 1];
+                        --j;
+                    }
+                    best_v[j] = v;
+                    best_i[j] = n * 32 + f * 16 + c;
+                }
+            }
+        }
+        float sum = 0.0f;
+        float vals[top_k];
+        for (uint32_t j = 0; j < top_k; ++j) {
+            union {
+                uint32_t u;
+                float f;
+            } cv;
+            cv.u = best_v[j];
+            vals[j] = cv.f;
+            sum += cv.f;
+        }
+        const float inv = 1.0f / sum;
+        for (uint32_t j = 0; j < top_k; ++j) {
             union {
                 uint32_t u;
                 float f;
             } w;
             w.f = vals[j] * inv;
-            ids[j] = static_cast<uint16_t>(best_i[j]);
-            wts[j] = static_cast<uint16_t>((w.u + 0x7FFF + ((w.u >> 16) & 1)) >> 16);
-        } else {
-            ids[j] = 0;
-            wts[j] = 0;
+            ids[b * top_k + j] = static_cast<uint16_t>(best_i[j]);
+            wts[b * top_k + j] = static_cast<uint16_t>((w.u + 0x7FFF + ((w.u >> 16) & 1)) >> 16);
         }
     }
-    const auto s_ids = TensorAccessor(ids_args, ids_addr, 32);
-    const auto s_wts = TensorAccessor(wts_args, wts_addr, 32);
-    noc_async_write(out, s_ids.get_noc_addr(0), 32);
-    noc_async_write(out + 64, s_wts.get_noc_addr(0), 32);
+    cb_pop_front(cb_e, n_tiles);
+    const auto s_ids = TensorAccessor(ids_args, ids_addr, out_bytes);
+    const auto s_wts = TensorAccessor(wts_args, wts_addr, out_bytes);
+    noc_async_write(out, s_ids.get_noc_addr(0), out_bytes);
+    noc_async_write(out + 64, s_wts.get_noc_addr(0), out_bytes);
     noc_async_write_barrier();
 }

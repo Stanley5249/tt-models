@@ -22,5 +22,29 @@
   "top1_vs_fp32": 0.8337,
   "kl_mean": 0.34712,
   "kl_p95": 1.5824
+ },
+ "bfp4+dense-bfp8@512-bfloat16": {
+  "ppl": 26.1646,
+  "top1_vs_fp32": 0.82,
+  "kl_mean": 0.39111,
+  "kl_p95": 1.78681
+ },
+ "bfp4+dense-q4clamp@512-bfloat16": {
+  "ppl": 26.9495,
+  "top1_vs_fp32": 0.7632,
+  "kl_mean": 0.56075,
+  "kl_p95": 2.33885
+ },
+ "bfp4+dense-q4shift@512-bfloat16": {
+  "ppl": 24.3761,
+  "top1_vs_fp32": 0.8552,
+  "kl_mean": 0.34756,
+  "kl_p95": 1.69153
+ },
+ "bfp4+dense-q4exact@512-bfloat16": {
+  "ppl": 21.5217,
+  "top1_vs_fp32": 0.8454,
+  "kl_mean": 0.31104,
+  "kl_p95": 1.55115
  }
 }
