@@ -441,7 +441,8 @@ class FeedForward:
             )
         return self._chunk_cfgs[rows]
 
-    def chunk_rows(self, tokens: int) -> int:
+    # The chunk size is fixed for every prefill length.
+    def chunk_rows(self, tokens: int) -> int:  # noqa: ARG002
         """Rows per expert chunk for a prefill piece of `tokens` tokens.
 
         One tile of rows wastes the least on padding, and the sparse matmuls' time

@@ -90,7 +90,7 @@ def main():
     modes = sys.argv[2:]
     state = {"mode": None}
 
-    def quantize_layer(layer_state, quant):
+    def quantize_layer(layer_state, _quant):
         result = dict(layer_state)
         if state["mode"] == "none":
             return result

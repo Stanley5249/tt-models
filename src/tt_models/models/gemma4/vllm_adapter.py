@@ -140,7 +140,7 @@ class Gemma4ForCausalLM:
         max_batch_size,
         max_seq_len,
         tt_data_parallel=1,
-        optimizations=None,
+        optimizations=None,  # noqa: ARG003 - plugin API
         **_,
     ):
         if tt_data_parallel != 1:
@@ -275,8 +275,8 @@ class Gemma4ForCausalLM:
         tokens,
         start_pos,
         prompt_lens,
-        page_table,
-        kv_cache,
+        page_table,  # noqa: ARG002 - plugin API
+        kv_cache,  # noqa: ARG002 - plugin API
         page_tables_per_layer=None,
         **_,
     ):
@@ -298,8 +298,8 @@ class Gemma4ForCausalLM:
         self,
         tokens,
         start_pos,
-        page_table,
-        kv_cache,
+        page_table,  # noqa: ARG002 - plugin API
+        kv_cache,  # noqa: ARG002 - plugin API
         enable_trace=False,
         page_tables_per_layer=None,
         sampling_params=None,
@@ -347,7 +347,13 @@ class Gemma4ForCausalLM:
 
     # -- lifecycle -------------------------------------------------------------
 
-    def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, **_):
+    def warmup_model_prefill(
+        self,
+        kv_cache,  # noqa: ARG002 - plugin API
+        enable_trace,  # noqa: ARG002 - plugin API
+        can_sample_on_device,  # noqa: ARG002 - plugin API
+        **_,
+    ):
         """Build the prefill programs of every padded length (prefill_rows), for a piece
         from position 0 and a continuation piece, which reads the paged cache. A program
         built later, after the decode traces are captured, would cost the first request
@@ -383,10 +389,10 @@ class Gemma4ForCausalLM:
 
     def warmup_model_decode(
         self,
-        kv_cache,
+        kv_cache,  # noqa: ARG002 - plugin API
         max_batch_size,
-        num_blocks,
-        can_sample_on_device,
+        num_blocks,  # noqa: ARG002 - plugin API
+        can_sample_on_device,  # noqa: ARG002 - plugin API
         enable_trace,
         **_,
     ):
