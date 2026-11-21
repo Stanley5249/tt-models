@@ -1,5 +1,6 @@
-"""Device time breakdown of traced decode steps from a tt-scope ops CSV.
+"""Device time breakdown of traced decode steps from a tt-scope ops report.
 
+    pixi run tt-scope report artifacts/runs/<run>
     pixi run python scripts/profile/trace_breakdown.py artifacts/runs/<run> \\
         [--phase decode1] [--layer-ops 73]
 
@@ -19,7 +20,7 @@ KERN = "DEVICE KERNEL DURATION [ns]"
 
 
 def load(run: Path) -> pd.DataFrame:
-    csv = next(run.glob("reports/*/ops_perf_results_*.csv"))
+    csv = run / "report/ops_perf_results.csv"
     cols = [
         "OP CODE",
         "OP TYPE",
