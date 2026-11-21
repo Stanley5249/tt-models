@@ -34,6 +34,7 @@ flip a late token. It fails only if the first 16 tokens differ.
 """
 
 import argparse
+import itertools
 import json
 import random
 import sys
@@ -99,7 +100,7 @@ def metric(url: str, name: str) -> float:
     return sum(
         float(line.rsplit(" ", 1)[1])
         for line in text.splitlines()
-        if line.startswith(name + "{") or line.startswith(name + " ")
+        if line.startswith((name + "{", name + " "))
     )
 
 
@@ -213,7 +214,7 @@ def check_arrival(url):
         )
         ids, times = streamed.result()
         long_ttft = arrived.result()
-    gaps = [b - a for a, b in zip(times, times[1:])]
+    gaps = [b - a for a, b in itertools.pairwise(times)]
     print(
         f"    stream gaps: median {sorted(gaps)[len(gaps) // 2] * 1e3:.1f} ms, max {max(gaps) * 1e3:.0f} ms;"
         f" the 8192-token request's first token after {long_ttft:.2f} s",

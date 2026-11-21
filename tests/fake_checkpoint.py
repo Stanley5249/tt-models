@@ -38,7 +38,7 @@ class FakeCheckpoint:
     def _shape(self, name: str):
         c = self.config
         H, E = c.hidden_size, c.num_experts
-        if name in ("embed_tokens.weight",):
+        if name == "embed_tokens.weight":
             return (c.vocab_size, H), 1.0
         if name == "norm.weight":
             return (H,), 0.1
@@ -83,10 +83,8 @@ class FakeCheckpoint:
             )
             t = torch.randn(shape, generator=g) * std
             if (
-                name.endswith("norm.weight")
-                or name.endswith("layernorm.weight")
+                name.endswith(("norm.weight", "layernorm.weight", "scale"))
                 or "layernorm_" in name
-                or name.endswith("scale")
             ):
                 t = 1.0 + t
             if name.endswith("layer_scalar"):
