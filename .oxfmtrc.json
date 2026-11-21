@@ -1,0 +1,10 @@
+{
+  "$schema": "https://cdn.jsdelivr.net/npm/oxfmt/configuration_schema.json",
+  "proseWrap": "never",
+  "ignorePatterns": [
+    "**/*.toml",
+    "pixi.lock",
+    "docs/experiments/*/**",
+    "scripts/accuracy/greedy-base.json"
+  ]
+}
