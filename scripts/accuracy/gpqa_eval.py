@@ -1,4 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+# Adapted from tenstorrent/tt-metal@d1a102793682817a4c12c572c44e6ad0277b5fe0
+# models/demos/gemma4_26b_a4b_qb2/tests/benchmark.py.
 """GPQA Diamond accuracy of a running server, as upstream's QB2 release check scores it.
 
     uv run --no-project --with-requirements \\

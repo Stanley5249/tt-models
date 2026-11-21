@@ -1,6 +1,9 @@
+// SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 // SPDX-License-Identifier: Apache-2.0
+// Adapted from tenstorrent/tt-metal@d1a102793682817a4c12c572c44e6ad0277b5fe0
+// models/demos/gpt_oss/tt/fused_decode/kernels/stream_*_reader.cpp.
 // Block streaming from one DRAM bank with transaction ids (NCRISC), after the gpt-oss fused
-// decode streamers (models/demos/gpt_oss/tt/fused_decode/kernels/stream_*_reader.cpp, Apache-2.0).
+// decode streamers.
 //
 // A block is `packets` NOC packets of `packet_bytes`, pushed to `cb` as `block_tiles` tiles once all its
 // packets landed. Three block buffers, one block in flight ahead of the one compute consumes.
