@@ -5,10 +5,11 @@ optimized and measured, and what is left. Stack: vLLM 0.32.0, vllm-tt-plugin
 `0c12fd0`, transformers 5.16.1, ttnn 0.81.1+conda.8, one N300d (two Wormhole
 chips, TP=2). The investigation that started this work is
 `docs/gemma4-serving-investigation.md`; the earlier single-user decode work is
-`docs/decode-optimization-report.md`. Two milestones are described here: the
-serving backend (`feat/serving`) and the follow-up on compatibility, sampling,
-quality and prefill (`feat/quality-sampling`); sections say which one a result
-belongs to where it matters.
+`docs/decode-optimization-report.md`. Three milestones are described here: the
+serving backend (`feat/serving`), the follow-up on compatibility, sampling,
+quality and prefill (`feat/quality-sampling`), and Q4_0 experts, device
+sampling and tool choice (`feat/quality-upstream`); sections say which one a
+result belongs to where it matters.
 
     pixi run serve-gemma4                       # 127.0.0.1:8000, model "gemma4"
     pixi run python scripts/serve_check.py      # request lifecycle checks
@@ -101,6 +102,37 @@ decode step returns the logits before it and only the k candidates are
 capped; logprobs and vLLM's own host sampler (penalties, min-p, larger top-k)
 still get the whole capped row. Sampling on the device and the plugin's async
 decode were evaluated and not built (see below).
+
+### Tool choice (`feat/quality-upstream`)
+
+vLLM 0.32's `gemma4` tool parser sets no structural tag and declares
+`supports_required_and_named = False`. `tool_choice="required"` or a named
+tool therefore reached the model only as prompt text: a greeting with
+`required` got a prose answer (vllm-project/vllm#50477, #53363). vLLM's chat
+path already turns a parser's `structural_tag_model` into an xgrammar
+structural tag. xgrammar 0.2.9 (November 2026) added the `gemma_4` tag:
+- it forces the native `<|tool_call>call:name{...}<tool_call|>` envelope;
+- it accepts Gemma's `<|"|>` strings;
+- it requires at least one call for `required`, or exactly the named function.
+
+The fix stays in this repository:
+- **xgrammar override.** `pixi.toml` overrides vLLM's `xgrammar==0.2.8` pin
+  with 0.2.9, which changes nothing else in the lock file.
+- **Tool parser plugin.** `gemma4_tt/tool_parser.py` registers the tag as a
+  vLLM-side builder, because vLLM 0.32's list of xgrammar tags predates it,
+  and subclasses the stock parser with `structural_tag_model = "gemma_4"`.
+  `serve-gemma4` loads it with `--tool-parser-plugin` and
+  `--tool-call-parser gemma4_tt`.
+
+Parsing is unchanged, so `auto` behaves as before. With thinking on, vLLM
+applies the grammar after the reasoning channel. Arguments follow the schema
+only for `strict` tools, as on every model (`--tool-strict-level parameter`
+makes them all strict); a non-strict tool's arguments must still be an object,
+because xgrammar would otherwise also accept a call with no argument block,
+which the parser cannot read. A named call finishes with `stop`, as OpenAI's
+API does. An independent review (GPT-6.2 Sol) found that gap and three small
+issues in the Q4 code (concat size, a block-size check, the named-tool check
+allowing duplicates); all are fixed.
 
 ## Optimization methods
 
@@ -243,6 +275,28 @@ Net: about 0.6-1 ms per step (4%) at batch 1 and about 10% at batch 4, for a
 large change with weaker sampling semantics. The lazy softcap took the cheap
 part (0.34 / 1.35 ms).
 
+**Reassessed in `feat/quality-upstream`.** Upstream did not move: the Gemma 4
+LM-head issue (tenstorrent/tt-metal#44953) measured `TopKDeviceOperation` at
+10.1 ms of a Blackhole sampling step, and #52928 (closed) fixed wrong tokens
+from `TTSampling`'s half-width index tensor on single devices, so the
+upstream sampler is not a drop-in either. The cheapest path that keeps host
+sampling exact was measured on the device (`results/sampling/device-topk.txt`):
+cast the per-chip logits to BF16, view them as 32 x 4,096 rows (top-k is
+fast at that width), `ttnn.topk` 64 per row, and read only the candidates.
+
+| Batch | Device ops | Candidate read | Total | Today: full read + host top-k |
+|---|---:|---:|---:|---:|
+| 1 | 0.31 ms | 0.20 ms | 0.51 ms | 0.73 ms |
+| 4 | 2.21 ms | 0.23 ms | 2.43 ms | 2.53 ms |
+
+That saves 0.22 ms (1.2%) at batch 1 and nothing at batch 4 (top-k over 128
+rows and the reshape grow with the batch), before the fp32 gather a
+greedy-exact version would need; reshaping the fp32 row directly fails (its
+512 KB row-major page needs 2.2 MB of L1 per core). Async decode on top still
+needs the embedding on the device. So both stay unbuilt: the win needs a
+custom LM-head kernel that keeps per-core top-k candidates, which is a
+TT-Metal-sized change.
+
 MTP speculative decoding was evaluated on paper. This checkpoint has no MTP
 weights; upstream's drafter is a separate "assistant" model (4 layers) that
 reads the target's KV cache. Verifying K drafts here needs either a multi-token
@@ -304,6 +358,96 @@ Accumulation is FP32 in the destination registers, with few K blocks in the
 prefill sparse matmuls because each block boundary rounds the partial sum to
 BF16.
 
+### Q4_0 decode experts (`feat/quality-upstream`, experimental)
+
+**Result.** Decode with the checkpoint's own Q4_0 values instead of BFP4
+lowers KL against fp32 from 0.457 to 0.286 and raises top-1 agreement from
+75.8% to 81.3% (3 perturbed seeds each, `results/q4/`). It is not used for
+serving: prefill has no Q4 path yet, and two copies of the experts do not fit
+in DRAM.
+
+**Existing support.** TT-Metal has no Q4_0 or int4 tile format on Wormhole:
+`MxInt4` and `MxFp4` exist in the data-format enum but only Quasar's LLK
+unpacks them, and the unpacker's block formats share a power-of-two exponent
+per 16 values. So the kernels keep the weights in BFP4 tiles and carry the
+steps separately.
+
+**How the kernels work** (`gemma4_tt/tt/expert_q4.py`,
+`kernels/expert_q4_*`). A weight is W[k, n] = q[k, n] * s[k / 32, n].
+- **Integers.** BFP4 holds the integers -7..7 exactly. The rare -8 (0.2% of
+  the values, 6% of the blocks) is clamped to -7, which gives 35 dB weight SNR
+  against BFP4's 20 dB.
+- **Row placement.** A 32-input block is one K tile, so the writer puts the
+  token's K tile k into row k % 32 of an otherwise zero tile. The matmuls of a
+  group of 32 K tiles then leave each block's partial sum P[block, n] in its
+  own row of the FP32 dest.
+- **Scaling.** An SFPU multiply by a BF16 step tile (rows = blocks) and one
+  matmul with a ones row give y[n] = sum of s * P.
+- **Traffic.** The weight readers are unchanged; the steps add 12% to the
+  gate|up traffic and 14% to the down's (only the first 11 rows of a down step
+  tile are read).
+- **Fidelity.** The kernels run at HiFi3. The streams are DRAM-bound, so LoFi
+  and HiFi3 take the same time, but LoFi drops the activations' low bits
+  (24.8 dB against exact math, 52.3 dB at HiFi3).
+
+| Layer 0, one token | BFP4 | Q4_0 |
+|---|---:|---:|
+| gate\|up output SNR vs checkpoint weights | 16-19 dB | 28-34 dB |
+| down output SNR | 20-25 dB | 35-40 dB |
+| gate\|up device time | 47.8 us | 60.7 us |
+| down device time | 27.7 us | 41.2 us |
+
+The extra 26 us per layer would add about 0.8 ms per token at batch 1 (4%).
+
+**tt-scope** captures of `scripts/bench_q4_stream.py` gave the times above
+and drove three changes:
+- **Zero-fill.** The first version took 82 us. Zeroing the 88 x tiles with
+  512-byte reads cost 15 us; doubling local copies of one zero tile cost
+  6 us, and that time stays.
+- **Step reads.** Reading every slot's steps at once delayed the weight
+  stream's start; reading them one slot at a time took chip 1 from 65.8 to
+  61.6 us.
+- **Smaller blocks.** A group-major variant with 8-k-step blocks was slower
+  than the stock 11-step reader.
+
+The SFPU scaling (2 us) and the final sums (under 1 us) are small. A
+persistent zeroed L1 buffer would save the 6 us, at 176 KB of L1 per core
+for the model's lifetime.
+
+**Model quality.** Host emulation (`scripts/q4_emulation.py`) and the device
+agree on the ranking:
+
+| Experts | Emulation, fp32 compute (2,048 tokens) | Emulation, BF16 compute (512) | Device decode |
+|---|---:|---:|---:|
+| exact Q4_0 | 0.025 | 0.174 | - |
+| Q4_0, -8 clamped | 0.110 | 0.250 | 0.286 |
+| BFP4 | 0.197 | 0.347 | 0.457 |
+
+**The -8 clamp** costs about 0.08 KL in BF16 emulation. A +1 offset per block,
+corrected with the block's activation sum, would store 95% of the blocks that
+hold a -8 exactly. In emulation it recovered only 0.024 of the 0.085 gap,
+because the remaining blocks hold both -8 and 7. BFP4's 15 levels cannot hold
+those, so exactness would need sparse corrections. Not built.
+
+**Why prefill blocks serving.**
+- **No Q4 matmul.** ttnn's indexed sparse matmul has no per-(block, output)
+  scale.
+- **Dequantizing is too slow.** Dequantizing a layer with `ttnn.multiply`
+  (row-broadcast steps) took 34 ms for gate|up alone, about 1 s per prefill
+  chunk.
+- **The steps don't factor.** The step matrices are not low rank: a rank-8
+  log fit gives 18 dB weights.
+- **Memory.** Keeping BFP4 for prefill next to Q4 for decode needs 6 GB more
+  per chip.
+
+A Q4 prefill therefore needs an expert-major kernel that dequantizes inside
+the matmul. To amortize the dequantization it must keep a weight tile for all
+of an expert's chunks; today's indexed sparse matmul re-reads the weights
+per 32-row chunk. Until then, `Precision(expert_q4=True)` serves only
+accuracy runs (`scripts/compare.py --precision expert_q4=1`). In that mode
+prefill runs the batch-1 streams one token at a time, and batch 2-4 decode
+does the same.
+
 ## Profiling
 
 **tt-scope** (v0.4.0, `tracy` mode) was used for two captures of one traced
@@ -342,6 +486,13 @@ Findings that shaped decisions:
 - after: 3,499 ops, 1,110 ms. Sparse matmuls 368 ms, gathers 80 ms, slices
   30 ms. The all-gathers (162 ms, about 6 GB/s over the one Ethernet link)
   are now the second item.
+
+`feat/quality-upstream` captured `scripts/bench_q4_stream.py` (one layer's
+BFP4 and Q4 expert streams, trace replays) about ten times while tuning the
+Q4 kernels; device kernel durations per op came from the ops CSV. The
+findings are under Q4_0 decode experts. Wall-clock timing of the same
+script varied by up to 2x while a CPU emulation loaded the host, so only the
+tt-scope numbers were used.
 
 **Other tools, not tt-scope:**
 
@@ -458,6 +609,13 @@ Uncertainty:
   penalties, min-p with top-k 5,000, `n=2`, stop strings with `min_tokens`,
   `logit_bias`, `echo`. All behave as on vLLM's other backends.
 
+- `feat/quality-upstream`: `scripts/serve_check.py tools` (in the default
+  set): `auto` with and without a needed tool, `required` for a greeting, and
+  a named tool for a question that fits the other tool, with thinking on and
+  off. The streamed `required` call parses as well. `scripts/greedy_check.py`
+  matches its saved outputs 4/4 after the expert refactor, and
+  `scripts/bench_q4_stream.py` checks the Q4 streams against host math.
+
 ## Capabilities
 
 | Capability | Status |
@@ -470,24 +628,31 @@ Uncertainty:
 | Temperature, top-k <= 1,024, top-p, seed | Model-side sampler on the host; a seeded request can draw differently when a co-batched request forces vLLM's host sampler |
 | Penalties, min-p, larger top-k, logprobs | vLLM's host sampler (per-step fallback) |
 | Structured output, tool calls, reasoning parser | Through vLLM (host grammar, gemma4 parsers) |
-| `tool_choice="required"` or a named tool | Not enforced: vLLM 0.32's gemma4 tool parser skips the JSON constraint for them (the model answers as for `auto`) and has no structural tag; the same on every backend |
+| `tool_choice="required"` or a named tool | Enforced (`feat/quality-upstream`): `gemma4_tt/tool_parser.py`, see Tool choice |
 | `n > 1`, `logit_bias`, `echo` | Supported |
 | Embeddings endpoint | No (generative model only) |
 | `prompt_logprobs` | No (refused by the TT plugin) |
-| Async decode, device sampling, penalties or grammar | No: evaluated, about 4% at batch 1 (see Device sampling and async decode) |
+| Async decode, device sampling, penalties or grammar | No: evaluated twice; the ttnn-op top-k path saves 1.2% at batch 1 (see Device sampling and async decode) |
+| Q4_0 experts (exact checkpoint integers) | Experimental, accuracy runs only: batch-1 decode kernels, no Q4 prefill (see Q4_0 decode experts) |
 | vLLM Python streaming-input sessions | No: can resume prefill off the block grid |
 | Multimodal, speculative decoding, data parallel | No (MTP: no heads in this checkpoint, see above) |
 | KV pool size | `GEMMA4_KV_POOL_GIB` (default 2.5 GiB per chip) |
 
 ## Future work
 
-- **Quality: a Q4_0 expert kernel.** The largest accuracy loss is BFP4's
-  representation of the QAT weights (Model quality). The decode streams could
-  read Q4_0 blocks (4.5 bits per value) and dequantize in the kernel; prefill
-  would need the same in its expert matmuls.
-- **Device sampling and async decode.** Worth about 4% at batch 1 and 10% at
-  batch 4 with today's ops; a fused LM-head top-k (candidates per 8,192-column
-  piece, written by the matmul's own cores) would make it pay more.
+- **Quality: Q4_0 serving.** The decode kernels exist and cut decode KL from
+  0.457 to 0.286. Serving needs:
+  - an expert-major prefill kernel that dequantizes Q4_0 inside the matmul and
+    keeps each weight tile for all of an expert's chunks;
+  - batch-2-4 versions of the down kernel (gate|up already places one token
+    per core);
+  - compact down step tiles (11 of 32 rows are used today, 0.75 GB per chip);
+  - a smaller KV pool for the steps (about 0.9 GB per chip compact).
+
+  A persistent zeroed L1 buffer would save 6 us per gate|up op.
+- **Device sampling and async decode.** ttnn ops give only 1.2% at batch 1. A
+  fused LM-head top-k (per-core candidates written by the matmul's cores) and
+  a device embedding are the prerequisites.
 - **Batch 2-4 decode.** The router (`topk_router_gpt`, 68 us per layer
   against 36 us for the batch-1 router op, about 1 ms per step), 151 norm ops
   per step and generic attention now lead; the batch-1 compact boundaries
@@ -495,8 +660,9 @@ Uncertainty:
 - **Prefill.** About 1,700 tokens/s at 2,048. The all-gathers (15%) are
   link-bound on one Ethernet link; the gate|up sparse matmul uses 24 of 64
   cores; the expert row gathers and the gather back still cost 6 ms per layer.
-- **Tool choice.** A structural tag for Gemma 4's native tool-call syntax in
-  vLLM would make `required` and named tool choice enforceable.
+- **Tool choice upstream.** The plugin in `gemma4_tt/tool_parser.py` can go
+  once vLLM sets `structural_tag_model` for gemma4 and pins xgrammar >= 0.2.9
+  (asked for in vllm-project/vllm#53363).
 - **Validation.** More GPQA questions or seeds before comparing precision
   choices.
 
@@ -512,5 +678,8 @@ Uncertainty:
     GEMMA4_KV_POOL_GIB=0.2 pixi run serve-gemma4 --max-model-len 4096   # then:
     pixi run python scripts/serve_check.py preempt
     pixi run python scripts/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb 1 --batch 4
+    pixi run python scripts/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb 1 --precision expert_q4=1
+    pixi run python scripts/bench_q4_stream.py --seeds 2
+    pixi run python scripts/q4_emulation.py results/q4/emulation.json q4exact q4clamp bfp4
     uv run --no-project --with-requirements scripts/gpqa_eval.requirements.txt \
         python scripts/gpqa_eval.py --count 40 --out results/quality/gpqa-<label>

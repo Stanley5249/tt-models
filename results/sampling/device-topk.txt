@@ -1,0 +1,13 @@
+Device top-k candidates from the per-chip fp32 row-major logits [1, 1, B, 131072]
+(feat/quality-upstream, one-off script; trace-replay device time, host wall time for reads).
+
+Path: typecast to bf16, reshape [B * 32, 4096], tilize, ttnn.topk(k=64), read values + indices.
+A reshape of the fp32 row fails: the row-major page (512 KB) needs 2.2 MB of L1 per core.
+
+B   device ops   candidate read   total    today: full fp32 read + host top-64
+1   0.307 ms     0.204 ms         0.51 ms  0.73 ms
+4   2.207 ms     0.226 ms         2.43 ms  2.53 ms
+
+Parts at B=1: typecast + reshape + tilize 0.142 ms, topk k=32 on [32, 4096] 0.080 ms.
+Saves 0.22 ms per step at batch 1 (1.2% of TPOT) and nothing at batch 4, before the
+fp32 gather a greedy-exact version would need. Not built.
