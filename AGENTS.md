@@ -1,5 +1,10 @@
 # tt-models agent notes
 
+## Checks
+
+- `just check` is the gate (format checks, ruff, pyrefly); `just test` runs host tests and `just test-device` the N300 ones.
+- `pyproject.toml` parks ruff rules and pyrefly error kinds that still have findings under "Not yet fixed". Remove one family per change, fix its findings, and keep the gate passing.
+
 ## Observed behaviour (unverified, dated)
 
 These were seen on this machine (N300d, ttnn 0.81.1+conda.8, vLLM 0.32.0) and have no confirmed root cause. Update or remove an entry when it is confirmed or no longer reproduces.

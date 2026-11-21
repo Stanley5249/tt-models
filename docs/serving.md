@@ -65,6 +65,7 @@ Run what the change can affect, from the repository root. `py` stands for `pixi 
 
 | What | Command |
 | --- | --- |
+| Format, lint, types | `just check` |
 | Host logic | `just test` |
 | Device paths, random weights | `just test-device` |
 | One kernel against torch or ttnn | `py scripts/kernels/<name>_check.py` |
