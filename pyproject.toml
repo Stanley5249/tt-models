@@ -86,20 +86,98 @@ pyrefly = "*"
 [tool.pixi.environments]
 tools = { features = ["tools"], no-default-feature = true }
 
+[tool.pyrefly]
+preset = "strict"
+project-includes = ["src", "scripts", "tests"]
+# The tools environment has no runtime packages; resolve imports in the default one.
+python-interpreter-path = ".pixi/envs/default/bin/python"
+# ttnn registers its ops at import time, so static analysis sees few of its
+# attributes; treat it as untyped rather than report every op.
+replace-imports-with-any = ["ttnn", "ttnn.*"]
+# Scripts import their siblings, as Python does when it runs them.
+search-path = ["src", "scripts/accuracy", "scripts/serve"]
+
+# Not yet fixed; remove one kind per change.
+[tool.pyrefly.errors]
+implicit-any-parameter = false
+implicit-any-type-argument = false
+missing-attribute = false
+implicit-any-empty-container = false
+unbound-name = false
+bad-argument-type = false
+implicit-any-lambda = false
+missing-import = false
+bad-assignment = false
+bad-return = false
+not-callable = false
+possibly-uninitialized-attribute = false
+implicit-any-attribute = false
+method-assign = false
+unsupported-operation = false
+
 [tool.pytest.ini_options]
 addopts = "-m 'not device'"
 markers = ["device: needs the N300 (run with `pytest -m device`)"]
 testpaths = ["tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
-# B905: the zips pair sequences built to the same length. E741: H, I and E
-# name model dimensions, as in the checkpoint config.
-ignore = ["B905", "E741"]
+select = ["ALL"]
+ignore = [
+  "COM812",  # conflicts with the formatter
+  "CPY001",  # no per-file copyright headers
+  "FBT003",  # ttnn's API takes positional booleans
+  "B905",  # the zips pair sequences built to the same length
+  "E741",  # H, I and E name model dimensions, as in the checkpoint config
+  "N806",  # the same dimension names as locals
+  "PLR2004",  # tile sizes and hardware constants read better inline
+  "PLR0913",  # op builders mirror their kernels' runtime arguments
+  "PLR0917",  # same
+  "C901",  # device code reads top to bottom like the kernels it drives
+  "PLR0915",  # same
+  "PLC0415",  # lazy imports keep ttnn and vLLM out of host-only paths
+  "TRY003",  # messages stay at the raise site
+  "EM101",  # same
+  "EM102",  # same
+  # Not yet fixed; remove one family per change.
+  "ANN",  # annotations in src/
+  "D",  # Google docstrings in src/
+  "E501",  # docstrings and strings over the default width
+  # Single rules with few findings each.
+  "ARG001",
+  "ARG002",
+  "ARG003",
+  "FBT001",
+  "FBT002",
+  "FURB171",
+  "N812",
+  "PIE810",
+  "PLW2901",
+  "PLW3301",
+  "PT011",
+  "PT018",
+  "PTH123",
+  "RET504",
+  "RUF005",
+  "RUF007",
+  "RUF012",
+  "S101",
+  "S310",
+  "S311",
+  "SIM115",
+  "SIM300",
+  "SLF001",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
+# Scripts and tests are entry points, not API: no annotations or docstrings
+# required, and they print and assert.
+"scripts/**" = ["ANN", "D", "T201", "INP001", "S101", "SLF001"]
+"tests/**" = ["ANN", "D", "INP001", "S101", "SLF001", "PLR2004"]
 # The timed lambdas run within their own loop iteration.
-"scripts/kernels/*" = ["B023"]
+"scripts/kernels/*" = ["ANN", "D", "T201", "INP001", "S101", "SLF001", "B023"]
 
 [tool.ruff.format]
 line-ending = "lf"
