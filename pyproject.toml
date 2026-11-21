@@ -92,23 +92,23 @@ testpaths = ["tests"]
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-  "COM812",  # conflicts with the formatter
-  "CPY001",  # no per-file copyright headers
-  "FBT003",  # ttnn's API takes positional booleans
-  "B905",  # the zips pair sequences built to the same length
-  "E741",  # H, I and E name model dimensions, as in the checkpoint config
-  "N806",  # the same dimension names as locals
-  "PLR2004",  # tile sizes and hardware constants read better inline
-  "PLR0913",  # op builders mirror their kernels' runtime arguments
-  "PLR0917",  # same
-  "C901",  # device code reads top to bottom like the kernels it drives
-  "PLR0915",  # same
-  "PLC0415",  # lazy imports keep ttnn and vLLM out of host-only paths
-  "TRY003",  # messages stay at the raise site
-  "EM101",  # same
-  "EM102",  # same
-  "S101",  # internal assertions document kernel layout invariants
-  "S311",  # benchmark inputs and cache salts need no cryptography
+  "COM812", # conflicts with the formatter
+  "CPY001", # no per-file copyright headers
+  "FBT003", # ttnn's API takes positional booleans
+  "B905", # the zips pair sequences built to the same length
+  "E741", # H, I and E name model dimensions, as in the checkpoint config
+  "N806", # the same dimension names as locals
+  "PLR2004", # tile sizes and hardware constants read better inline
+  "PLR0913", # op builders mirror their kernels' runtime arguments
+  "PLR0917", # same
+  "C901", # device code reads top to bottom like the kernels it drives
+  "PLR0915", # same
+  "PLC0415", # lazy imports keep ttnn and vLLM out of host-only paths
+  "TRY003", # messages stay at the raise site
+  "EM101", # same
+  "EM102", # same
+  "S101", # internal assertions document kernel layout invariants
+  "S311", # benchmark inputs and cache salts need no cryptography
 ]
 
 [tool.ruff.lint.pydocstyle]
