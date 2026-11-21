@@ -3,7 +3,7 @@
     uv run --no-project --with-requirements scripts/accuracy/gpqa_eval.requirements.txt \\
         python scripts/accuracy/gpqa_eval.py --count 10 --out artifacts/gpqa/<label>
 
-Needs a running `pixi run serve-gemma4` and Hugging Face access to the gated
+Needs a running `just serve-gemma4` and Hugging Face access to the gated
 Idavidrein/gpqa dataset. Port of tt-metal's
 models/demos/gemma4_26b_a4b_qb2/tests/benchmark.py (Apache-2.0): the same
 lm-eval task (r1_gpqa_diamond at the pinned dataset revision, choices shuffled

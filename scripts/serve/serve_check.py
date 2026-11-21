@@ -3,7 +3,7 @@ what else the server is doing.
 
     pixi run python scripts/serve/serve_check.py [--url http://127.0.0.1:8000] [check ...]
 
-Needs a running `pixi run serve-gemma4`. Every check but tools compares greedy token ids
+Needs a running `just serve-gemma4`. Every check but tools compares greedy token ids
 with the same request run alone:
 
 - isolation: four chat requests at once, stopping at different lengths, so decode
@@ -214,7 +214,7 @@ def check_seeded(url):
 def check_preempt(url):
     """Start the server with a pool too small for four of these requests:
 
-        GEMMA4_KV_POOL_GIB=0.2 pixi run serve-gemma4 --max-model-len 4096
+        GEMMA4_KV_POOL_GIB=0.2 just serve-gemma4 --max-model-len 4096
 
     vLLM admits a request only when its prompt fits, so the four short prompts
     start together and run out of KV pages as they grow: at 1,560 tokens each

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Serving points built like tt-inference-server's release client, against a
-# running `pixi run serve-gemma4`, so they can sit next to the official gates.
+# running `just serve-gemma4`, so they can sit next to the official gates.
 #
 # Usage: pixi run bash scripts/serve/bench_tis.sh <label> [point...]
 # A point is c<concurrency>-<isl>-<osl>-n<prompts>[-sampled]. Defaults to the

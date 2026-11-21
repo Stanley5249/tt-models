@@ -7,13 +7,16 @@ ttnn ops leave DRAM bandwidth unused.
 
 ## Setup
 
-The environment is a [pixi](https://pixi.sh) workspace: Python 3.12, a
-Tracy-enabled ttnn wheel, CPU torch, vLLM and vllm-tt-plugin, and this
-package installed editable.
+The environment is a [pixi](https://pixi.sh) workspace, configured in
+`pyproject.toml`: Python 3.12, a Tracy-enabled ttnn wheel, CPU torch, vLLM and
+vllm-tt-plugin, and this package installed editable. [just](https://just.systems)
+runs every recurring command (`just --list`), and reads machine-specific
+settings from a git-ignored `.env` (see `.env.example`). The formatter for
+Markdown, JSON and YAML runs through `bunx`, so it needs [bun](https://bun.sh).
 
-    pixi install
-    pixi run serve-gemma4          # OpenAI-compatible server on 127.0.0.1:8000
-    pixi run serve-qwen3-8b        # tt_transformers' Qwen3-8B
+    just install
+    just serve-gemma4          # OpenAI-compatible server on 127.0.0.1:8000
+    just serve-qwen3-8b        # tt_transformers' Qwen3-8B
 
 Everything reads the checkpoint from the Hugging Face cache and never
 downloads it, so fetch it once with
@@ -46,8 +49,9 @@ added to `MODELS` in `src/tt_models/vllm_plugin.py`. Code that two models share 
 
 ## Working on it
 
-    pixi run pytest                # host tests
-    pixi run pytest -m device      # device tests with random weights
+    just test                      # host tests
+    just test-device               # device tests with random weights
+    just check                     # format checks, lint and type check
     pixi run python scripts/accuracy/greedy_check.py --compare scripts/accuracy/greedy-base.json
 
 [docs/serving.md](docs/serving.md) lists which check covers what. Results

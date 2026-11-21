@@ -5,3 +5,5 @@ artifacts/
 logs/
 build/
 __pycache__/
+# Local settings for the justfile; .env.example lists them.
+.env

@@ -5,7 +5,7 @@ Measurements and the reasons behind each design live in
 [experiments](experiments/README.md); this guide links to them instead of
 repeating their numbers.
 
-    pixi run serve-gemma4                            # 127.0.0.1:8000, model "gemma4"
+    just serve-gemma4                            # 127.0.0.1:8000, model "gemma4"
     pixi run python scripts/serve/serve_check.py     # request lifecycle checks
 
 ## Architecture
@@ -82,7 +82,7 @@ decode were evaluated and not built
 `src/tt_models/models/gemma4/tool_parser.py` registers xgrammar's `gemma_4`
 structural tag, so `tool_choice="required"` and named tools are enforced
 ([tool choice](experiments/2026-11-21-tool-choice.md)). It needs the
-xgrammar override in `pixi.toml`.
+xgrammar override in `pyproject.toml`.
 
 ### Precision
 
@@ -122,14 +122,14 @@ Run what the change can affect, from the repository root. `py` stands for
 
 | What | Command |
 |---|---|
-| Host logic | `pixi run pytest` |
-| Device paths, random weights | `pixi run pytest -m device` |
+| Host logic | `just test` |
+| Device paths, random weights | `just test-device` |
 | One kernel against torch or ttnn | `py scripts/kernels/<name>_check.py` |
 | Greedy outputs | `py scripts/accuracy/greedy_check.py --compare scripts/accuracy/greedy-base.json` |
 | Decode accuracy against fp32 | `py scripts/accuracy/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb <k>` for k = 1..3 |
 | Standalone speed | `py scripts/bench/decode.py --batch <B> --steps 128 --trace`, `py scripts/bench/prefill.py` |
 | Serving lifecycle | `py scripts/serve/serve_check.py` against a running server |
-| Preemption | `GEMMA4_KV_POOL_GIB=0.2 pixi run serve-gemma4 --max-model-len 4096`, then `py scripts/serve/serve_check.py preempt` |
+| Preemption | `GEMMA4_KV_POOL_GIB=0.2 just serve-gemma4 --max-model-len 4096`, then `py scripts/serve/serve_check.py preempt` |
 | Serving speed | `pixi run bash scripts/serve/bench_tis.sh <label> c1-128-128-n8 c4-128-128-n16` |
 
 All kernel checks, one process each:

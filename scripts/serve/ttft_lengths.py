@@ -2,7 +2,7 @@
 
     pixi run python scripts/serve/ttft_lengths.py [seed]
 
-Needs a running `pixi run serve-gemma4`. Sends eight prompts of 400-3,700 tokens
+Needs a running `just serve-gemma4`. Sends eight prompts of 400-3,700 tokens
 (repository source, lengths drawn from the seed) one at a time, each with a fresh
 cache_salt and one output token, and prints the wall time of each request: the
 time to first token plus the response's finalization and transfer. A length
