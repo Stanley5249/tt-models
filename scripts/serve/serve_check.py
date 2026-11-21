@@ -56,7 +56,7 @@ LENGTHS = [64, 48, 32, 16]
 GREEDY = {"temperature": 0}
 
 
-def post(url: str, path: str, body: dict, stream: bool = False):
+def post(url: str, path: str, body: dict, *, stream: bool = False):
     req = urllib.request.Request(
         f"{url}{path}",
         data=json.dumps(body).encode(),
@@ -157,7 +157,7 @@ def compare(name: str, ref: list[int], got: list[int], need: int | None = None) 
     return ok
 
 
-def tokens(url: str, text: str, bos: bool) -> list[int]:
+def tokens(url: str, text: str, *, bos: bool) -> list[int]:
     ids = post(
         url, "/tokenize", {"model": MODEL, "prompt": text, "add_special_tokens": False}
     )["tokens"]

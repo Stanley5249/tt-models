@@ -29,7 +29,7 @@ class DecoderLayer:
             precision.mlp,
             precision.experts,
             precision.expert_fidelity,
-            precision.expert_q4,
+            expert_q4=precision.expert_q4,
         )
         self.input_ln = loader.put(
             f"L{idx}.input_ln",

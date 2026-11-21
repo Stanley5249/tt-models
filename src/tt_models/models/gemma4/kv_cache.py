@@ -160,7 +160,8 @@ class KvCache:
         for g, block, kind in zip(group_of, block_of, layer_types):
             block_sizes[g], sliding[g] = block, kind == SLIDING
         num_blocks = 1 + rows * sum(
-            _own_blocks(b, s, tokens, ring_tokens) for b, s in zip(block_sizes, sliding)
+            _own_blocks(b, tokens, ring_tokens, sliding=s)
+            for b, s in zip(block_sizes, sliding)
         )
         shapes = [
             (num_blocks, s.n_kv, block, s.head_dim)
@@ -186,7 +187,7 @@ class KvCache:
         next_block = 1
         for g, block in enumerate(self.block_sizes):
             n = -(-tokens // block)
-            own = _own_blocks(block, self.sliding[g], tokens, ring_tokens)
+            own = _own_blocks(block, tokens, ring_tokens, sliding=self.sliding[g])
             for r in range(rows):
                 if next_block + own > self.num_blocks or n > width:
                     raise ValueError(
@@ -198,6 +199,6 @@ class KvCache:
         return out
 
 
-def _own_blocks(block: int, sliding: bool, tokens: int, ring_tokens: int) -> int:
+def _own_blocks(block: int, tokens: int, ring_tokens: int, *, sliding: bool) -> int:
     n = -(-tokens // block)
     return min(n, -(-ring_tokens // block)) if sliding else n

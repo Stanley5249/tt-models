@@ -88,7 +88,7 @@ class LmHead:
         out.deallocate(True)
         return logits
 
-    def device(self, x: ttnn.Tensor, normed: bool = False) -> ttnn.Tensor:
+    def device(self, x: ttnn.Tensor, *, normed: bool = False) -> ttnn.Tensor:
         """Raw fp32 logits, row-major; the host applies the final softcap
         (three fp32 ops over the tile-padded [32, 65536] took 0.63 ms here)."""
         h = x if normed else rms_norm(x, self.final_norm, self.cfg.rms_norm_eps)
@@ -123,7 +123,7 @@ class LmHead:
             o.deallocate(True)
         return out
 
-    def read(self, out: ttnn.Tensor, softcap: bool = True) -> torch.Tensor:
+    def read(self, out: ttnn.Tensor, *, softcap: bool = True) -> torch.Tensor:
         """fp32 logits [rows, V] of a row-major [1, 1, rows, V/tp] per-chip output.
         (Copying into a kept host tensor and converting its shards was slower:
         1.0 ms against 0.66 ms for one row.)"""

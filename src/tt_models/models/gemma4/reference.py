@@ -145,6 +145,7 @@ class Reference:
     def forward(
         self,
         ids: torch.Tensor,
+        *,
         keep_hidden: bool = False,
         num_layers: int | None = None,
     ):

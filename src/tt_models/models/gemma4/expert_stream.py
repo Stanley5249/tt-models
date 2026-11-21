@@ -526,7 +526,7 @@ class MlpStream:
             ttnn.L1_MEMORY_CONFIG,
         )
 
-    def gate_up(self, x, w_gate_up, h, rows: int = 1, build=False):
+    def gate_up(self, x, w_gate_up, h, rows: int = 1, *, build=False):
         """h = gelu_tanh(x Wg) * (x Wu) for the token rows of x; w_gate_up: the interleaved per-chip
         [2816, 2 * 1152] BFP8 weight."""
         return gate_up_op(

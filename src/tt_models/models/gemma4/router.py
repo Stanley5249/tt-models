@@ -57,7 +57,7 @@ class Router:
 
         return row(ttnn.uint16), row(ttnn.bfloat16)
 
-    def __call__(self, x, w, ids, wts, build=False):
+    def __call__(self, x, w, ids, wts, *, build=False):
         """x: normed row form BF16 [1, 1, rows, H]; w: the [H, E] BF16 router weight (tile layout).
         build: return (program, tensors) to run merged with another op (expert_stream.run)."""
         crs = core_range_set(self.cores)

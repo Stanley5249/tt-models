@@ -8,7 +8,7 @@ TILE = 32
 
 
 def compute_config(
-    fidelity=ttnn.MathFidelity.HiFi2, fp32_acc=True, packer_l1_acc=True, approx=False
+    fidelity=ttnn.MathFidelity.HiFi2, *, fp32_acc=True, packer_l1_acc=True, approx=False
 ):
     return ttnn.WormholeComputeKernelConfig(
         math_fidelity=fidelity,

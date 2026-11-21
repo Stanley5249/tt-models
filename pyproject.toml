@@ -143,8 +143,6 @@ ignore = [
   "D",  # Google docstrings in src/
   "E501",  # docstrings and strings over the default width
   # Single rules with few findings each.
-  "FBT001",
-  "FBT002",
   "PT011",
   "PT018",
   "S101",

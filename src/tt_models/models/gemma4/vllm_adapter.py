@@ -251,7 +251,7 @@ class Gemma4ForCausalLM:
         return m.kv
 
     def _group_tables(
-        self, per_layer: list[torch.Tensor], rows: int, check: bool = False
+        self, per_layer: list[torch.Tensor], rows: int, *, check: bool = False
     ) -> torch.Tensor:
         """vLLM's per-layer page tables as int32 [groups, rows, width]."""
         tables = torch.stack([per_layer[i][:rows] for i in self._group_layer]).to(
@@ -300,7 +300,7 @@ class Gemma4ForCausalLM:
         start_pos,
         page_table,  # noqa: ARG002 - plugin API
         kv_cache,  # noqa: ARG002 - plugin API
-        enable_trace=False,
+        enable_trace=False,  # noqa: FBT002 - plugin API
         page_tables_per_layer=None,
         sampling_params=None,
         **_,

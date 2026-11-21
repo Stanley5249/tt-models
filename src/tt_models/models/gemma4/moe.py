@@ -78,6 +78,7 @@ class FeedForward:
         mlp_dtype=ttnn.bfloat8_b,
         expert_dtype=ttnn.bfloat4_b,
         expert_fidelity="LoFi",
+        *,
         expert_q4: bool = False,
     ):
         tp = loader.tp
