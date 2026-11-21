@@ -14,8 +14,6 @@ libhwloc = "*"
 libnuma = "*"
 mpc = "*"
 zstd = "*"
-# Test runner: `pytest` for host checks, `pytest -m device` for the N300 ones.
-pytest = "*"
 
 [activation.env]
 LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
@@ -32,6 +30,8 @@ TT_METAL_PROFILER_DIR = "$PIXI_PROJECT_ROOT/artifacts/profiler"
 [pypi-dependencies]
 # This repository's package (src/tt_models), editable.
 tt-models = { path = ".", editable = true }
+# Test runner: `pytest` for host checks, `pytest -m device` for the N300 ones.
+pytest = "*"
 # Stanley5249/tt-metal release: Tracy-enabled ttnn with SFPI and tt_transformers' models/.
 ttnn = { url = "https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.8/ttnn-0.81.1%2Bconda.8-cp312-cp312-linux_x86_64.whl" }
 # The torch pair tt-metal 0.81 is tested with, as CPU builds: PyPI's Linux
