@@ -78,7 +78,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/29/29/3a04944407207a5d214879ca5ca33c2bd3e65199a4e927051c1bdaaa4d50/outlines_core-0.2.14-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/2a/09/f8d8f8f31e4483c10a906437b4ce31bdf3d6d417b73fe33f1a8b59e34228/einops-0.8.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/2c/2e/bab212484b84c296974168021693278f8d73d87ebccc4a6cc04e5ae2a061/xgrammar-0.2.8-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/2c/62/e4721d8b8b9de685323717489a408521067a786cabc2b73ccd91aa9b9077/pyzmq-27.3.0-cp312-abi3-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/2d/00/d90b10b962b4277f5e64a78b6609968859ff86889f5b898c1a778c06ec00/lark-1.2.2-py3-none-any.whl
@@ -203,6 +202,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/eb/a3/b69efbf4143b5b9859b977770bbbabcc2796b702fa69dc40271e45cd5a56/prometheus_client-0.26.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ef/90/5d0096a325aa0f83ba7a3968bfb485b67e32c947bdf9cd0fcb4b485be718/filelock-4.2.10-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f8/1e/1e8ecc05ef034e9a95c18ed32d2ec07905a7cd2ca611a9d88e25ee1f4850/hf_xet-1.8.0-cp38-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/f8/c4/92e38d6a1282331e22ca55135a5c8ecd177c877d46be1a12cbb792817ad0/xgrammar-0.2.9-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/fa/ee/52232e48413d136c229e5a1be94839724e011a00ba287c5c133e1962c6da/cbor2-6.2.1-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/fb/76/641ae371508676492379f16e2fa48f4e2c11741bd63c48be4b12a6b09cba/aiosignal-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fc/16/963096d224b80909432dc16561a615fd33d2d13beef3ce4c63fa25e40867/huggingface_hub-1.33.0-py3-none-any.whl
@@ -1411,27 +1411,6 @@ packages:
   - socksio==1.* ; extra == 'socks'
   - zstandard>=0.18.0 ; extra == 'zstd'
   requires_python: '>=3.8'
-- pypi: https://files.pythonhosted.org/packages/2c/2e/bab212484b84c296974168021693278f8d73d87ebccc4a6cc04e5ae2a061/xgrammar-0.2.8-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-  name: xgrammar
-  version: 0.2.8
-  sha256: 4045b096735bb2523e0d874039a55994c1b390620d547c4a0d4f43b9a106177b
-  requires_dist:
-  - apache-tvm-ffi>=0.1.11
-  - pydantic
-  - torch>=1.10.0
-  - transformers>=4.38.0
-  - triton ; platform_machine == 'x86_64' and sys_platform == 'linux'
-  - numpy
-  - typing-extensions>=4.9.0
-  - cohere-melody==0.13.0 ; python_full_version >= '3.10' and extra == 'test'
-  - huggingface-hub[cli] ; extra == 'test'
-  - protobuf ; extra == 'test'
-  - pytest ; extra == 'test'
-  - sentencepiece<0.2.2 ; python_full_version < '3.10' and extra == 'test'
-  - sentencepiece ; python_full_version >= '3.10' and extra == 'test'
-  - tiktoken ; extra == 'test'
-  - mlx-lm ; platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'metal'
-  requires_python: '>=3.8,<4'
 - pypi: https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl
   name: referencing
   version: 0.37.0
@@ -3054,6 +3033,27 @@ packages:
   requires_dist:
   - pytest ; extra == 'tests'
   requires_python: '>=3.8'
+- pypi: https://files.pythonhosted.org/packages/f8/c4/92e38d6a1282331e22ca55135a5c8ecd177c877d46be1a12cbb792817ad0/xgrammar-0.2.9-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+  name: xgrammar
+  version: 0.2.9
+  sha256: 3326c9fb5864922fde7b52efea9c7e83b91a8f5bf81dbb5f5164d23410dfdae4
+  requires_dist:
+  - apache-tvm-ffi>=0.1.11
+  - pydantic
+  - torch>=1.10.0
+  - transformers>=4.38.0
+  - triton ; platform_machine == 'x86_64' and sys_platform == 'linux'
+  - numpy
+  - typing-extensions>=4.9.0
+  - cohere-melody==0.13.0 ; python_full_version >= '3.10' and extra == 'test'
+  - huggingface-hub[cli] ; extra == 'test'
+  - protobuf ; extra == 'test'
+  - pytest ; extra == 'test'
+  - sentencepiece<0.2.2 ; python_full_version < '3.10' and extra == 'test'
+  - sentencepiece ; python_full_version >= '3.10' and extra == 'test'
+  - tiktoken ; extra == 'test'
+  - mlx-lm ; platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'metal'
+  requires_python: '>=3.8,<4'
 - pypi: https://files.pythonhosted.org/packages/fa/ee/52232e48413d136c229e5a1be94839724e011a00ba287c5c133e1962c6da/cbor2-6.2.1-cp312-cp312-manylinux_2_28_x86_64.whl
   name: cbor2
   version: 6.2.1

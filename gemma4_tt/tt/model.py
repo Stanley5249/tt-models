@@ -67,6 +67,7 @@ class Precision:
     lm_head: ttnn.DataType = ttnn.bfloat8_b
     kv_cache: ttnn.DataType = ttnn.bfloat8_b
     expert_fidelity: str = "LoFi"  # compute fidelity of the expert sparse matmuls
+    expert_q4: bool = False  # experimental Q4_0 experts (tt/expert_q4.py): batch-1 decode only
 
     @classmethod
     def parse(cls, spec: str) -> "Precision":
@@ -75,7 +76,7 @@ class Precision:
         kwargs = {}
         for item in filter(None, spec.split(",")):
             key, value = item.split("=")
-            kwargs[key] = value if key.endswith("fidelity") else names[value]
+            kwargs[key] = value if key.endswith("fidelity") else value == "1" if key == "expert_q4" else names[value]
         return cls(**kwargs)
 
     def tag(self) -> str:
@@ -91,7 +92,7 @@ class DecoderLayer:
         self.sliding = cfg.layer_types[idx] == "sliding_attention"
         self.eps = cfg.rms_norm_eps
         self.attn = Attention(loader, ckpt, cfg, idx, precision.attention)
-        self.ff = FeedForward(loader, ckpt, cfg, idx, precision.mlp, precision.experts, precision.expert_fidelity)
+        self.ff = FeedForward(loader, ckpt, cfg, idx, precision.mlp, precision.experts, precision.expert_fidelity, precision.expert_q4)
         self.input_ln = loader.put(f"L{idx}.input_ln", lambda: norm_weight(ckpt.get(p + "input_layernorm.weight")), layout=rm)
         self.post_attn_ln = loader.put(
             f"L{idx}.post_attn_ln", lambda: norm_weight(ckpt.get(p + "post_attention_layernorm.weight")), layout=rm

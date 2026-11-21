@@ -3,7 +3,7 @@ what else the server is doing.
 
     pixi run python scripts/serve_check.py [--url http://127.0.0.1:8000] [check ...]
 
-Needs a running `pixi run serve-gemma4`. Every check compares greedy token ids
+Needs a running `pixi run serve-gemma4`. Every check but tools compares greedy token ids
 with the same request run alone:
 
 - isolation: four chat requests at once, stopping at different lengths, so decode
@@ -23,7 +23,10 @@ with the same request run alone:
 - seeded: a sampled request with a seed, twice;
 - preempt (not in the default set): four requests that outgrow a small KV pool
   together, so vLLM preempts and resumes some; needs the server started with a
-  small pool, see check_preempt.
+  small pool, see check_preempt;
+- tools: tool_choice auto, required and named, with and without thinking: a
+  required or named choice must return a call (the named one) even for a
+  prompt that needs no tool, and auto must still answer such a prompt in text.
 
 The prefix check compares a cache hit with a fresh prefill: the hit reads BFP8
 K/V from the cache where the fresh prefill used BF16 rows, so a near-tie can
@@ -238,6 +241,62 @@ def check_preempt(url):
     return ok
 
 
+WEATHER = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city.",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    },
+}
+CLOCK = {
+    "type": "function",
+    "function": {
+        "name": "get_time",
+        "description": "Current local time in a city.",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    },
+}
+
+
+def check_tools(url):
+    """Tool choice is enforced by the structural tag of gemma4_tt/tool_parser.py."""
+    tools = [WEATHER, CLOCK]
+    named = {"type": "function", "function": {"name": "get_time"}}
+    cases = [  # (prompt, tool_choice, expected call or None for a text answer)
+        ("What's the weather in Taipei?", "auto", "get_weather"),
+        ("Hi there, how are you?", "auto", None),
+        ("Hi there, how are you?", "required", {"get_weather", "get_time"}),
+        ("What's the weather in Taipei?", named, "get_time"),
+    ]
+    ok = True
+    for thinking in (False, True):
+        for prompt, choice, want in cases:
+            body = {
+                "model": MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 1024, **GREEDY,
+                "tools": tools, "tool_choice": choice, "chat_template_kwargs": {"enable_thinking": thinking},
+            }
+            choice0 = post(url, "/v1/chat/completions", body)["choices"][0]
+            calls = choice0["message"].get("tool_calls") or []
+            names = [c["function"]["name"] for c in calls]
+            args_ok = all(isinstance(json.loads(c["function"]["arguments"]), dict) for c in calls)
+            if want is None:
+                good = not calls and bool(choice0["message"].get("content"))
+            else:
+                if isinstance(choice, str):
+                    good = bool(names) and set(names) <= ({want} if isinstance(want, str) else want)
+                else:  # a named choice allows exactly one call, to that tool
+                    good = names == [want]
+                good &= args_ok
+                # OpenAI (and vLLM) finish a forced named call with "stop"
+                good &= choice0["finish_reason"] in (("tool_calls",) if isinstance(choice, str) else ("stop", "tool_calls"))
+            label = choice if isinstance(choice, str) else "named get_time"
+            print(f"[{'OK' if good else 'DIFF'}] {label}, thinking {'on' if thinking else 'off'}: "
+                  f"{names or repr((choice0['message'].get('content') or '')[:60])} ({choice0['finish_reason']})", flush=True)
+            ok &= good
+    return ok
+
+
 CHECKS = {
     "isolation": check_isolation,
     "raw": check_raw,
@@ -245,6 +304,7 @@ CHECKS = {
     "cancel": check_cancel,
     "prefix": check_prefix,
     "seeded": check_seeded,
+    "tools": check_tools,
 }
 EXTRA_CHECKS = {"preempt": check_preempt}
 
