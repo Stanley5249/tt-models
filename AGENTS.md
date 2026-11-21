@@ -1,4 +1,4 @@
-# tt-vllm agent notes
+# tt-models agent notes
 
 ## Observed behaviour (unverified, dated)
 
