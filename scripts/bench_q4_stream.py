@@ -63,7 +63,6 @@ def main():
 
         dn = ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous()  # [E, I, H]
         qd, sd = q4_factor(dn, dim=-2)  # blocks along I
-        dn_exact = (qd * sd.repeat_interleave(TILE, -2)).to(torch.float64)
         kt = st.kt
         qd_dev = loader.put(f"L{args.layer}.exp_down_q4_p{st.down_width}", lambda: pad_down(qd, st.down_width)[None], ttnn.bfloat4_b, shard_dim=-2)
 

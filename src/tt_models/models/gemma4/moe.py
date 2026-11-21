@@ -20,15 +20,14 @@ from tt_models.common.ccl import all_reduce
 from tt_models.common.config import DRAM, HIFI2, HIFI4, L1, TILE, compute_config
 from tt_models.common.norm import rms_norm
 from tt_models.common.weights import WeightLoader, norm_weight
-from tt_models.models.gemma4.boundary import Router
+from tt_models.models.gemma4.expert_plan import matmul_1d_config, plan_chunks
 from tt_models.models.gemma4.expert_q4 import Q4Experts
 from tt_models.models.gemma4.expert_stream import ExpertStream, MlpStream, pad_down, run
+from tt_models.models.gemma4.router import Router
 
 _STREAMS: dict[tuple, object] = {}
 
 
-# Decode batches up to this many tokens take the expert streams (their scratch holds 32 slots).
-STREAM_ROWS = 4
 
 
 def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:
@@ -54,41 +53,9 @@ def mlp_stream(mesh, cfg, mlp_pad: int) -> MlpStream:
     return _STREAMS[key]
 
 
-# Expert-major prefill rounds its chunk count up to a multiple of this (see _plan_chunks).
-CHUNK_GRANULE = 16
-
 # HF uses gelu_pytorch_tanh. Fusing GELU_TANH into the multiply halves the mean
 # error of ttnn.gelu(fast_and_approximate_mode=True) and saves one op.
 GELU_TANH = ttnn.UnaryOpType.GELU_TANH
-
-
-def _matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8), in0_block_w: int | None = None):
-    n_tiles = n // TILE
-    # The 1D mcast kernel needs every core of a full rectangle to own work.
-    for per_core_n in range(1, n_tiles + 1):
-        cores = -(-n_tiles // per_core_n)
-        shape = next(((x, cores // x) for x in range(grid[0], 0, -1) if cores % x == 0 and cores // x <= grid[1]), None)
-        if shape:
-            gx, gy = shape
-            break
-    # Large K blocks matter for these DRAM-bound decode shapes: measured in
-    # scripts/bench_sparse_matmul.py, down (K=11 tiles) took 154 us at
-    # in0_block_w=1 and 92 us at 11; gate_up (K=88) 194 us at 8 and 184 us at 22.
-    k_tiles = k // TILE
-    in0_block_w = in0_block_w or next(w for w in (22, 11, 8, 4, 2, 1) if k_tiles % w == 0)
-    return ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
-        compute_with_storage_grid_size=ttnn.CoreCoord(gx, gy),
-        in0_block_w=in0_block_w,
-        out_subblock_h=1,
-        out_subblock_w=1,
-        out_block_h=m_tiles,
-        out_block_w=per_core_n,
-        per_core_M=m_tiles,
-        per_core_N=per_core_n,
-        fuse_batch=False,
-        fused_activation=None,
-        mcast_in0=True,
-    )
 
 
 class FeedForward:
@@ -349,8 +316,8 @@ class FeedForward:
             # Few K blocks: with packer L1 accumulation every block boundary rounds the
             # partial sum to the BF16 output (in0_block_w=8 raised prefill KL 0.32 -> 0.36).
             self._chunk_cfgs[rows] = (
-                _matmul_1d_config(m, 2 * self.expert_pad, self.hidden, in0_block_w=44 if m <= 2 else 22),
-                _matmul_1d_config(m, self.down_width, self.expert_local),
+                matmul_1d_config(m, 2 * self.expert_pad, self.hidden, in0_block_w=44 if m <= 2 else 22),
+                matmul_1d_config(m, self.down_width, self.expert_local),
             )
         return self._chunk_cfgs[rows]
 
@@ -361,40 +328,6 @@ class FeedForward:
         follows their rows: a 2,048-token piece takes 1.28 s with 32-row chunks,
         1.34 s with 64 and 1.54 s with 128 (README text, see docs/serving.md)."""
         return TILE
-
-    def _plan_chunks(self, ids: torch.Tensor, weights: torch.Tensor, rows: int):
-        """Host layout of expert-major prefill for top-k ids/weights [T, k].
-
-        Each expert's (token, slot) pairs fill chunks of `rows` rows; padding rows
-        gather token 0 and get weight 0, which zeroes their results. The chunk count rounds up to a
-        multiple of CHUNK_GRANULE with zero chunks: it depends on the routing, and
-        every new count would compile new programs. Returns the gather index into
-        the token rows [C * rows], the row weights [C * rows], the expert of every
-        chunk [C], and for each (slot j, token t) in slot-major order the row that
-        holds its result [k * T].
-        """
-        tokens, k = ids.shape
-        flat = ids.flatten()
-        order = torch.argsort(flat, stable=True)
-        counts = torch.bincount(flat, minlength=self.n_experts)
-        chunks = (counts + rows - 1) // rows
-        real = int(chunks.sum())
-        extra = -(-real // CHUNK_GRANULE) * CHUNK_GRANULE - real
-        chunk_expert = torch.cat([torch.repeat_interleave(torch.arange(self.n_experts), chunks), torch.zeros(extra, dtype=torch.long)])
-        # first row of each expert's region, then the row of every sorted pair
-        region = torch.cumsum(chunks * rows, 0) - chunks * rows
-        sorted_e = flat[order]
-        rank = torch.arange(flat.numel()) - (torch.cumsum(counts, 0) - counts)[sorted_e]
-        row_of_sorted = region[sorted_e] + rank
-        total = (real + extra) * rows
-        gather = torch.zeros(total, dtype=torch.int32)
-        row_w = torch.zeros(total)
-        gather[row_of_sorted] = (order // k).int()
-        row_w[row_of_sorted] = weights.flatten()[order].float()
-        row_of_pair = torch.empty(flat.numel(), dtype=torch.int32)
-        row_of_pair[order] = row_of_sorted.int()
-        back = row_of_pair.reshape(tokens, k).T.contiguous().flatten()  # slot-major
-        return gather, row_w, chunk_expert, back
 
     def _experts_prefill(self, x: ttnn.Tensor, normed: ttnn.Tensor) -> ttnn.Tensor:
         """Expert-major experts for a prompt chunk x [1, 1, T, H].
@@ -413,7 +346,7 @@ class FeedForward:
         weights.deallocate(True)
         ids.deallocate(True)
         rows = self.chunk_rows(tokens)
-        gather, row_w, chunk_expert, back = self._plan_chunks(id_host, w_host, rows)
+        gather, row_w, chunk_expert, back = plan_chunks(id_host, w_host, rows, self.n_experts)
         n_chunks = chunk_expert.numel()
 
         rep = ttnn.ReplicateTensorToMesh(self.mesh)

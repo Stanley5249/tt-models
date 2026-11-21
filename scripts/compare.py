@@ -99,7 +99,8 @@ def main():
     import ttnn
 
     from tt_models.common.mesh import open_n300
-    from tt_models.models.gemma4.model import Gemma4TT, Precision
+    from tt_models.models.gemma4.config import Precision
+    from tt_models.models.gemma4.model import Gemma4TT
 
     rows = []
     with open_n300(trace_region_size=200_000_000 if args.trace else 0) as mesh:

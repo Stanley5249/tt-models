@@ -23,8 +23,9 @@ import torch
 from loguru import logger
 
 from tt_models.models.gemma4.checkpoint import Checkpoint, attention_dims
+from tt_models.models.gemma4.config import PREFILL_BUCKET, PREFILL_CHUNK, prefill_rows
 from tt_models.models.gemma4.kv_cache import KvCache, kv_groups
-from tt_models.models.gemma4.model import PREFILL_BUCKET, PREFILL_CHUNK, Gemma4TT, prefill_rows
+from tt_models.models.gemma4.model import Gemma4TT
 
 # Device DRAM per chip for the shared KV pool. Weights take 8.0 of 11.87 GiB;
 # the rest holds prefill activations, decode traces and their inputs.
@@ -232,7 +233,7 @@ class Gemma4ForCausalLM:
             ids = torch.zeros(rows, 1, dtype=torch.long)
             log_probs = None
             if len(active):
-                got, lp = sample(logits, sampling_params, start_pos[active], rows_idx=active, softcap=self.model.softcap)
+                got, lp = sample(logits, sampling_params, start_pos[active], rows_idx=active, softcap=self.model.head.softcap)
                 ids[active] = got
                 if lp is not None:
                     vals = torch.zeros(rows, LOGPROBS_K)

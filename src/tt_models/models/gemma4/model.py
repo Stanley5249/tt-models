@@ -8,146 +8,25 @@ The model holds no per-request state: every K/V row lives in the paged cache
 moved, preempted, resumed and share cached prefixes without telling the model.
 """
 
-from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import torch
 import ttnn
 from transformers.models.gemma4 import modeling_gemma4 as hf
 
-from tt_models.common.ccl import all_gather_compact, init_ccl
-from tt_models.common.config import DRAM, HIFI2, TILE, dram_sharded, width_sharded_l1
-from tt_models.common.norm import rms_norm
-from tt_models.common.weights import WeightLoader, norm_weight
-from tt_models.models.gemma4.attention import CHUNK_ALIGN, Attention, PrefillChunk
-from tt_models.models.gemma4.boundary import Boundary, compact_tensor, to_compact
+from tt_models.common.ccl import init_ccl
+from tt_models.common.config import DRAM
+from tt_models.common.weights import WeightLoader
+from tt_models.models.gemma4.attention import CHUNK_ALIGN, PrefillChunk
+from tt_models.models.gemma4.boundary import Boundary
 from tt_models.models.gemma4.checkpoint import Checkpoint
+from tt_models.models.gemma4.compact import to_compact
+from tt_models.models.gemma4.config import PREFILL_BUCKET, PREFILL_CHUNK, STREAM_ROWS, Precision, prefill_rows
 from tt_models.models.gemma4.kv_cache import KvCache
+from tt_models.models.gemma4.layer import DecoderLayer
+from tt_models.models.gemma4.lm_head import LmHead
 from tt_models.models.gemma4.reference import embed_scale
 
-# The LM head is read as LM_SPLITS DRAM-sharded matmuls per chip: 2.5 -> 1.37 ms per
-# decode step against one interleaved matmul (scripts/bench_lm_head_dram.py).
-# A single DRAM-sharded matmul over all 65536 columns does not fit L1.
-LM_SPLITS = 16
-LM_CORES = 8
-# Longest piece of a prompt one prefill pass computes. It bounds activation memory
-# (the expert-major MoE gathers k = 8 rows per token) whatever chunk vLLM schedules.
-PREFILL_CHUNK = 4096
-# Prefill pieces are padded to a multiple of this many rows, so their programs are
-# built once per bucket (warmed at startup) instead of once per prompt length: a
-# never-seen length cost 0.6 s more on its first prefill. The padding costs about
-# 0.5 ms per row, so a short piece from position 0 (up to SHORT_PIECE tokens) pads
-# only to whole tiles; a later piece needs whole 128-row SDPA chunks anyway.
-PREFILL_BUCKET = 128
-SHORT_PIECE = 512
-
-
-def prefill_rows(tokens: int, start: int) -> int:
-    """The rows a prefill piece of `tokens` positions from `start` is padded to."""
-    step = TILE if start == 0 and tokens <= SHORT_PIECE else PREFILL_BUCKET
-    return -(-tokens // step) * step
-
-from tt_models.models.gemma4.moe import STREAM_ROWS, FeedForward  # noqa: E402
-
-
-@dataclass
-class Precision:
-    attention: ttnn.DataType = ttnn.bfloat8_b
-    mlp: ttnn.DataType = ttnn.bfloat8_b
-    experts: ttnn.DataType = ttnn.bfloat4_b
-    lm_head: ttnn.DataType = ttnn.bfloat8_b
-    kv_cache: ttnn.DataType = ttnn.bfloat8_b
-    expert_fidelity: str = "LoFi"  # compute fidelity of the expert sparse matmuls
-    expert_q4: bool = False  # experimental Q4_0 experts (tt/expert_q4.py): batch-1 decode only
-
-    @classmethod
-    def parse(cls, spec: str) -> "Precision":
-        """From "experts=bfp4,expert_fidelity=HiFi2"-style overrides."""
-        names = {"bf16": ttnn.bfloat16, "bfp8": ttnn.bfloat8_b, "bfp4": ttnn.bfloat4_b}
-        kwargs = {}
-        for item in filter(None, spec.split(",")):
-            key, value = item.split("=")
-            kwargs[key] = value if key.endswith("fidelity") else value == "1" if key == "expert_q4" else names[value]
-        return cls(**kwargs)
-
-    def tag(self) -> str:
-        names = {ttnn.bfloat16: "bf16", ttnn.bfloat8_b: "bfp8", ttnn.bfloat4_b: "bfp4"}
-        return "-".join(names[d] for d in (self.attention, self.mlp, self.experts, self.lm_head))
-
-
-class DecoderLayer:
-    def __init__(self, loader, ckpt, cfg, idx, precision: Precision):
-        p = f"layers.{idx}."
-        rm = ttnn.ROW_MAJOR_LAYOUT
-        self.idx = idx
-        self.sliding = cfg.layer_types[idx] == "sliding_attention"
-        self.eps = cfg.rms_norm_eps
-        self.attn = Attention(loader, ckpt, cfg, idx, precision.attention)
-        self.ff = FeedForward(loader, ckpt, cfg, idx, precision.mlp, precision.experts, precision.expert_fidelity, precision.expert_q4)
-        self.input_ln = loader.put(f"L{idx}.input_ln", lambda: norm_weight(ckpt.get(p + "input_layernorm.weight")), layout=rm)
-        self.post_attn_ln = loader.put(
-            f"L{idx}.post_attn_ln", lambda: norm_weight(ckpt.get(p + "post_attention_layernorm.weight")), layout=rm
-        )
-        self.scalar = float(ckpt.get(p + "layer_scalar").float().item())
-        self._raw = {n: ckpt.get(p + n + ".weight").float() for n in (
-            "post_attention_layernorm", "pre_feedforward_layernorm", "pre_feedforward_layernorm_2",
-            "post_feedforward_layernorm_1", "post_feedforward_layernorm_2", "post_feedforward_layernorm", "input_layernorm",
-        )}
-
-    def boundary_weights(self, mesh, next_norm: torch.Tensor):
-        """Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's input norm (or the final norm)."""
-        r = self._raw
-        attn = torch.stack([r["post_attention_layernorm"], r["pre_feedforward_layernorm"], r["pre_feedforward_layernorm_2"]])
-        ff = torch.stack([r["post_feedforward_layernorm_1"], r["post_feedforward_layernorm_2"], r["post_feedforward_layernorm"], next_norm])
-        self.w_attn_c = compact_tensor(mesh, attn)
-        self.w_ff_c = compact_tensor(mesh, ff)
-
-    def _rms(self, x, w):
-        return rms_norm(x, w, self.eps)
-
-    def _finish(self, x, attn_out):
-        a = self._rms(attn_out, self.post_attn_ln)
-        attn_out.deallocate(True)
-        x2 = ttnn.add(x, a)
-        x.deallocate(True)
-        a.deallocate(True)
-        f = self.ff(x2)
-        x3 = ttnn.add(x2, f)
-        x2.deallocate(True)
-        f.deallocate(True)
-        if self.scalar != 1.0:
-            x4 = ttnn.mul(x3, self.scalar)
-            x3.deallocate(True)
-            x3 = x4
-        return x3
-
-    def prefill(self, x, rope, kv, chunk):
-        h = self._rms(x, self.input_ln)
-        a = self.attn.prefill(h, rope, kv, chunk)
-        h.deallocate(True)
-        return self._finish(x, a)
-
-    def decode_compact(self, xc, h, rope, kv, page_table, cur_pos, b: Boundary, x_page0: int = 0):
-        """1-4 decode tokens on compact boundaries: xc compact FP32 residuals (one vector per row), h their
-        normed row form [1, 1, rows, H]. Returns the next (xc, h); h of the last layer is final-normed."""
-        rows = h.shape[2]
-        a = self.attn.decode_compact(h, rope, kv, page_table, cur_pos, b)
-        g = all_gather_compact(a)
-        a.deallocate(True)
-        x2, n, m_in, e_in = b.compact(rows), b.row(rows), b.row(rows), b.row(rows)
-        b.attn_tail(g, xc, self.w_attn_c, x2, n, m_in, e_in, x_page0=x_page0, rows=rows)
-        g.deallocate(True)
-        f = self.ff.decode_compact(n, m_in, e_in, b)
-        for t in (n, m_in, e_in):
-            t.deallocate(True)
-        g = all_gather_compact(f)
-        f.deallocate(True)
-        x3, h2 = b.compact(rows), b.row(rows)
-        b.ff_tail(g, x2, self.w_ff_c, x3, h2, self.scalar, rows=rows)
-        g.deallocate(True)
-        x2.deallocate(True)
-        return x3, h2
 
 class Gemma4TT:
     def __init__(
@@ -181,9 +60,7 @@ class Gemma4TT:
         cache_dir = Path(cache_root) / f"gemma4-26b-qat-tp{self.tp}-{precision.tag()}"
         loader = WeightLoader(mesh, cache_dir)
         self.layers = [DecoderLayer(loader, ckpt, cfg, i, precision) for i in range(self.num_layers)]
-        self.final_norm = loader.put("final_norm", lambda: norm_weight(ckpt.get("norm.weight")), layout=ttnn.ROW_MAJOR_LAYOUT)
-        self.lm_head = self._lm_head(loader, ckpt, precision.lm_head)
-        self.lm_in = width_sharded_l1(self.hidden, LM_CORES)
+        self.head = LmHead(mesh, loader, ckpt, cfg, precision.lm_head)
         self.boundary = Boundary(mesh, self.hidden, cfg.rms_norm_eps)
         # compact tiles of each layer type's [cos | sin] table in the batch-1 FP32 input
         self._cs_tiles = {
@@ -216,30 +93,6 @@ class Gemma4TT:
             cos, sin = rotary(torch.zeros(1, dtype=torch.float32), pos, kind)
             out[kind] = (cos[0], sin[0])
         return out
-
-    def _lm_head(self, loader, ckpt, dtype) -> list[ttnn.Tensor]:
-        """LM_SPLITS DRAM-sharded column blocks per chip; chip c split i holds vocab
-        columns c * V/tp + i * width onwards, so concatenating the splits on each chip
-        and then the chips gives the vocabulary order."""
-        per_chip = self.vocab // self.tp
-        width = per_chip // LM_SPLITS
-        mem = dram_sharded(self.mesh, self.hidden, width)
-        self.lm_cfg = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
-            in0_block_w=self.hidden // TILE // LM_CORES, per_core_M=1, per_core_N=width // TILE // LM_CORES, fused_activation=None
-        )
-        self.lm_out = width_sharded_l1(width, LM_CORES)
-        table = {}
-
-        def split(i):
-            if "t" not in table:
-                table["t"] = ckpt.get("embed_tokens.weight").T  # [H, V]
-            t = table["t"]
-            cols = [t[:, c * per_chip + i * width : c * per_chip + (i + 1) * width] for c in range(self.tp)]
-            return torch.cat(cols, -1).contiguous()[None, None]
-
-        heads = [loader.put(f"lm_head_ds{LM_SPLITS}_{i}", lambda i=i: split(i), dtype, shard_dim=-1, memory_config=mem) for i in range(LM_SPLITS)]
-        table.clear()
-        return heads
 
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
         return self.embed_table[ids] * self.embed_scale  # BF16 math, as HF
@@ -310,7 +163,7 @@ class Gemma4TT:
             if all_logits or c1 == end:
                 lo = 0 if all_logits else c1 - 1 - c0
                 last = ttnn.slice(x, [0, 0, lo, 0], [1, 1, c1 - c0, self.hidden])
-                out.append(self._logits(last))
+                out.append(self.head.logits(last))
             x.deallocate(True)  # `last` can be x itself or a view of it
         return torch.cat(out) if all_logits else out[-1][-1]
 
@@ -370,7 +223,7 @@ class Gemma4TT:
 
         Building the zero-filled [B, V] result of decode() costs ~1 ms per step; the vLLM
         adapter samples only the active rows. softcap=False returns the logits before
-        the final softcap (see softcap()), for a caller that caps only what it needs."""
+        the final softcap (LmHead.softcap), for a caller that caps only what it needs."""
         active = torch.nonzero(positions >= 0).flatten()
         if len(active) == tokens.shape[0]:
             return active, self._decode_rows(tokens, positions, tables, trace, softcap)
@@ -386,7 +239,7 @@ class Gemma4TT:
         if not trace:
             dev = {k: ttnn.to_device(v, self.mesh, memory_config=DRAM) for k, v in host.items()}
             out = self._decode_device(dev)
-            logits = self._read_logits(out, softcap)
+            logits = self.head.read(out, softcap)
             out.deallocate(True)
             for t in dev.values():
                 t.deallocate(True)
@@ -412,7 +265,7 @@ class Gemma4TT:
                 last[k] = src.clone()
             ttnn.copy_host_to_device_tensor(v, dev[k])
         ttnn.execute_trace(self.mesh, tid, cq_id=0, blocking=False)
-        return self._read_logits(out, softcap)
+        return self.head.read(out, softcap)
 
     def _prepare_traces(self):
         """Allocate every batch size's trace inputs and run its decode once, eagerly,
@@ -496,71 +349,10 @@ class Gemma4TT:
                 xc.deallocate(True)
                 h.deallocate(True)
             xc, h = xn, hn
-        out = self._logits_device(h, normed=True)
+        out = self.head.device(h, normed=True)
         xc.deallocate(True)
         h.deallocate(True)
         return out
-
-    # -- head ----------------------------------------------------------------
-
-    def _logits(self, x: ttnn.Tensor) -> torch.Tensor:
-        rows = x.shape[2]
-        if rows > TILE:
-            # ttnn.linear segfaults on the host for M > 32 against the 131072-wide
-            # LM head shard (ttnn 0.81), so multi-row logits go one tile at a time.
-            parts = []
-            for start in range(0, rows, TILE):
-                part = ttnn.slice(x, [0, 0, start, 0], [1, 1, min(start + TILE, rows), self.hidden])
-                parts.append(self._logits(part))  # row slices are views of x; do not free them
-            return torch.cat(parts)
-        out = self._logits_device(x)
-        logits = self._read_logits(out)
-        out.deallocate(True)
-        return logits
-
-    def _logits_device(self, x: ttnn.Tensor, normed: bool = False) -> ttnn.Tensor:
-        """Raw fp32 logits, row-major; the host applies the final softcap
-        (three fp32 ops over the tile-padded [32, 65536] took 0.63 ms here)."""
-        h = x if normed else rms_norm(x, self.final_norm, self.cfg.rms_norm_eps)
-        hs = ttnn.to_memory_config(h, self.lm_in)
-        if not normed:
-            h.deallocate(True)
-        rows = x.shape[2]
-        parts = []
-        for w in self.lm_head:
-            o = ttnn.linear(hs, w, program_config=self.lm_cfg, compute_kernel_config=HIFI2, memory_config=self.lm_out, dtype=ttnn.float32)
-            # Untilizing straight from L1 drops the tile padding, so the host reads
-            # B rows instead of 32 (9 ms -> under 1 ms for 131072 fp32 logits), and
-            # the row-major concat below only moves those rows.
-            parts.append(ttnn.untilize_with_unpadding(o, output_tensor_end=[0, 0, rows - 1, o.shape[3] - 1], memory_config=DRAM))
-            o.deallocate(True)
-        hs.deallocate(True)
-        out = ttnn.concat(parts, dim=-1)
-        for o in parts:
-            o.deallocate(True)
-        return out
-
-    def _read_logits(self, out: ttnn.Tensor, softcap: bool = True) -> torch.Tensor:
-        """fp32 logits [rows, V] of a row-major [1, 1, rows, V/tp] per-chip output.
-        (Copying into a kept host tensor and converting its shards was slower:
-        1.0 ms against 0.66 ms for one row.)"""
-        logits = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1)).float().reshape(-1, self.vocab)
-        return self.softcap(logits) if softcap else logits
-
-    def softcap(self, logits: torch.Tensor) -> torch.Tensor:
-        """Apply the final logit softcap in place (cap * tanh(x / cap)) and return logits.
-
-        It costs 0.34 ms for one row of 262,144 logits and 1.35 ms for four, and it
-        keeps the order, so greedy and top-k sampling can cap only their candidates.
-        numpy ufuncs run on this thread: torch's pool sleeps during the device wait,
-        and waking it once made the same softcap take 1 ms instead of 0.2 ms."""
-        cap = self.cfg.final_logit_softcapping
-        if cap:
-            arr = logits.numpy()
-            np.divide(arr, cap, out=arr)
-            np.tanh(arr, out=arr)
-            np.multiply(arr, cap, out=arr)
-        return logits
 
     def release_traces(self):
         """Release the captures; their inputs stay allocated for the next capture."""

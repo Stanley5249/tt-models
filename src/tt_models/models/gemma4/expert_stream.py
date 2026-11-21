@@ -32,19 +32,14 @@ gate|up [2816, 2304] BFP8 has 72 column tiles, so bank b holds the 3 pairs
 read as 4 "slots" of 9 K tiles with ids 0..3.
 """
 
-from pathlib import Path
-
 import torch
 import ttnn
 
-KERNELS = Path(__file__).parent / "kernels"
-TILE = 32
-BFP4_TILE = 576
-BFP8_TILE = 1088
-BF16_TILE = 2048
+from tt_models.common.config import TILE
+from tt_models.models.gemma4.generic_op import BF16_TILE, KERNELS, accessor, cb, tile_bytes
 
 
-def _bank_cores(mesh, banks, per_bank, exclude=()):
+def _bankline_cores(mesh, banks, per_bank, exclude=()):
     """per_bank logical cores per DRAM bank, nearest (Manhattan) to the bank's optimal NOC0 reader."""
     opt = mesh.get_optimal_dram_bank_to_logical_worker_assignment(ttnn.NOC.NOC_0, ttnn.MeshCoordinate(0, 0))
     grid = mesh.compute_with_storage_grid_size()
@@ -66,14 +61,6 @@ def _bank_cores(mesh, banks, per_bank, exclude=()):
         vcs.append(vc)
     cores = ttnn.CoreRangeSet([ttnn.CoreRange(c, c) for c, _, _ in placed])
     return [(c, b, r, v) for (c, b, r), v in zip(placed, vcs)], cores
-
-
-def _cb(cores, index, dtype, page, pages):
-    return ttnn.CBDescriptor(
-        total_size=page * pages,
-        core_ranges=cores,
-        format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=dtype, page_size=page)],
-    )
 
 
 def _kernels(cores, name, reader, writer, compute, fidelity=ttnn.MathFidelity.LoFi):
@@ -102,14 +89,6 @@ def _kernels(cores, name, reader, writer, compute, fidelity=ttnn.MathFidelity.Lo
             config=ttnn.ComputeConfigDescriptor(math_fidelity=fidelity, fp32_dest_acc_en=True, math_approx_mode=False),
         ),
     ]
-
-
-def _accessor(t):
-    return ttnn.TensorAccessorArgs(t).get_compile_time_args()
-
-
-def _tile_bytes(dtype):
-    return {ttnn.bfloat4_b: BFP4_TILE, ttnn.bfloat8_b: BFP8_TILE, ttnn.bfloat16: BF16_TILE}[dtype]
 
 
 def _const_row(mesh, values, dtype):
@@ -156,14 +135,14 @@ def gate_up_op(
     cb_x, cb_w, cb_sc, cb_rs, cb_ws, cb_act = 0, 1, 2, 3, 4, 16
     block_k = 11  # k-steps per weight block (22 tiles)
     blocks = kx // block_k
-    tb = _tile_bytes(w.dtype)
+    tb = tile_bytes(w.dtype)
     cbs = [
-        _cb(cores, cb_x, ttnn.bfloat16, BF16_TILE, kx),
-        _cb(cores, cb_w, w.dtype, tb, 3 * 2 * block_k),
-        _cb(cores, cb_sc, ttnn.bfloat16, BF16_TILE, 2 * slots_per_core),
-        _cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
-        _cb(cores, cb_ws, ttnn.bfloat16, 512, 1),
-        _cb(cores, cb_act, ttnn.bfloat16, BF16_TILE, 2),
+        cb(cores, cb_x, ttnn.bfloat16, BF16_TILE, kx),
+        cb(cores, cb_w, w.dtype, tb, 3 * 2 * block_k),
+        cb(cores, cb_sc, ttnn.bfloat16, BF16_TILE, 2 * slots_per_core),
+        cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
+        cb(cores, cb_ws, ttnn.bfloat16, 512, 1),
+        cb(cores, cb_act, ttnn.bfloat16, BF16_TILE, 2),
     ]
     reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
     for core, bank, _, vc, slot0, pair_j, act_pair in assign:
@@ -181,10 +160,10 @@ def gate_up_op(
     k_stride, up_delta = split or (0, 0)
     id_bytes = _id_bytes(max(a[4] for a in assign) + slots_per_core)
     reader_ct = [cb_w, cb_rs, slots_per_core, blocks, 2 * block_k, 2, tb, expert_bytes, int(split is not None), k_stride * tb, up_delta, id_bytes]
-    reader_ct += _accessor(ids)
+    reader_ct += accessor(ids)
     writer_ct = [cb_x, cb_sc, cb_act, cb_ws, kx, slots_per_core, pairs, n_scale, rows, slots_per_row, id_bytes]
     for t in (x, act, ids, weights, scale):
-        writer_ct += _accessor(t)
+        writer_ct += accessor(t)
     compute_ct = [cb_x, cb_w, cb_sc, cb_act, slots_per_core, blocks, block_k]
     program = ttnn.ProgramDescriptor(
         kernels=_kernels(cores, "gate_up", (reader_ct, reader_rt), (writer_ct, writer_rt), compute_ct, fidelity), semaphores=[], cbs=cbs
@@ -202,15 +181,15 @@ def down_op(
     [1, 1, rows, H] BF16 row-form tensor, or with compact_chunk0 a compact FP32 tensor (boundary.py) whose
     vector for row b starts at chunk compact_chunk0 + b * (chunks per vector)."""
     cb_in0, cb_w, cb_rs, cb_zero, cb_out = 0, 1, 3, 4, 16
-    tb = _tile_bytes(w.dtype)
+    tb = tile_bytes(w.dtype)
     compact = compact_chunk0 is not None
     out_dtype = ttnn.float32 if compact else ttnn.bfloat16
     cbs = [
-        _cb(cores, cb_in0, ttnn.bfloat16, BF16_TILE, 2 * kt),  # streamed one slot at a time
-        _cb(cores, cb_w, w.dtype, tb, 3 * kt * cols),
-        _cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
-        _cb(cores, cb_zero, ttnn.bfloat16, 64, 1),
-        _cb(cores, cb_out, out_dtype, 2 * BF16_TILE if compact else BF16_TILE, cols),
+        cb(cores, cb_in0, ttnn.bfloat16, BF16_TILE, 2 * kt),  # streamed one slot at a time
+        cb(cores, cb_w, w.dtype, tb, 3 * kt * cols),
+        cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
+        cb(cores, cb_zero, ttnn.bfloat16, 64, 1),
+        cb(cores, cb_out, out_dtype, 2 * BF16_TILE if compact else BF16_TILE, cols),
     ]
     chunks = 2 * n_tiles
     pad = -(-chunks // 64) * 64 - chunks  # chunks + pad: one compact vector
@@ -220,9 +199,9 @@ def down_op(
         reader_rt[core.x][core.y] = [w.buffer_address(), ids.buffer_address(), bank, vc, j0]
         zero = pad if compact and i == 0 else 0
         writer_rt[core.x][core.y] = [act.buffer_address(), out.buffer_address(), bank, j0, (compact_chunk0 or 0) + chunks, zero]
-    reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, _id_bytes(slots)] + _accessor(ids)
+    reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, _id_bytes(slots)] + accessor(ids)
     writer_ct = [cb_in0, cb_out, slots, cols, banks, n_tiles, int(compact), compact_chunk0 or 0, cb_zero, kt, rows, chunks + pad]
-    writer_ct += _accessor(act) + _accessor(out)
+    writer_ct += accessor(act) + accessor(out)
     compute_ct = [cb_in0, cb_w, cb_out, slots, kt, cols]
     program = ttnn.ProgramDescriptor(
         kernels=_kernels(cores, "down", (reader_ct, reader_rt), (writer_ct, writer_rt), compute_ct, fidelity), semaphores=[], cbs=cbs
@@ -248,9 +227,9 @@ class ExpertStream:
         self.gu_slots = self.slots // gate_up_readers
         self.down_cols = self.bank_cols // down_readers
         assert self.down_cols <= 4, "fp32 dest holds 4 tiles"
-        gu, self.gu_cores = _bank_cores(mesh, list(range(self.pairs)), gate_up_readers)
+        gu, self.gu_cores = _bankline_cores(mesh, list(range(self.pairs)), gate_up_readers)
         self.gu_assign = [(c, b, r, v, r * self.gu_slots, 0, b) for c, b, r, v in gu]
-        self.down_assign, self.down_cores = _bank_cores(mesh, list(range(self.banks)), down_readers)
+        self.down_assign, self.down_cores = _bankline_cores(mesh, list(range(self.banks)), down_readers)
         self.act_mem = ttnn.L1_MEMORY_CONFIG
 
     def act_tensor(self):
@@ -297,7 +276,7 @@ class MlpStream:
         self.per_bank = half // banks  # 3 pairs per bank
         self.row_tiles = 2 * self.per_bank  # 6 tiles per bank per K row
         self.h_tiles = half
-        gu, self.gu_cores = _bank_cores(mesh, list(range(banks)), self.per_bank, exclude=exclude)
+        gu, self.gu_cores = _bankline_cores(mesh, list(range(banks)), self.per_bank, exclude=exclude)
         # pair j of bank b: gate column b + 12 j -> h tile b + 12 j
         self.gu_assign = [(c, b, j, v, 0, j, b + banks * j) for c, b, j, v in gu]
         self.n_tiles = hidden // TILE
@@ -306,7 +285,7 @@ class MlpStream:
         assert half % down_slots == 0
         self.down_slots, self.down_kt = down_slots, half // down_slots  # 4 slots of 9 K tiles
         self.down_cols = self.bank_cols // down_readers
-        self.down_assign, self.down_cores = _bank_cores(mesh, list(range(banks)), down_readers)
+        self.down_assign, self.down_cores = _bankline_cores(mesh, list(range(banks)), down_readers)
         self.ids0 = _const_row(mesh, [0] * 16, ttnn.uint16)
         self.ids_down = _const_row(mesh, list(range(down_slots)) + [0] * (16 - down_slots), ttnn.uint16)
         self.ones = _const_row(mesh, [1.0] * 16, ttnn.bfloat16)

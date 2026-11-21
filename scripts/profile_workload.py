@@ -13,7 +13,8 @@ import ttnn
 
 from tt_models.common.mesh import open_n300
 from tt_models.models.gemma4.checkpoint import Checkpoint
-from tt_models.models.gemma4.model import Gemma4TT, Precision
+from tt_models.models.gemma4.config import Precision
+from tt_models.models.gemma4.model import Gemma4TT
 
 
 def signpost(name):

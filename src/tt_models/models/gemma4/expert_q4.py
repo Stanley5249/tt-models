@@ -19,7 +19,9 @@ store them compactly.
 import torch
 import ttnn
 
-from .expert_stream import BF16_TILE, KERNELS, TILE, _accessor, _cb, _id_bytes, _tile_bytes, pad_down
+from tt_models.common.config import TILE
+from tt_models.models.gemma4.expert_stream import _id_bytes, pad_down
+from tt_models.models.gemma4.generic_op import BF16_TILE, KERNELS, accessor, cb, tile_bytes
 
 KERNELS_Q4 = "expert_q4_gate_up"
 STEP_TOL = 0.05  # |w / s - round(w / s)| of a BF16-rounded q * s stays below 2^-9 * 8
@@ -70,17 +72,17 @@ def gate_up_q4_op(assign, cores, x, ids, weights, scale, w, steps, act, *, kx, s
     assert kx % block_k == 0, f"{kx} K tiles do not split into blocks of {block_k}"
     blocks = kx // block_k
     groups = -(-kx // TILE)
-    tb = _tile_bytes(w.dtype)
+    tb = tile_bytes(w.dtype)
     cbs = [
-        _cb(cores, cb_x, ttnn.bfloat16, BF16_TILE, kx),
-        _cb(cores, cb_w, w.dtype, tb, 3 * 2 * block_k),
-        _cb(cores, cb_sc, ttnn.bfloat16, BF16_TILE, 2 * slots_per_core),
-        _cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
-        _cb(cores, cb_ws, ttnn.bfloat16, 512, 1),
-        _cb(cores, cb_m, ttnn.bfloat16, BF16_TILE, 2 * groups * slots_per_core),
-        _cb(cores, cb_r, ttnn.float32, 2 * BF16_TILE, 2 * groups),
-        _cb(cores, cb_one, ttnn.bfloat16, BF16_TILE, 1),
-        _cb(cores, cb_act, ttnn.bfloat16, BF16_TILE, 2),
+        cb(cores, cb_x, ttnn.bfloat16, BF16_TILE, kx),
+        cb(cores, cb_w, w.dtype, tb, 3 * 2 * block_k),
+        cb(cores, cb_sc, ttnn.bfloat16, BF16_TILE, 2 * slots_per_core),
+        cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
+        cb(cores, cb_ws, ttnn.bfloat16, 512, 1),
+        cb(cores, cb_m, ttnn.bfloat16, BF16_TILE, 2 * groups * slots_per_core),
+        cb(cores, cb_r, ttnn.float32, 2 * BF16_TILE, 2 * groups),
+        cb(cores, cb_one, ttnn.bfloat16, BF16_TILE, 1),
+        cb(cores, cb_act, ttnn.bfloat16, BF16_TILE, 2),
     ]
     reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
     for core, bank, _, vc, slot0, pair_j, act_pair in assign:
@@ -92,10 +94,10 @@ def gate_up_q4_op(assign, cores, x, ids, weights, scale, w, steps, act, *, kx, s
             scale.buffer_address(), act_pair, slot0, steps.buffer_address(), bank, row,
         ]
     id_bytes = _id_bytes(max(a[4] for a in assign) + slots_per_core)
-    reader_ct = [cb_w, cb_rs, slots_per_core, blocks, 2 * block_k, 2, tb, kx * 2 * tb, 0, 0, 0, id_bytes] + _accessor(ids)
+    reader_ct = [cb_w, cb_rs, slots_per_core, blocks, 2 * block_k, 2, tb, kx * 2 * tb, 0, 0, 0, id_bytes] + accessor(ids)
     writer_ct = [cb_x, cb_sc, cb_act, cb_ws, kx, slots_per_core, pairs, n_scale, id_bytes, cb_m, cb_one, rows]
     for t in (x, act, ids, weights, scale):
-        writer_ct += _accessor(t)
+        writer_ct += accessor(t)
     compute_ct = [cb_x, cb_w, cb_sc, cb_act, slots_per_core, blocks, block_k, cb_m, cb_r, cb_one]
     dm = ttnn.DataMovementConfigDescriptor
     kernels = [
@@ -121,19 +123,19 @@ def down_q4_op(assign, cores, act, ids, w, steps, out, *, slots, kt, cols, banks
     """Batch-1 down from Q4_0 tiles (kernels/expert_q4_down_*): as expert_stream.down_op with rows=1, plus
     the step tensor steps ([1, E, 32, banks * bank_cols * 32] BF16, interleaved, rows 0 .. kt - 1 used)."""
     cb_in0, cb_w, cb_rs, cb_zero, cb_scr, cb_m, cb_racc, cb_one, cb_out = 0, 1, 3, 4, 5, 6, 7, 8, 16
-    tb = _tile_bytes(w.dtype)
+    tb = tile_bytes(w.dtype)
     compact = compact_chunk0 is not None
     out_dtype = ttnn.float32 if compact else ttnn.bfloat16
     cbs = [
-        _cb(cores, cb_in0, ttnn.bfloat16, BF16_TILE, 2 * kt),
-        _cb(cores, cb_w, w.dtype, tb, 3 * kt * cols),
-        _cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
-        _cb(cores, cb_zero, ttnn.bfloat16, 64, 1),
-        _cb(cores, cb_scr, ttnn.bfloat16, 64, 1),
-        _cb(cores, cb_m, ttnn.bfloat16, BF16_TILE, 2 * cols),
-        _cb(cores, cb_racc, ttnn.float32, 2 * BF16_TILE, cols),
-        _cb(cores, cb_one, ttnn.bfloat16, BF16_TILE, 1),
-        _cb(cores, cb_out, out_dtype, 2 * BF16_TILE if compact else BF16_TILE, cols),
+        cb(cores, cb_in0, ttnn.bfloat16, BF16_TILE, 2 * kt),
+        cb(cores, cb_w, w.dtype, tb, 3 * kt * cols),
+        cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
+        cb(cores, cb_zero, ttnn.bfloat16, 64, 1),
+        cb(cores, cb_scr, ttnn.bfloat16, 64, 1),
+        cb(cores, cb_m, ttnn.bfloat16, BF16_TILE, 2 * cols),
+        cb(cores, cb_racc, ttnn.float32, 2 * BF16_TILE, cols),
+        cb(cores, cb_one, ttnn.bfloat16, BF16_TILE, 1),
+        cb(cores, cb_out, out_dtype, 2 * BF16_TILE if compact else BF16_TILE, cols),
     ]
     chunks = 2 * n_tiles
     pad = -(-chunks // 64) * 64 - chunks
@@ -146,9 +148,9 @@ def down_q4_op(assign, cores, act, ids, w, steps, out, *, slots, kt, cols, banks
             act.buffer_address(), out.buffer_address(), bank, j0, (compact_chunk0 or 0) + chunks, zero, steps.buffer_address(), ids.buffer_address()
         ]
     id_bytes = _id_bytes(slots)
-    reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, id_bytes] + _accessor(ids)
+    reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, id_bytes] + accessor(ids)
     writer_ct = [cb_in0, cb_out, slots, cols, banks, n_tiles, int(compact), compact_chunk0 or 0, cb_zero, kt, 1, cb_m, cb_one, cb_scr, id_bytes, bank_cols]
-    writer_ct += _accessor(act) + _accessor(out) + _accessor(ids)
+    writer_ct += accessor(act) + accessor(out) + accessor(ids)
     compute_ct = [cb_in0, cb_w, cb_out, slots, kt, cols, cb_m, cb_racc, cb_one]
     dm = ttnn.DataMovementConfigDescriptor
     kernels = [

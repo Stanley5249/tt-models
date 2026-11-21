@@ -16,77 +16,11 @@ scatters the next matmul inputs back to row form (BF16).
 The residual stream is FP32 (it was BF16).
 """
 
-import struct
-from pathlib import Path
-
-import torch
 import ttnn
 
-KERNELS = Path(__file__).parent / "kernels"
-TILE = 32
-CHUNK = 16
-FP32_TILE = 4096
-CHUNKS_PER_TILE = 64
-L1 = ttnn.L1_MEMORY_CONFIG
-
-
-def f32_bits(v: float) -> int:
-    return struct.unpack("<I", struct.pack("<f", float(v)))[0]
-
-
-def compact_tiles(hidden: int) -> int:
-    return -(-hidden // CHUNK // CHUNKS_PER_TILE)
-
-
-def to_compact(v: torch.Tensor) -> torch.Tensor:
-    """[n, H] -> [32, n * V * 32] float32 whose TILE layout puts chunk c of vector i at byte 64 c of its V tiles."""
-    n, h = v.shape
-    tiles = compact_tiles(h)
-    chunks = torch.zeros(n, tiles * CHUNKS_PER_TILE, CHUNK)
-    chunks[:, : h // CHUNK] = v.float().reshape(n, -1, CHUNK)
-    # chunk q of a tile = face q // 16, face row q % 16 -> tile row (face // 2) * 16 + r, cols (face % 2) * 16 + j
-    c = chunks.reshape(n, tiles, 2, 2, 16, CHUNK)  # [n, tile, face_row_half, face_col_half, r, j]
-    out = c.permute(2, 4, 0, 1, 3, 5).reshape(TILE, n * tiles * TILE)
-    return out
-
-
-def from_compact(t: torch.Tensor, n: int, h: int) -> torch.Tensor:
-    """Inverse of to_compact: [32, n * V * 32] -> [n, h]."""
-    tiles = compact_tiles(h)
-    c = t.float().reshape(2, 16, n, tiles, 2, CHUNK).permute(2, 3, 0, 4, 1, 5)
-    return c.reshape(n, tiles * CHUNKS_PER_TILE * CHUNK)[:, :h]
-
-
-def compact_tensor(mesh, v: torch.Tensor, memory_config=ttnn.DRAM_MEMORY_CONFIG) -> ttnn.Tensor:
-    """Host vectors [n, H] -> device compact FP32 [1, 1, 32, n * V * 32], replicated."""
-    return ttnn.from_torch(
-        to_compact(v)[None, None],
-        dtype=ttnn.float32,
-        layout=ttnn.TILE_LAYOUT,
-        device=mesh,
-        mesh_mapper=ttnn.ReplicateTensorToMesh(mesh),
-        memory_config=memory_config,
-    )
-
-
-def _cores(n: int, y0: int = 0) -> list[ttnn.CoreCoord]:
-    return [ttnn.CoreCoord(i % 8, y0 + i // 8) for i in range(n)]
-
-
-def _crs(cores) -> ttnn.CoreRangeSet:
-    return ttnn.CoreRangeSet([ttnn.CoreRange(c, c) for c in cores])
-
-
-def _cb(cores, index, dtype, page, pages):
-    return ttnn.CBDescriptor(
-        total_size=page * pages,
-        core_ranges=cores,
-        format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=dtype, page_size=page)],
-    )
-
-
-def _accessor(t):
-    return ttnn.TensorAccessorArgs(t).get_compile_time_args()
+from tt_models.common.config import L1, TILE
+from tt_models.models.gemma4.compact import CHUNK, CHUNKS_PER_TILE, compact_tiles
+from tt_models.models.gemma4.generic_op import FP32_TILE, KERNELS, accessor, cb, core_range_set, f32_bits, line_cores
 
 
 class Boundary:
@@ -119,7 +53,7 @@ class Boundary:
         dst; zeroes the padding."""
         n_tiles = self.hidden // TILE
         per = -(-n_tiles // len(cores))
-        crs = _crs(cores)
+        crs = core_range_set(cores)
         rt = ttnn.RuntimeArgs()
         pad0 = dst_chunk0 + self.chunks
         pad = self.V * CHUNKS_PER_TILE - self.chunks
@@ -133,40 +67,40 @@ class Boundary:
         kernel = ttnn.KernelDescriptor(
             kernel_source=str(KERNELS / "compact_pack.cpp"),
             core_ranges=crs,
-            compile_time_args=[cb_scr, rows, self.V * CHUNKS_PER_TILE] + _accessor(src) + _accessor(dst),
+            compile_time_args=[cb_scr, rows, self.V * CHUNKS_PER_TILE] + accessor(src) + accessor(dst),
             runtime_args=rt,
             config=ttnn.DataMovementConfigDescriptor(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
         )
-        program = ttnn.ProgramDescriptor(kernels=[kernel], semaphores=[], cbs=[_cb(crs, cb_scr, ttnn.float32, scr_bytes, 1)])
+        program = ttnn.ProgramDescriptor(kernels=[kernel], semaphores=[], cbs=[cb(crs, cb_scr, ttnn.float32, scr_bytes, 1)])
         return ttnn.generic_op([src, dst], program)
 
     def _tail(self, kind: str, g, x, w, x_out, outs: list, w_vectors: int, scalar: float = 1.0, x_page0: int = 0, rows: int = 1):
         V = self.V
-        cores = _cores(self.tail_cores * rows, y0=0)  # core i: row i // tail_cores
-        crs = _crs(cores)
+        cores = line_cores(self.tail_cores * rows, y0=0)  # core i: row i // tail_cores
+        crs = core_range_set(cores)
         cb_g, cb_x, cb_w, cb_j, cb_sq, cb_rs, cb_r, cb_t0, cb_xo, cb_row0 = 0, 1, 2, 3, 4, 5, 6, 8, 12, 16
         vecs = 2 if kind == "FF_TAIL" else 1  # gathered vectors per row: [mlp | experts] or attention
         f32 = ttnn.float32
         cbs = [
-            _cb(crs, cb_g, f32, FP32_TILE, 2 * vecs * V),  # this core's row only (tail_reader.cpp)
-            _cb(crs, cb_x, f32, FP32_TILE, V),
-            _cb(crs, cb_w, f32, FP32_TILE, w_vectors * V),
-            _cb(crs, cb_j, f32, FP32_TILE, 1),
-            _cb(crs, cb_sq, f32, FP32_TILE, V),
-            _cb(crs, cb_rs, f32, FP32_TILE, 1),
-            _cb(crs, cb_r, f32, FP32_TILE, 1),
-            _cb(crs, cb_xo, f32, FP32_TILE, V),
+            cb(crs, cb_g, f32, FP32_TILE, 2 * vecs * V),  # this core's row only (tail_reader.cpp)
+            cb(crs, cb_x, f32, FP32_TILE, V),
+            cb(crs, cb_w, f32, FP32_TILE, w_vectors * V),
+            cb(crs, cb_j, f32, FP32_TILE, 1),
+            cb(crs, cb_sq, f32, FP32_TILE, V),
+            cb(crs, cb_rs, f32, FP32_TILE, 1),
+            cb(crs, cb_r, f32, FP32_TILE, 1),
+            cb(crs, cb_xo, f32, FP32_TILE, V),
         ]
-        cbs += [_cb(crs, cb_t0 + i, f32, FP32_TILE, V) for i in range(4)]
-        cbs += [_cb(crs, cb_row0 + i, ttnn.bfloat16, 2048, V) for i in range(len(outs))]
+        cbs += [cb(crs, cb_t0 + i, f32, FP32_TILE, V) for i in range(4)]
+        cbs += [cb(crs, cb_row0 + i, ttnn.bfloat16, 2048, V) for i in range(len(outs))]
         reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
         for i, c in enumerate(cores):
             row, j = divmod(i, self.tail_cores)
             c0, c1 = self.tail_ranges[j]
             reader_rt[c.x][c.y] = [g.buffer_address(), x.buffer_address(), w.buffer_address(), x_page0, row]
             writer_rt[c.x][c.y] = [x_out.buffer_address(), 1 if j == 0 else 0, c0, c1, row] + [r.buffer_address() for r in outs]
-        reader_ct = [cb_g, cb_x, cb_w, cb_j, w_vectors * V, V, rows, vecs] + _accessor(g) + _accessor(x) + _accessor(w)
-        writer_ct = [cb_xo, cb_row0, V, len(outs)] + _accessor(x_out) + _accessor(outs[0])
+        reader_ct = [cb_g, cb_x, cb_w, cb_j, w_vectors * V, V, rows, vecs] + accessor(g) + accessor(x) + accessor(w)
+        writer_ct = [cb_xo, cb_row0, V, len(outs)] + accessor(x_out) + accessor(outs[0])
         compute_ct = [cb_g, cb_x, cb_w, cb_j, cb_sq, cb_rs, cb_r, cb_t0, cb_xo, cb_row0, V]
         compute_ct += [f32_bits(1.0 / self.hidden), f32_bits(self.eps), f32_bits(scalar), vecs * V, w_vectors * V]
         dm = ttnn.DataMovementConfigDescriptor
@@ -209,145 +143,3 @@ class Boundary:
         [post_ff1 | post_ff2 | post_ff | next input norm]. Per row: writes x_out = (x + rms(rms(m) w1 +
         rms(e) w2) w_ff) * scalar (compact) and h = rms(x_out) * w_in (row form BF16 [1, 1, rows, H])."""
         return self._tail("FF_TAIL", g, x, w, x_out, [h], 4, scalar, rows=rows)
-
-
-def rope_partner(width: int, head_dim: int) -> torch.Tensor:
-    """Index of every fused-row value's rotate_half partner (the other half of its head)."""
-    d = torch.arange(width)
-    half = head_dim // 2
-    return torch.where(d % head_dim < half, d + half, d - half)
-
-
-class QkRope:
-    """q/k RMSNorm, head weights and RoPE of the fused batch-1 QKV row in one op (kernels/qk_rope_*).
-
-    One core per compact tile (4 heads of 256 or 2 of 512); V heads have weight 1, cos 1, sin 0.
-    Replaces reshape, rms_norm, the weight multiply, the rotate_half matmul, three RoPE eltwise ops and the
-    reshape back (~60 us per layer)."""
-
-    def __init__(self, mesh, width: int, head_dim: int, eps: float, core_row: int = 6):
-        self.mesh, self.width, self.head_dim, self.eps = mesh, width, head_dim, eps
-        self.V = width // (CHUNK * CHUNKS_PER_TILE)
-        assert self.V * CHUNK * CHUNKS_PER_TILE == width
-        self.cores = [ttnn.CoreCoord(i, core_row) for i in range(self.V)]
-        self.partner = rope_partner(width, head_dim)
-        self.sign = torch.where(torch.arange(width) % head_dim < head_dim // 2, -1.0, 1.0)
-
-    def weights(self, w_row: torch.Tensor) -> ttnn.Tensor:
-        """[W] per-value head weights -> compact [w | w permuted to partners]."""
-        return compact_tensor(self.mesh, torch.stack([w_row, w_row[self.partner]]))
-
-    def host_tables(self, cos_row: torch.Tensor, sin_row: torch.Tensor) -> torch.Tensor:
-        """Per-step [cos | sin * rotate_half sign] for one token, as host compact FP32 [1, 1, 32, 2 V 32]."""
-        return to_compact(torch.stack([cos_row, sin_row * self.sign]))[None, None]
-
-    def __call__(self, x, cs, w, out, cs_page0: int = 0):
-        """x: FP32 row-form QKV matmul output [1, 1, 1, W]; out: BF16 row form [1, 1, 1, W]."""
-        crs = _crs(self.cores)
-        cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, cb_sq, cb_s1, cb_r, cb_out = 0, 1, 2, 3, 4, 5, 6, 7, 8, 16
-        f32 = ttnn.float32
-        cbs = [_cb(crs, i, f32, FP32_TILE, n) for i, n in ((cb_x, 1), (cb_xr, 1), (cb_cs, 2), (cb_w, 2), (cb_a, 1), (cb_b, 1), (cb_sq, 2), (cb_s1, 1), (cb_r, 1))]
-        cbs.append(_cb(crs, cb_out, ttnn.bfloat16, 2048, 1))
-        reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
-        for t, c in enumerate(self.cores):
-            reader_rt[c.x][c.y] = [x.buffer_address(), cs.buffer_address(), w.buffer_address(), t, cs_page0]
-            writer_rt[c.x][c.y] = [out.buffer_address(), t]
-        head_chunks = self.head_dim // CHUNK
-        reader_ct = [cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, head_chunks, self.V] + _accessor(x) + _accessor(cs) + _accessor(w)
-        compute_ct = [cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, cb_sq, cb_s1, cb_r, cb_out, f32_bits(1.0 / self.head_dim), f32_bits(self.eps)]
-        dm = ttnn.DataMovementConfigDescriptor
-        kernels = [
-            ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "qk_rope_reader.cpp"), core_ranges=crs, compile_time_args=reader_ct, runtime_args=reader_rt,
-                config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
-            ),
-            ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "qk_rope_writer.cpp"), core_ranges=crs, compile_time_args=[cb_out] + _accessor(out),
-                runtime_args=writer_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
-            ),
-            ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "qk_rope_compute.cpp"), core_ranges=crs, compile_time_args=compute_ct, runtime_args=[],
-                config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True, math_approx_mode=False),
-            ),
-        ]
-        return ttnn.generic_op([x, cs, w, out], ttnn.ProgramDescriptor(kernels=kernels, semaphores=[], cbs=cbs))
-
-
-class Router:
-    """Decode router for 1-4 tokens: logits, top-k and softmax over the k logits in one op (kernels/router_*).
-
-    topk_router_gpt took 68-72 us per layer, mostly in its top-k stage. Here 11 cores (8 at 3-4 tokens)
-    each multiply their K slice of the normed rows by the BF16 router weight, the reducer core gathers the
-    partial rows (semaphore), sums each token's rows and takes exp on the FPU/SFPU, and its RISC picks every
-    token's top k and normalizes them: 37-42 us at 1-2 tokens, 57-68 us at 3-4 (tests/router_check.py).
-    Its weights are closer to an fp32 reference (max error 0.0007 against topk_router_gpt's 0.11).
-    Outputs: row-major uint16 ids and BF16 weights, token-major (entry t * k + j)."""
-
-    def __init__(self, mesh, hidden: int, n_experts: int, top_k: int, parts: int = 11, core_row: int = 5, rows: int = 1):
-        """rows: decode tokens (1 .. 4). The reducer stacks every core's partial rows in one tile, so
-        parts * rows must fit 32: 3-4 tokens use 8 parts of 11 K tiles (the first 8 of the 11 cores)."""
-        self.mesh, self.top_k, self.rows = mesh, top_k, rows
-        self.kx = hidden // TILE
-        self.n_tiles = n_experts // TILE
-        while parts * rows > TILE or self.kx % parts:
-            parts -= 1
-        self.parts = parts
-        self.kt = self.kx // parts
-        assert rows * top_k <= TILE
-        self.cores = [ttnn.CoreCoord(i % 8, core_row - i // 8) for i in range(parts)]
-        self.red = mesh.worker_core_from_logical_core(self.cores[0])
-
-    def outputs(self):
-        """Row-major ids and weights, token-major (entry t * k + j), at least 16 entries (32 bytes): the
-        layout the expert streams take."""
-        def row(dtype):
-            n = max(16, self.rows * self.top_k)
-            return ttnn.allocate_tensor_on_device(ttnn.Shape([1, n]), dtype, ttnn.ROW_MAJOR_LAYOUT, self.mesh, L1)
-
-        return row(ttnn.uint16), row(ttnn.bfloat16)
-
-    def __call__(self, x, w, ids, wts, build=False):
-        """x: normed row form BF16 [1, 1, rows, H]; w: the [H, E] BF16 router weight (tile layout).
-        build: return (program, tensors) to run merged with another op (expert_stream.run)."""
-        crs = _crs(self.cores)
-        cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, cb_out = 0, 1, 2, 3, 4, 5, 6
-        f32, bf16 = ttnn.float32, ttnn.bfloat16
-        n = self.n_tiles
-        cbs = [
-            _cb(crs, cb_x, bf16, 2048, self.kt),
-            _cb(crs, cb_w, bf16, 2048, self.kt * n),
-            _cb(crs, cb_j, f32, FP32_TILE, 1),
-            _cb(crs, cb_partial, f32, FP32_TILE, n),
-            _cb(crs, cb_part, f32, FP32_TILE, n),
-            _cb(crs, cb_e, f32, FP32_TILE, n),
-            _cb(crs, cb_out, bf16, 128, 1),
-        ]
-        reader_rt, writer_rt, compute_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
-        for i, c in enumerate(self.cores):
-            red = int(i == 0)
-            reader_rt[c.x][c.y] = [x.buffer_address(), w.buffer_address(), i * self.kt, red]
-            writer_rt[c.x][c.y] = [i, self.red.x, self.red.y, red, ids.buffer_address(), wts.buffer_address()]
-            compute_rt[c.x][c.y] = [red]
-        sem_id = 0
-        dm = ttnn.DataMovementConfigDescriptor
-        kernels = [
-            ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "router_reader.cpp"), core_ranges=crs,
-                compile_time_args=[cb_x, cb_w, cb_j, self.kt, n, self.rows] + _accessor(x) + _accessor(w), runtime_args=reader_rt,
-                config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
-            ),
-            ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "router_writer.cpp"), core_ranges=crs,
-                compile_time_args=[cb_partial, cb_part, cb_e, cb_out, n, self.parts, self.top_k, sem_id, self.rows, max(32, 2 * self.rows * self.top_k)]
-                + _accessor(ids) + _accessor(wts),
-                runtime_args=writer_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
-            ),
-            ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "router_compute.cpp"), core_ranges=crs,
-                compile_time_args=[cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, self.kt, n], runtime_args=compute_rt,
-                config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True, math_approx_mode=False),
-            ),
-        ]
-        sems = [ttnn.SemaphoreDescriptor(id=sem_id, core_ranges=crs, initial_value=0)]
-        program = ttnn.ProgramDescriptor(kernels=kernels, semaphores=sems, cbs=cbs)
-        return (program, [x, w, ids, wts]) if build else ttnn.generic_op([x, w, ids, wts], program)

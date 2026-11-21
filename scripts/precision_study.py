@@ -80,7 +80,7 @@ def main():
     ap.add_argument("--out", type=Path, default=ROOT / "results" / "accuracy" / "precision_study.json")
     args = ap.parse_args()
     spec = args.precision
-    from tt_models.models.gemma4.model import Precision
+    from tt_models.models.gemma4.config import Precision
 
     args.precision = Precision.parse(spec)
 
