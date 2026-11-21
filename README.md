@@ -6,7 +6,7 @@ TTNN model implementations served through vLLM on Tenstorrent hardware. The one 
 
 Requirements: Linux x86-64 with glibc 2.34 or newer, a Wormhole N300 with the Tenstorrent kernel driver and tt-smi, [pixi](https://pixi.sh) 0.81 or newer, [just](https://just.systems), and for the checks [ruff](https://docs.astral.sh/ruff/), [pyrefly](https://pyrefly.org) and [bun](https://bun.sh) on `PATH` (for example through `pixi global install`).
 
-The pixi workspace in `pyproject.toml` holds Python 3.12, a Tracy-enabled ttnn wheel, CPU torch, vLLM, vllm-tt-plugin and this package, installed editable. `just --list` shows every recurring command; machine-specific settings go in a git-ignored `.env` (see `.env.example`).
+The pixi workspace in `pyproject.toml` holds Python 3.12 and this package, installed editable. The Tenstorrent stack, a Tracy-enabled ttnn wheel, CPU torch, vLLM, vllm-tt-plugin and the tt-scope profiler, comes from one [tt-scope](https://github.com/Stanley5249/tt-scope) release tag through `tt-scope[stable,vllm]`. To move it, change that tag, copy the `tt-metal` pin and the shared `dependency-overrides` from tt-scope's `pyproject.toml` at the tag, run `pixi lock`, and run the checks in [docs/serving.md](docs/serving.md#checking-a-change). `just --list` shows every recurring command; machine-specific settings go in a git-ignored `.env` (see `.env.example`).
 
     just install
     pixi run hf download google/gemma-4-26B-A4B-it-qat-q4_0-unquantized

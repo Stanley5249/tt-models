@@ -5,7 +5,7 @@ description = "Tenstorrent model implementations served through vLLM and vllm-tt
 requires-python = ">=3.12"
 license = "MIT OR Apache-2.0"
 license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
-# The runtime stack (ttnn, torch, vLLM, vllm-tt-plugin) is pinned under [tool.pixi].
+# The runtime stack comes from tt-scope under [tool.pixi.pypi-dependencies].
 dependencies = []
 
 # vLLM loads this in every process: the model classes and the gemma4_tt tool parser.
@@ -22,15 +22,12 @@ requires-pixi = ">=0.81"
 # The ttnn wheel needs glibc 2.34; Ubuntu 22.04 has 2.35.
 platforms = [{ platform = "linux-64", glibc = "2.34" }]
 
-# tt-metal needs libhwloc, libnuma, and libstdc++ with GLIBCXX_3.4.32.
-# The bundled SFPI compiler needs mpc and zstd.
+# tt-scope's metadata carries the Python stack, but pixi cannot share conda
+# packages, so this copies the tt-metal pin of tt-scope's stable channel: a
+# metapackage of the native libraries the ttnn wheel loads. Move both together.
 [tool.pixi.dependencies]
 python = "3.12.*"
-libstdcxx = ">=13"
-libhwloc = "*"
-libnuma = "*"
-mpc = "*"
-zstd = "*"
+tt-metal = { url = "https://github.com/Stanley5249/tt-metal/releases/download/v0.82.0-conda.1/tt-metal-0.82.0%2Bconda.1-0.conda", sha256 = "c0b086d9e0739ad0bffc8583b595e012053142425178dfc816451924b31549dd" }
 
 [tool.pixi.activation.env]
 LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
@@ -49,29 +46,21 @@ TT_METAL_PROFILER_DIR = "$PIXI_PROJECT_ROOT/artifacts/profiler"
 tt-models = { path = ".", editable = true }
 # Test runner: `pytest` for host checks, `pytest -m device` for the N300 ones.
 pytest = "*"
-# Stanley5249/tt-metal release: Tracy-enabled ttnn with SFPI and tt_transformers' models/.
-ttnn = { url = "https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.8/ttnn-0.81.1%2Bconda.8-cp312-cp312-linux_x86_64.whl" }
-# The torch pair tt-metal 0.81 is tested with, as CPU builds: PyPI's Linux
-# torch is the CUDA build.
-torch = { version = "==2.11.*", index = "https://download.pytorch.org/whl/cpu" }
-torchvision = { version = "==0.26.*", index = "https://download.pytorch.org/whl/cpu" }
-# PyPI's vLLM wheels are CUDA builds, its CPU wheels since 0.30 need glibc 2.39,
-# and its sdist states the CUDA requirements statically. A git checkout makes
-# the resolver build the metadata, which lists requirements/common.txt.
-vllm = { git = "https://github.com/vllm-project/vllm.git", tag = "v0.32.0" }
-# Profiling front end (tracy, memory, noc, serve captures); same fork ttnn as above.
-tt-scope = { git = "https://github.com/Stanley5249/tt-scope.git", tag = "v0.4.0" }
-# Follows plugin main; pixi.lock holds the commit until `pixi update vllm-tt-plugin`.
-vllm-tt-plugin = { git = "https://github.com/tenstorrent/vllm-tt-plugin.git", branch = "main" }
+# The shared Tenstorrent stack: the Tracy-enabled ttnn wheel of tt-scope's
+# stable channel, CPU torch, vLLM, vllm-tt-plugin, and the profiler itself, at
+# the versions tt-scope's tag pins.
+tt-scope = { git = "https://github.com/Stanley5249/tt-scope.git", tag = "v0.5.0", extras = [
+  "stable",
+  "vllm",
+] }
 
-# No numpy override: an override replaces every package's numpy requirement,
-# so the resolver could then pick packages that need numpy 2. Without one,
-# ttnn's numpy<2 holds and the rest resolve to releases that accept numpy 1.
+# pixi applies overrides only from the workspace it solves, so the first one
+# repeats tt-scope's. No numpy override: an override replaces every package's
+# numpy requirement, so the resolver could then pick packages that need numpy
+# 2. Without one, ttnn's numpy<2 holds.
 [tool.pixi.pypi-options.dependency-overrides]
 # vLLM asks for >=4.13, which needs numpy 2 (vllm-tt-plugin docs/vllm-overrides.txt).
 opencv-python-headless = "==4.11.*"
-# vllm-tt-plugin's supported range (docs/vllm-overrides.txt).
-transformers = ">=5.16.1,<5.17"
 # vLLM 0.32 pins 0.2.8; 0.2.9 adds the gemma_4 structural tag (Gemma 4's
 # <|"|> string syntax) that src/tt_models/models/gemma4/tool_parser.py uses for required and
 # named tool choice. The API is otherwise unchanged.
