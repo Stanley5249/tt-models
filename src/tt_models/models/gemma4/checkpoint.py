@@ -61,7 +61,7 @@ class Checkpoint:
 
     def _header(self, filename: str) -> tuple[int, dict]:
         if filename not in self._headers:
-            with open(self.root / filename, "rb") as f:
+            with (self.root / filename).open("rb") as f:
                 (size,) = struct.unpack("<Q", f.read(8))
                 self._headers[filename] = (8 + size, json.loads(f.read(size)))
         return self._headers[filename]
@@ -71,7 +71,7 @@ class Checkpoint:
         meta = header[key]
         start, end = meta["data_offsets"]
         buf = bytearray(end - start)
-        with open(self.root / filename, "rb") as f:
+        with (self.root / filename).open("rb") as f:
             f.seek(base + start)
             f.readinto(buf)
         return torch.frombuffer(buf, dtype=_DTYPES[meta["dtype"]]).reshape(
