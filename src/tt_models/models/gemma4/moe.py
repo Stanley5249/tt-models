@@ -326,7 +326,7 @@ class FeedForward:
 
         One tile of rows wastes the least on padding, and the sparse matmuls' time
         follows their rows: a 2,048-token piece takes 1.28 s with 32-row chunks,
-        1.34 s with 64 and 1.54 s with 128 (README text, see docs/serving.md)."""
+        1.34 s with 64 and 1.54 s with 128 (README text, docs/experiments/2026-11-21-one-tile-expert-chunks.md)."""
         return TILE
 
     def _experts_prefill(self, x: ttnn.Tensor, normed: ttnn.Tensor) -> ttnn.Tensor:

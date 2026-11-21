@@ -9,7 +9,7 @@ sits in row k % 32 of a zero tile, each block's partial sum lands in its own des
 multiply by the step tile plus a ones-row matmul finish the sum.
 
 Experimental (Precision.expert_q4): batch-1 decode only. Decode accuracy against fp32 improves from
-KL 0.457 to 0.286 (docs/serving.md, Model quality), at +27% gate|up and +49% down device time. Prefill
+KL 0.457 to 0.286 (docs/experiments/2026-11-21-q4-decode-experts.md), at +27% gate|up and +49% down device time. Prefill
 has no Q4 path: ttnn's sparse matmuls cannot apply the steps, and two copies of the experts do not
 fit in DRAM, so moe.FeedForward runs the batch-1 streams token by token, which is only good for
 accuracy runs. The down step tiles keep 11 of 32 rows (25 MB per layer per chip); serving would
