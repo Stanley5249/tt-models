@@ -1,880 +1,172 @@
-# Serving Gemma 4 26B-A4B on N300 with vLLM
+# Serving Gemma 4 26B-A4B on an N300
 
-The vLLM backend in `gemma4_tt/vllm_model.py`: how it works, how it was
-optimized and measured, and what is left. Stack: vLLM 0.32.0, vllm-tt-plugin
-`0c12fd0`, transformers 5.16.1, ttnn 0.81.1+conda.8, one N300d (two Wormhole
-chips, TP=2). The investigation that started this work is
-`docs/gemma4-serving-investigation.md`; the earlier single-user decode work is
-`docs/decode-optimization-report.md`. Four milestones are described here: the
-serving backend (`feat/serving`), the follow-up on compatibility, sampling,
-quality and prefill (`feat/quality-sampling`), Q4_0 experts, device sampling
-and tool choice (`feat/quality-upstream`), and profiling-driven multi-user
-decode (`perf/profiling`); sections say which one a result belongs to where it
-matters.
+How the vLLM backend works, what it supports, and how to check a change.
+Measurements and the reasons behind each design live in
+[experiments](experiments/README.md); this guide links to them instead of
+repeating their numbers.
 
-    pixi run serve-gemma4                       # 127.0.0.1:8000, model "gemma4"
-    pixi run python scripts/serve_check.py      # request lifecycle checks
+    pixi run serve-gemma4                            # 127.0.0.1:8000, model "gemma4"
+    pixi run python scripts/serve/serve_check.py     # request lifecycle checks
 
 ## Architecture
 
-### KV cache: vLLM owns every layer
+The adapter is `src/tt_models/models/gemma4/vllm_adapter.py`.
+`src/tt_models/vllm_plugin.py`, a `vllm.general_plugins` entry point,
+registers it and the tool parser in every vLLM process. The model code
+(`model.py`, `layer.py`, `attention.py`, `moe.py`) runs on a 1x2 mesh with
+tensor parallelism over the two chips.
 
-Before, vLLM paged only the 5 global layers, and the adapter kept a private
-1,024-token ring per batch slot for the 25 sliding layers. That ring state
-blocked prefix caching, chunked prefill and preemption.
+### KV cache
 
-Now `get_kv_cache_spec` declares the sliding layers as `SlidingWindowSpec` and
-the global layers as `FullAttentionSpec`. vLLM's hybrid manager forms 5
-sliding groups and 1 global group, each with its own page table, and frees
-sliding blocks that leave the window. A block id belongs to one group at a
-time, so the i-th layer of every group shares one K and one V buffer
-(`gemma4_tt/tt/kv_cache.py`). To keep pages equal, vLLM gives the global
-layers 128-token blocks (1 KV head of 512 per chip) next to 64-token sliding
-blocks (4 heads of 256). Each layer reads the shared buffer through its own
-geometry, which ttnn's paged ops accept as an override. The model holds no
-per-request state, so preemption, resumption and batch-row moves need no
-adapter hooks (`release_request` and `slot_remap` are gone).
+vLLM owns every layer's KV cache
+([hybrid KV cache](experiments/2026-11-21-hybrid-kv-cache.md)). Sliding
+layers are `SlidingWindowSpec` and global layers `FullAttentionSpec`; vLLM's
+hybrid manager forms 5 sliding groups and 1 global group with their own page
+tables, and the i-th layer of every group shares one K and one V buffer
+(`kv_cache.py`). The model keeps no per-request state, so preemption,
+resumption and batch-row moves need no adapter hooks. `GEMMA4_KV_POOL_GIB`
+sets the pool size per chip.
 
-The pool is `KV_POOL_BYTES` = 2.5 GiB per chip: 3,860 blocks, 7.7 requests of
-32K tokens (`GEMMA4_KV_POOL_GIB` overrides it). Weights take 8.0 of
-11.87 GiB per chip; the rest holds prefill activations and the decode traces.
-
-### Prefix caching and chunked prefill
+### Prefill
 
 `Gemma4TT.prefill(tokens, start, tables)` computes positions
-`[start, len(tokens))` and writes only their K/V. A chunk at position 0
-attends over its own K/V; a later chunk uses chunked SDPA over the paged
-cache, which by then holds the earlier positions and the chunk itself. The
-chunk start goes to the device as a tensor, so the programs no longer depend
-on the offset: with the start as an integer, every new offset compiled new
-programs (2.3 s on a cold JIT cache); now a 53-token chunk at a new offset
-takes 0.22-0.25 s after the first one.
+`[start, len(tokens))` and writes only their K/V. `start` must lie on the
+block grid, the lcm of the group block sizes, so prefix hits and chunk ends
+never rewrite shared blocks; the adapter refuses a chunk alignment off the
+grid at startup. Long prompts run in pieces of at most `PREFILL_CHUNK`
+tokens, and every piece pads to a bucket (`config.prefill_rows`) whose
+programs are built at warmup
+([length buckets](experiments/2026-11-21-prefill-length-buckets.md)). Experts
+run expert-major in one-tile chunks
+([one-tile chunks](experiments/2026-11-21-one-tile-expert-chunks.md)).
 
-`start` must lie on the block grid, the lcm of the group block sizes (128
-tokens with `--block-size 64`). vLLM schedules on that grid, so prefix hits
-and the plugin's chunk ends fall on it, and every group then writes from the
-start of a block of its own: shared prefix blocks are never rewritten. The
-adapter rejects a `prefill_chunk_alignment` off the grid at startup. Fills
-stop at the last tile holding a real position, so padding never reaches a
-block vLLM did not allocate. Prompts longer than 4,096 tokens run in pieces
-to bound activation memory.
+Prefix caching is vLLM's automatic prefix caching. Chunked prefill uses the
+plugin's scheduler with one decode step after every prefill chunk
+([decode interleave](experiments/2026-11-21-decode-interleave.md)).
 
-Every piece is padded to a fixed set of lengths (`prefill_rows` in
-`gemma4_tt/tt/model.py`): whole tiles for a first piece of up to 512 tokens,
-else multiples of 128. The programs of each length are built once, in
-`warmup_model_prefill`, for every length up to the scheduler's chunk size
-(36 s at 2,048 tokens). A prompt length the server has not seen therefore
-reuses its bucket's programs; only the KV fill (per 32 rows) and the expert
-chunk counts (per routing) can still build small programs later (see Prefill
-length buckets). The fill page tables keep their full width, so a new chunk
-offset builds nothing.
+### Decode
 
-Prefix caching is vLLM's automatic prefix caching with a 128-token hit
-granularity. Chunked prefill uses the plugin's scheduler with
-`--max-num-batched-tokens 2048` and one decode step after every prefill chunk.
-
-### Multi-user decode
-
-Decode captures one metal trace per active row count (1-4). Since
-`perf/profiling` every row count runs the fused path of the earlier batch-1
-work: compact FP32 boundaries with one tail op per boundary, the router op,
-and the expert and MLP streams (`gemma4_tt/tt/expert_stream.py`), where one
-op pair covers all `8 x B` expert slots (see below). Batch 1 keeps two
-specializations: the fused q/k norm and RoPE op, and the expert streams'
-one-token core placement. Batches 2-4 apply RoPE with generic ops.
+Decode captures one metal trace per active row count (1 to `STREAM_ROWS`).
+Every row count runs the same fused path: compact FP32 boundaries with one
+tail op per boundary (`boundary.py`), the router op (`router.py`), and the
+expert and MLP streams (`expert_stream.py`), where one op pair covers every
+expert slot of every row. Batch 1 keeps two specializations: the fused q/k
+norm and RoPE op (`qk_rope.py`) and a one-token core placement in the
+streams. See [round 2](experiments/2026-11-19-decode-round-2.md),
+[batched streams](experiments/2026-11-21-batched-expert-streams.md) and
+[compact boundaries](experiments/2026-11-21-compact-boundaries-multi-row.md).
 
 Batch 1 and batches 2-4 still run some different kernels, which round
-differently.
-Which one computes a step depends on what else is running, so a greedy
-request can take a different branch at a near-tie (observed once in five
-concurrent rounds, at token 20). vLLM does not promise batch invariance on
-other backends either. Both paths are equally accurate against fp32 (KL 0.457
-at batch 1, 0.423 at batch 4, see Model quality), but each is about 0.44 KL
-from fp32, so on flat distributions (code continuations, raw completions
-without the chat template) the two can disagree within a few tokens.
+differently, so a greedy request can continue differently at a near-tie when
+it shares decode steps with others. Both paths are equally accurate against
+fp32 ([batch paths](experiments/2026-11-21-batch-path-accuracy.md)).
+
+Everything a trace touches is allocated before the first capture, and
+prefill reduces across chips with semaphores allocated at load
+([trace safety](experiments/2026-11-21-trace-safety.md)). New code must keep
+both rules.
 
 ### Sampling
 
-The model-side sampler (`sample` in `gemma4_tt/vllm_model.py`) runs on the
-host after the logits are read back: greedy is an argmax, sampling takes the
-top k <= 1,024 candidates and applies temperature, top-p and a seed keyed by
-(seed, position). The final softcap (30 tanh(x / 30)) keeps the order, so the
-decode step returns the logits before it and only the k candidates are
-capped; logprobs and vLLM's own host sampler (penalties, min-p, larger top-k)
-still get the whole capped row. Sampling on the device and the plugin's async
-decode were evaluated and not built (see below).
-
-### Tool choice (`feat/quality-upstream`)
-
-vLLM 0.32's `gemma4` tool parser sets no structural tag and declares
-`supports_required_and_named = False`. `tool_choice="required"` or a named
-tool therefore reached the model only as prompt text: a greeting with
-`required` got a prose answer (vllm-project/vllm#50477, #53363). vLLM's chat
-path already turns a parser's `structural_tag_model` into an xgrammar
-structural tag. xgrammar 0.2.9 (November 2026) added the `gemma_4` tag:
-- it forces the native `<|tool_call>call:name{...}<tool_call|>` envelope;
-- it accepts Gemma's `<|"|>` strings;
-- it requires at least one call for `required`, or exactly the named function.
-
-The fix stays in this repository:
-- **xgrammar override.** `pixi.toml` overrides vLLM's `xgrammar==0.2.8` pin
-  with 0.2.9, which changes nothing else in the lock file.
-- **Tool parser plugin.** `gemma4_tt/tool_parser.py` registers the tag as a
-  vLLM-side builder, because vLLM 0.32's list of xgrammar tags predates it,
-  and subclasses the stock parser with `structural_tag_model = "gemma_4"`.
-  `serve-gemma4` loads it with `--tool-parser-plugin` and
-  `--tool-call-parser gemma4_tt`.
-
-Parsing is unchanged, so `auto` behaves as before. With thinking on, vLLM
-applies the grammar after the reasoning channel. Arguments follow the schema
-only for `strict` tools, as on every model (`--tool-strict-level parameter`
-makes them all strict); a non-strict tool's arguments must still be an object,
-because xgrammar would otherwise also accept a call with no argument block,
-which the parser cannot read. A named call finishes with `stop`, as OpenAI's
-API does. An independent review (GPT-6.2 Sol) found that gap and three small
-issues in the Q4 code (concat size, a block-size check, the named-tool check
-allowing duplicates); all are fixed.
-
-## Optimization methods
-
-### Trace safety (correctness)
-
-The investigation saw identical raw-token requests disagree from their first
-token. A standalone repeat was bitwise stable, so the difference had to come
-from serving. Prefill and decode inputs dumped from the server, replayed
-standalone in the server's call order, reproduced it: a buffer allocated
-after a decode trace capture can overlap the trace's intermediates, and every
-replay overwrites it. Two such buffers existed:
-
-- **Decode trace inputs and lazy constants.** Each batch size's inputs were
-  allocated just before its own capture, and some constants (rotate_half's
-  matrix, MoE masks) on first use. Page tables are skipped when unchanged, so
-  a replay could use corrupted block ids, which hung the card.
-  `_prepare_traces` now allocates every batch size's inputs and runs every
-  batch size once before the first capture.
-- **`ttnn.all_reduce` in prefill.** It caches 12 KB of L1 semaphores per new
-  input shape. The first prefill of a new length after capture cached them in
-  trace memory, and the next prefill of that length returned garbage (logits
-  off by 28). Prefill now uses decode's reduction: `all_gather_async` on
-  semaphores allocated at load, plus a local sum.
-
-Both bugs predate this work; each fix was verified on the old code too.
-
-### Batched expert and MLP streams
-
-Profiling a batch-4 step (next section) showed the routed experts at 26 of
-51 ms: indexed `sparse_matmul` read the 32 expert slots at about 85 GB/s,
-plus slicing and routing glue. The batch-1 stream kernels read at about
-190 GB/s and already multiply whole 32-row tiles, so they were extended to
-B rows instead of writing new kernels:
-
-- slot `s = 8 t + j` is token `t`'s j-th expert;
-- the gate|up writer builds each slot's score tile with the routing weight in
-  that token's row and zeros in the other token rows;
-- the down kernel's existing slot sum therefore leaves each token's experts
-  in its own row; it now streams activations slot by slot, so its buffer
-  stays two slots deep at any batch.
-
-The dense MLP reuses the same kernels with every slot serving every row.
-
-### Expert-major prefill in one-tile chunks (`feat/quality-sampling`)
-
-Prefill groups every expert's (token, slot) pairs into chunks and runs one
-indexed sparse matmul pair over them (`_experts_prefill` in
-`gemma4_tt/tt/moe.py`). A tt-scope capture of a 2,048-token prefill (see
-Profiling) showed the sparse matmuls at 33% of the time and the glue around
-them (row gathers, slices, concats, untilize) at about as much again. With
-128-row chunks, 224 chunks held 16,384 real pairs: 43% of the matmul rows were
-padding. Changes:
-
-- chunks are always one tile (32 rows), which cuts the padding rows; the
-  matmul time follows the rows (2,048 tokens: 1.28 s with 32-row chunks,
-  1.34 s with 64, 1.54 s with 128);
-- each sparse matmul call (at most 128 chunks) gathers its own rows instead
-  of slicing one big gather;
-- padding rows gather token 0 with weight 0, which zeroes their result, so the
-  appended zero row and its concat are gone.
-
-Kernel time per chip for a 2,048-token prefill fell from 1,390 to 1,110 ms.
-The logits are unchanged to PCC 1.00000 and the prefill KL against fp32 is
-0.264 (earlier runs 0.20-0.33).
-
-### Prefill length buckets (`feat/quality-sampling`)
-
-Before, every new prompt length built new programs on its first prefill
-(0.6 s with cached kernel binaries) and sometimes compiled kernels. On a fresh
-server, eight chat prompts at new lengths took 3.4-4.9 s on average with
-single requests up to 9.7 s; the same lengths took 1.39 s once built. Pieces
-now pad to the lengths in Architecture, warmed at startup. 256-row buckets
-were tried first and cost a 144-token prompt 56 ms of TTFT (238 -> 294 ms),
-which led to the whole-tile buckets for short first pieces.
-
-Two shapes still vary inside a bucket. The KV fill writes only up to the
-last live tile, so its few ops build per 32-row length; that measured as
-nothing (300, 333 and 365 tokens in one bucket: 0.46, 0.38, 0.39 s on first
-use). The chunk count of the expert matmuls depends on the routing (rounded
-to 16 chunks), so the first request whose routing needs a new count builds
-that program (about 0.4 s). A long-running server collects them
-quickly; padding to the worst-case count would cost every request compute.
-
-### Lazy softcap (`feat/quality-sampling`)
-
-Capping 262,144 logits on the host took 0.34 ms per row (1.35 ms at batch 4)
-on every step; greedy and top-k sampling now cap only their candidates (see
-Sampling). Serving TPOT: 18.46 -> 18.14 ms at 1 user, 37.75 -> 36.44 ms at 4.
-
-### Compact boundaries for 2-4 rows (`perf/profiling`)
-
-**Finding.** A tt-scope capture of one traced batch-4 step on `main`
-(`results/profile/decode-b4-main.txt`) put 32.4 ms of kernel time and 1,778
-ops on chip 0. Experts and dense matmuls aside, about 7 ms went to glue
-between the layers' matmuls: 211 LayerNorms, 300 binary ops, 120 reshapes,
-423 interleaved/sharded conversions, slices, concats and typecasts. The 60
-all-gathers took another 3.3 ms, because they moved 32-row tile tensors for 4
-real rows. Batch 1 had removed exactly this with its compact boundaries.
-
-**Change.** The batch-1 boundary path now serves 1-4 rows
-(`DecoderLayer.decode_compact`):
-- **Residual layout.** The residual is one compact FP32 vector per row (3
-  dense tiles each; vector b at chunk 64 V b).
-- **Compact outputs.** The o_proj pack (`compact_pack.cpp`) and the expert and
-  MLP down streams (`expert_down_writer.cpp`) write each row's vector, and
-  the all-gathers move 6-24 compact tiles.
-- **Tails.** One attention tail and one feed-forward tail per layer do the
-  chip sum, every RMSNorm, the residual adds and the layer scalar (the
-  feed-forward partials are laid out `[mlp rows | expert rows]`). Each row's
-  tail runs on its own group of 6 cores, whose reader packs just that row's
-  vectors (`tail_reader.cpp`), so the compute kernel is the batch-1 one.
-- **Old path removed.** The row-form decode path (Attention.decode,
-  DecoderLayer.decode, the feed-forward's 4-row branch) is gone.
-
-**Tail cost** (`tests/boundary_check.py --tail-cores 6`, trace replay):
-
-| Variant | Attention tail at 4 rows | FF tail at 4 rows |
-|---|---:|---:|
-| One row on its own | 27 us | 37 us |
-| All rows on every core | 69 us | 111 us |
-| One core group per row | 53 us | 105 us |
-| One core group per row, row-only reads | 34 us | 48 us |
-
-The first per-row version still read every row's gathered tiles on every
-core, and that cost more than the math.
-
-**Result.**
-- Device kernel time per batch-4 step fell from 32.4 to 24.8 ms (chip 0), and
-  ops from 1,778 to 784 (`results/profile/decode-b4-compact.txt`).
-- Standalone traced steps (`scripts/bench_decode.py --trace`, 128 steps):
-  batch 2 28.85 -> 22.67 ms, batch 3 31.80 -> 26.44, batch 4 34.95 -> 29.49,
-  batch 1 unchanged.
-- Serving numbers are under Measurements.
-
-### Router op for 2-4 rows (`perf/profiling`)
-
-**Change.** `topk_router_gpt` took 69-72 us per layer at any batch, plus four
-reshape and typecast ops to flatten its `[T, k]` output into the streams'
-token-major `[1, T k]` row. The batch-1 router op (`boundary.Router`) now
-takes 1-4 rows:
-- each core writes its B partial rows into rows `slot B + b` of the reducer
-  tile;
-- a 0/1 sum matrix (`J[b, r] = 1` when `r mod B = b mod B`) adds each token's
-  rows;
-- the reducer RISC picks every row's top 8;
-- the op writes the flat row directly.
-
-At 3-4 rows, 8 cores of 11 K tiles replace 11 of 8, so the partial rows fit
-one tile. A version that kept 11 cores and spread the rows over two reducer
-tiles was no faster and was dropped.
-
-**Cost** (`tests/router_check.py`): 37-42 us at 1-2 rows, 54-68 us at 3-4.
-
-**Accuracy.** Same expert sets as `topk_router_gpt` in 94-100% of rows. Where
-they differ, `topk_router_gpt` is the one that is off: max weight error
-against an fp32 reference is 0.0007 for the router op and 0.11 for
-`topk_router_gpt`.
-
-**Result.** Batch-4 step 34.8 -> 33.8 ms before the compact boundaries. In
-both paths it runs merged with the MLP gate|up, as at batch 1.
-
-### Smaller changes
-
-- **Decode interleave.** An 8K prompt arriving during a stream was measured
-  with the plugin's settings (see Measurements); one decode step per prefill
-  chunk halves the stream gap at the same TTFT.
-- **Compile variety.** Expert-major prefill rounds its chunk count to 16,
-  since each new count compiled new programs.
-- **Not kept.**
-  - Reading the logits into a kept host tensor (`copy_device_to_host_tensor`)
-    and converting its shards: 1.0 ms against 0.66 ms for to_torch's mesh
-    composer, right after the trace ran.
-  - Two Ethernet links for the prefill all-gathers (`num_links=2`): the
-    gather hung (the fabric runs one link between the N300's chips), which
-    needed a card reset.
-  - Untilizing each expert call's output and concatenating row-major instead
-    of a tile concat: no change.
-  - BFP8 experts in a few layers: see Model quality.
-  - (`perf/profiling`) **One program per chip.** The two chips are harvested
-    differently (8 of 12 DRAM banks have a different nearest worker core).
-    Building the stream ops with each chip's own placement through a
-    `MeshProgramDescriptor` took chip 1's expert down from 29.8 to 25.5 us.
-    The batch-1 step span only fell 16.30 -> 16.18 ms, because the merged
-    router and MLP op got slower on chip 1. Reverted. The LM head, a ttnn
-    matmul, shows the same chip gap (117 vs 152 us) and is out of reach
-    without replacing it.
-  - (`perf/profiling`) **Gathering only the real rows** (untilize, row-major
-    all-gather, tilize): 12-17 us faster on the 5,632-wide gather, nothing
-    on the 2,816-wide one. The compact boundaries made it moot.
-
-## Device sampling and async decode (evaluated, not built)
-
-The plugin's async decode overlaps the host work of one step with the device
-work of the next. It needs the model to sample on the device, write the token
-back into the decode trace's input and advance the position there
-(`docs/DECODE_RELOAD_CONTRACT.md` in vllm-tt-plugin). A standalone split of
-one traced step (a one-off script, not kept; 30 steps, median):
-
-| Part | Batch 1 | Batch 4 |
-|---|---:|---:|
-| Host inputs (embedding, RMSNorm, RoPE tables) | 0.46 ms | 0.72 ms |
-| Input copies | 0.67-0.80 ms | 0.71 ms |
-| Trace execution | 15.7 ms | 31.0 ms |
-| Logit readback and softcap | 1.19-1.40 ms | 2.5-2.7 ms |
-
-Serving TPOT is 18.1 ms at batch 1, so async decode could hide about 2.4 ms
-of host work per step, minus the cost of sampling on the device:
-
-- `ttnn.topk` has a cliff: k = 32 over 8,192 columns takes 0.11 ms, 16,384
-  0.17 ms, 32,768 0.29 ms, but 65,536 16.7 ms (k = 64: 31.7 ms); a chip's
-  131,072 logits as 4 x 32,768 or the LM head's 16 x 8,192 pieces cost
-  1.2-1.8 ms before the cross-chip gather and the final draw.
-  tt-transformers' `TTSampling` splits the vocabulary only on a single
-  device, and upstream's Gemma 4 turns device sampling off above 64K
-  columns per chip, which is this case.
-- `ttnn.sampling` takes BF16 candidate logits (greedy near-ties would differ
-  from the fp32 argmax), at most 32 users, and its own seed scheme.
-- The token feedback needs the embedding on the device (0.74 GB per chip from
-  the vocabulary-split table, out of the KV pool) and the batch-1 compact FP32
-  inputs (RMSNorm of the embedding, RoPE tables) built in the trace.
-
-Net: about 0.6-1 ms per step (4%) at batch 1 and about 10% at batch 4, for a
-large change with weaker sampling semantics. The lazy softcap took the cheap
-part (0.34 / 1.35 ms).
-
-**Reassessed in `feat/quality-upstream`.** Upstream did not move: the Gemma 4
-LM-head issue (tenstorrent/tt-metal#44953) measured `TopKDeviceOperation` at
-10.1 ms of a Blackhole sampling step, and #52928 (closed) fixed wrong tokens
-from `TTSampling`'s half-width index tensor on single devices, so the
-upstream sampler is not a drop-in either. The cheapest path that keeps host
-sampling exact was measured on the device (`results/sampling/device-topk.txt`):
-cast the per-chip logits to BF16, view them as 32 x 4,096 rows (top-k is
-fast at that width), `ttnn.topk` 64 per row, and read only the candidates.
-
-| Batch | Device ops | Candidate read | Total | Today: full read + host top-k |
-|---|---:|---:|---:|---:|
-| 1 | 0.31 ms | 0.20 ms | 0.51 ms | 0.73 ms |
-| 4 | 2.21 ms | 0.23 ms | 2.43 ms | 2.53 ms |
-
-That saves 0.22 ms (1.2%) at batch 1 and nothing at batch 4 (top-k over 128
-rows and the reshape grow with the batch), before the fp32 gather a
-greedy-exact version would need; reshaping the fp32 row directly fails (its
-512 KB row-major page needs 2.2 MB of L1 per core). Async decode on top still
-needs the embedding on the device. So both stay unbuilt: the win needs a
-custom LM-head kernel that keeps per-core top-k candidates, which is a
-TT-Metal-sized change.
-
-MTP speculative decoding was evaluated on paper. This checkpoint has no MTP
-weights; upstream's drafter is a separate "assistant" model (4 layers) that
-reads the target's KV cache. Verifying K drafts here needs either a multi-token
-decode or a prefill that starts off the 128-token block grid, which the
-prefix-cache invariant forbids. On this DRAM-bound MoE, verifying 4 tokens
-reads close to 4x the expert weights (a batch-4 step costs 35 ms against
-17.5 ms at batch 1), so the best case is about 15-20% at batch 1.
-
-## Model quality and precision (`feat/quality-sampling`)
-
-**The QAT weights are Q4_0, which BFP4 cannot hold.** Every 32-input block of
-the expert, MLP and attention weights is an integer multiple of one step
-(4-bit integers -8..7, roughly Gaussian, 6% of the blocks use -8), stored in
-BF16. The step is learned (it does not follow llama.cpp's max / -8). The
-device stores the experts as BFP4: blocks of 16 along the output dimension,
-a shared power-of-two exponent and a sign plus 3-bit magnitude, so 15 levels
-on a power-of-two grid. Weight error of layer 3's experts (relative MSE):
-
-| Format | SNR |
-|---|---:|
-| BFP4 as stored now (blocks along outputs) | 20.2 dB |
-| BFP4 with the best exponent per block | 20.4 dB |
-| BFP4 with blocks along inputs, as Q4_0's | 20.4-20.8 dB |
-| Per-output-channel rescaling before BFP4 | 18.9-20.0 dB |
-| BFP8 | 43.2 dB |
-
-No BFP4 layout or rounding recovers the grid: a power-of-two step with 15
-levels cannot land on a learned step's 16 levels, and every variant stays near
-20 dB. Exact weights need a kernel that dequantizes Q4_0 blocks itself; a Q4_0
-block (32 values and an FP16 step) takes 4.5 bits per value, as a BFP4 tile
-does, so the DRAM traffic stays the same. The decode streams are custom
-kernels and could take it, but prefill uses ttnn's sparse matmul.
-
-What it costs, from a CPU emulation of the fp32 reference with BFP4 experts
-(bit-exact torch BFP4, 2,048 README tokens): KL 0.197 against fp32, top-1
-87.4%; at 512 tokens 0.341. The BF16 reference alone is at 0.163 at 512 tokens,
-so BFP4 experts are the largest single loss; the device model is at 0.42-0.46
-(decode) and 0.26 (prefill, 2,048 tokens).
-
-**Batch paths.** `scripts/compare.py --batch 4` scores the batched decode path
-on the same teacher-forced text: KL 0.423 and top-1 77.2% against 0.457 and
-75.8% for batch 1 (3 perturbed seeds each, `results/accuracy/batch-path/`), so
-concurrency changes which kernels run, not the accuracy. At a flat position
-the two paths can still differ from each other by as much (KL 0.50 between
-the batch-1 and batch-4 logits of a 3,500-token code prompt).
-
-**Mixed precision was not kept.** The KV pool needs 1.3 GiB per chip for four
-32K requests and has 2.5, so about five layers' experts fit in BFP8 (0.2 GB
-per chip each), at about 0.27 ms more per decode step and layer (+8% TPOT for
-five). In emulation, exact experts in layers 0-5 moved KL 0.197 -> 0.189 and
-in layers 2, 7, ..., 27 to 0.218 (2,048 tokens); a single exact layer moved it
-by -0.02 to +0.08 at 512 tokens. All of these are inside the run-to-run noise
-(0.04-0.07), so no layer choice is supported by the data.
-
-**Math fidelity** stays LoFi for the BFP4 experts: their weights carry 3
-mantissa bits, and in the earlier precision study (`results/accuracy/precision_study.json`)
-LoFi and HiFi2 runs differed only within the noise.
-Accumulation is FP32 in the destination registers, with few K blocks in the
-prefill sparse matmuls because each block boundary rounds the partial sum to
-BF16.
-
-### Q4_0 decode experts (`feat/quality-upstream`, experimental)
-
-**Result.** Decode with the checkpoint's own Q4_0 values instead of BFP4
-lowers KL against fp32 from 0.457 to 0.286 and raises top-1 agreement from
-75.8% to 81.3% (3 perturbed seeds each, `results/q4/`). It is not used for
-serving: prefill has no Q4 path yet, and two copies of the experts do not fit
-in DRAM.
-
-**Existing support.** TT-Metal has no Q4_0 or int4 tile format on Wormhole:
-`MxInt4` and `MxFp4` exist in the data-format enum but only Quasar's LLK
-unpacks them, and the unpacker's block formats share a power-of-two exponent
-per 16 values. So the kernels keep the weights in BFP4 tiles and carry the
-steps separately.
-
-**How the kernels work** (`gemma4_tt/tt/expert_q4.py`,
-`kernels/expert_q4_*`). A weight is W[k, n] = q[k, n] * s[k / 32, n].
-- **Integers.** BFP4 holds the integers -7..7 exactly. The rare -8 (0.2% of
-  the values, 6% of the blocks) is clamped to -7, which gives 35 dB weight SNR
-  against BFP4's 20 dB.
-- **Row placement.** A 32-input block is one K tile, so the writer puts the
-  token's K tile k into row k % 32 of an otherwise zero tile. The matmuls of a
-  group of 32 K tiles then leave each block's partial sum P[block, n] in its
-  own row of the FP32 dest.
-- **Scaling.** An SFPU multiply by a BF16 step tile (rows = blocks) and one
-  matmul with a ones row give y[n] = sum of s * P.
-- **Traffic.** The weight readers are unchanged; the steps add 12% to the
-  gate|up traffic and 14% to the down's (only the first 11 rows of a down step
-  tile are read).
-- **Fidelity.** The kernels run at HiFi3. The streams are DRAM-bound, so LoFi
-  and HiFi3 take the same time, but LoFi drops the activations' low bits
-  (24.8 dB against exact math, 52.3 dB at HiFi3).
-
-| Layer 0, one token | BFP4 | Q4_0 |
-|---|---:|---:|
-| gate\|up output SNR vs checkpoint weights | 16-19 dB | 28-34 dB |
-| down output SNR | 20-25 dB | 35-40 dB |
-| gate\|up device time | 47.8 us | 60.7 us |
-| down device time | 27.7 us | 41.2 us |
-
-The extra 26 us per layer would add about 0.8 ms per token at batch 1 (4%).
-
-**tt-scope** captures of `scripts/bench_q4_stream.py` gave the times above
-and drove three changes:
-- **Zero-fill.** The first version took 82 us. Zeroing the 88 x tiles with
-  512-byte reads cost 15 us; doubling local copies of one zero tile cost
-  6 us, and that time stays.
-- **Step reads.** Reading every slot's steps at once delayed the weight
-  stream's start; reading them one slot at a time took chip 1 from 65.8 to
-  61.6 us.
-- **Smaller blocks.** A group-major variant with 8-k-step blocks was slower
-  than the stock 11-step reader.
-
-The SFPU scaling (2 us) and the final sums (under 1 us) are small. A
-persistent zeroed L1 buffer would save the 6 us, at 176 KB of L1 per core
-for the model's lifetime.
-
-**Model quality.** Host emulation (`scripts/q4_emulation.py`) and the device
-agree on the ranking:
-
-| Experts | Emulation, fp32 compute (2,048 tokens) | Emulation, BF16 compute (512) | Device decode |
-|---|---:|---:|---:|
-| exact Q4_0 | 0.025 | 0.174 | - |
-| Q4_0, -8 clamped | 0.110 | 0.250 | 0.286 |
-| BFP4 | 0.197 | 0.347 | 0.457 |
-
-**The -8 clamp** costs about 0.08 KL in BF16 emulation. A +1 offset per block,
-corrected with the block's activation sum, would store 95% of the blocks that
-hold a -8 exactly. In emulation it recovered only 0.024 of the 0.085 gap,
-because the remaining blocks hold both -8 and 7. BFP4's 15 levels cannot hold
-those, so exactness would need sparse corrections. Not built.
-
-**Why prefill blocks serving.**
-- **No Q4 matmul.** ttnn's indexed sparse matmul has no per-(block, output)
-  scale.
-- **Dequantizing is too slow.** Dequantizing a layer with `ttnn.multiply`
-  (row-broadcast steps) took 34 ms for gate|up alone, about 1 s per prefill
-  chunk.
-- **The steps don't factor.** The step matrices are not low rank: a rank-8
-  log fit gives 18 dB weights.
-- **Memory.** Keeping BFP4 for prefill next to Q4 for decode needs 6 GB more
-  per chip.
-
-`perf/profiling` tried the cheapest remaining route to serving with a gate
-of 3.5 ms per layer. A dequantization kernel (one work item per expert, 32-K
-group and column tile) multiplies each integer tile by its step row
-(row-broadcast FPU multiply) and packs a temporary BFP4 tensor for today's
-sparse matmul. It worked once its reader stopped overrunning a circular
-buffer: 32-tile reservations in a ring that 24-tile pushes had misaligned
-needed three card resets to find.
-
-| Dequant output | Per layer | Per prefill chunk (30 layers) |
-|---|---:|---:|
-| BFP4 | 3.7 ms | ~110 ms |
-| BFP8 | 5.9 ms | ~180 ms |
-
-The packer truncates when it packs BFP formats, even with
-`bfp8_pack_precise`: only 57% of values matched host round-to-nearest. So
-the BFP4 output was less accurate than today's weights, and the BFP8 output
-would also slow the prefill matmuls. With 40-75% more TTFT on a 128-token
-prompt, the gate failed, and the kernel was not kept.
-
-A Q4 prefill therefore needs an expert-major kernel that dequantizes inside
-the matmul. To amortize the dequantization it must keep a weight tile for all
-of an expert's chunks; today's indexed sparse matmul re-reads the weights
-per 32-row chunk. Until then, `Precision(expert_q4=True)` serves only
-accuracy runs (`scripts/compare.py --precision expert_q4=1`). In that mode
-prefill runs the batch-1 streams one token at a time, and batch 2-4 decode
-does the same.
-
-### Q4_0 for the dense weights (`perf/profiling`, emulation only)
-
-Every 2-D tensor in the checkpoint is Q4_0: attention, dense MLP, router and
-the tied embedding / LM head, all blocks factor. Their BFP8 copies are what
-the decode streams and LM head read most. BF16-compute emulation with BFP4
-experts, 512 tokens (`EMU_DENSE` in `scripts/q4_emulation.py`):
-
-| Dense weights | KL vs fp32 |
-|---|---:|
-| BFP8 (today) | 0.391 |
-| Q4_0, -8 clamped | 0.561 |
-| Q4_0, +1 shift where it fits | 0.348 |
-| Q4_0 exact | 0.311 |
-
-Q4_0 would cut those weights' traffic by about 40%, roughly 2 ms of a
-15.7 ms batch-1 step. But the clamp that is enough for the experts is worse
-than BFP8 here, so it would need the shift correction (an extra
-activation-sum matmul per block group). It would also need new stream kernels
-for QKV, o_proj and the 131,072-column LM head, plus BFP8 copies kept for
-prefill. Deferred.
-
-## Profiling
-
-**tt-scope** (v0.4.0, `tracy` mode) was used for two captures of one traced
-batch-4 decode step, before and after the batched streams:
-
-    pixi run tt-scope tracy scripts/profile_workload.py --programs 8000 -- --batch 4 --decode-steps 2 --trace
-    pixi run python scripts/trace_breakdown.py artifacts/runs/<run> --phase decode1
-
-`scripts/trace_breakdown.py` recomputes op time and gaps from device firmware
-cycles; a per-op grouping of its data gave the tables in
-`results/profile/decode-b4-{before,after}.txt` (raw runs stay in the
-git-excluded `artifacts/runs/`). The "before" capture ran the KV rewrite just
-before the streams, not the round-2 code. Findings that shaped decisions:
-
-- before: 2,348 ops, 50.9 ms kernel time per chip, 0.86 ms of gaps. Expert
-  `sparse_matmul` 20.5 ms, gate/up slicing 3.3 ms, `topk_router_gpt` 2.1 ms.
-  Gaps were small, so the fix had to cut kernel time, not dispatch.
-- after: 1,898 ops, 31.5 ms. Expert gate|up 191 us and down 86 us per layer
-  (about 204 and 226 GB/s, close to the DRAM limit for 32 slots); the router,
-  norms and LM head now lead.
-
-`feat/quality-sampling` added two captures of one 2,048-token prefill of
-random tokens, before and after the one-tile expert chunks:
-
-    pixi run tt-scope tracy scripts/profile_workload.py --name prefill2048 --programs 12000 -- --prompt-len 2048 --decode-steps 0
-
-The per-type tables are `results/profile/prefill-2048-{before,after}.txt`.
-Findings that shaped decisions:
-
-- before: 2,569 ops, 1,390 ms kernel time on chip 0, 157 ms of gaps. Sparse
-  matmuls 462 ms (33%), all-gathers 161 ms, the expert row gathers
-  (`ttnn.embedding`) 153 ms, slices 81 ms, GELU 69 ms, untilize 65 ms,
-  concat 60 ms. Per layer, the glue around the experts cost about as much as
-  the expert matmuls (15 vs 16 ms), and the gate|up sparse matmul ran on only
-  24 cores (its 1D config splits the 768 output columns, one tile per core).
-- after: 3,499 ops, 1,110 ms. Sparse matmuls 368 ms, gathers 80 ms, slices
-  30 ms. The all-gathers (162 ms, about 6 GB/s over the one Ethernet link)
-  are now the second item.
-
-`feat/quality-upstream` captured `scripts/bench_q4_stream.py` (one layer's
-BFP4 and Q4 expert streams, trace replays) about ten times while tuning the
-Q4 kernels; device kernel durations per op came from the ops CSV. The
-findings are under Q4_0 decode experts. Wall-clock timing of the same
-script varied by up to 2x while a CPU emulation loaded the host, so only the
-tt-scope numbers were used.
-
-`perf/profiling` used tt-scope throughout:
-- **Baselines.** Captures of one traced batch-1 and batch-4 step on `main`
-  (`results/profile/decode-b1-now.txt`, `decode-b4-main.txt`).
-- **Batch-4 glue.** The batch-4 capture located the ~7 ms of glue and the
-  padded all-gathers behind the compact boundaries.
-- **Chip gaps.** The batch-1 capture showed chip 1 slower on the
-  DRAM-streaming ops (LM head 152 against 117 us, expert down 29.8 against
-  26.0 us). Swapping the stream placements between the chips moved that gap
-  (26.0 / 29.5 us with chip 0's placement, 42.6 / 25.8 with chip 1's), which
-  pinned it on core placement (see Not kept).
-- **Dequant timing.** Device time of the Q4 dequantization kernel.
-- **After the change.** A capture of the new batch-4 step
-  (`decode-b4-compact.txt`): 784 ops, 24.8 ms. The experts (8.3 ms, at the
-  DRAM limit for 32 slots), the merged router and MLP op (2.1 ms), the LM head
-  (1.9 ms) and the QKV matmuls (1.7 ms) now lead.
-
-**Other tools, not tt-scope:**
-
-- standalone timing: `scripts/bench_decode.py --trace` (per-step wall time),
-  `scripts/trace_time.py` (blocking trace time), a one-off script that split a
-  step into input copies, trace execution and logit readback (inputs 1.5 ms,
-  readback 1.15 ms at batch 1 and 2.83 ms at batch 4);
-- `ttnn.get_memory_view` (`scripts/memory_report.py`): per-chip DRAM after
-  weights, and the leak test that found `ttnn.all_reduce`'s per-shape cache;
-- server logs with `GEMMA4_TIMING=1`: per-chunk prefill time and per-step
-  decode time, used for the interleave and compile findings;
-- `vllm bench serve` (`scripts/bench_tis.sh`) and `scripts/serve_check.py`.
-- `perf/profiling`:
-  - a host split of a batch-1 step: input build 0.43 ms, mostly nine
-    `from_torch` calls; logit readback 0.46 ms; host sampling 0.15 ms greedy,
-    0.41 ms top-k/p;
-  - server logs with `GEMMA4_TIMING=1`: 17.1-17.4 ms inside the model,
-    1.2-1.4 ms outside it per step, so about 0.9 ms is vLLM and the plugin;
-  - `tests/boundary_check.py --rows` and `tests/router_check.py --rows`;
-  - `scripts/bench_decode.py` against a worktree of `main`;
-  - `scripts/bench_tis.sh` against both servers.
-- `feat/quality-sampling`: a one-off host split of a traced step (input build,
-  copies, execution, readback; the table under Device sampling), `ttnn.topk`
-  and all-gather microbenchmarks, standalone prefill timing on README text,
-  `scripts/ttft_lengths.py` against the server, `scripts/compare.py --batch`
-  for the batched path's accuracy, and a CPU emulation of BFP4 experts on the
-  fp32 reference (no ttnn: a ttnn host conversion starts the device cluster,
-  and doing that next to a device job once needed a card reset).
-
-## Measurements
-
-Serving: `scripts/bench_tis.sh` (tt-inference-server's client recipe: chat
-endpoint, random prompts, ignore-EOS, greedy), mean of 3 runs after a
-discarded warm-up, CPU governor `performance`. Round 2:
-`results/compare/tis-match/`. `feat/serving`: `results/compare/feat-serving/`.
-`feat/quality-sampling`: `results/compare/quality-sampling/`.
-
-| Point | TTFT round 2 / serving / now | TPOT round 2 / serving / now | Output tok/s now |
-|---|---:|---:|---:|
-| 1 user, 128 in / 128 out | 237 / 238 / 236 ms | 18.17 / 18.45 / 18.08 ms | 50.5 |
-| 1 user, 2,048 / 128 | 1.57 / 1.48 / 1.21 s | 19.32 / 19.67 / 19.33 ms | 34.9 |
-| 1 user, 8,192 / 128 | 6.95 / 5.15 / 4.36 s | 19.69 / 20.02 / 19.65 ms | 18.7 |
-| 2 users, 128 / 128 | - / 308 ms / - | ~42 / 30.74 ms / - | - |
-| 4 users, 128 / 128 | 736 / 694 / 695 ms | 57.95 / 37.75 / 36.19 ms | 96.7 (63.2, 93.2) |
-
-`perf/profiling` (`results/compare/perf-profiling{,-base}/`): `main` and this
-branch measured the same day, 128 in / 128 out.
-
-| Point | TPOT main -> now | Output tok/s main -> now | TTFT now |
-|---|---:|---:|---:|
-| 1 user | 18.07 -> 18.08 ms | 50.6 -> 50.6 | 231 ms |
-| 2 users | 29.6 -> 23.1 ms | 62.8 -> 79.1 | 300 ms |
-| 4 users | 36.17 -> 30.77 ms | 96.9 -> 111.3 | 691 ms |
-
-The 2-user `main` numbers come from a run's log; its files were lost to a
-mislabeled directory (`results/compare/perf-profiling/standalone-decode.txt`).
-
-Sampled (generation-config temperature 1, top-k 64, top-p 0.95), measured after
-the lazy softcap and before the prefill changes: TPOT 18.50 ms at 1 user,
-37.34 ms at 4 users.
-
-Standalone prefill of README text (`feat/serving` -> now, one call, min of 2):
-512 tokens 0.514 -> 0.450 s, 2,048 1.581 -> 1.269 s, 4,096 2.640 -> 2.405 s,
-8,192 5.618 -> 5.101 s. One-token requests at lengths the server has not seen
-(`scripts/ttft_lengths.py`, whole-request time, `results/compare/quality-sampling/ttft-unseen-lengths.txt`):
-3.4-4.9 s mean on a fresh `feat/serving` server (single requests up to 9.7 s,
-1.39 s once built), 1.17-1.37 s now.
-
-Prefix reuse (`results/compare/feat-serving/c1-prefix6144-*`, 6,144 shared
-plus 256 new tokens, 1 user): 323 ms median TTFT once the prefix is cached.
-`serve_check.py`'s 8K-token chat follow-up: 1.29-1.69 s with the cache,
-7.36-7.76 s with a cache salt, same 48 tokens.
-
-Decode interleave, 8,192-token prompt arriving during a stream (server logs
-and `serve_check.py arrival`, steady state, 3 runs each; numbers in commit
-`1941c2f`):
-
-| Chunk, prefill steps per decode step | Longest stream gap | 8K TTFT |
-|---|---:|---:|
-| 2,048, 2 (plugin default) | 3.38 s | 6.53 s |
-| 2,048, 1 (configured) | 1.72 s | 6.56 s |
-| 1,024, 1 | 1.00 s | 7.18 s |
-
-Before chunked prefill the same arrival held the stream for 5.66 s. With the
-faster prefill (`serve_check.py` on `feat/quality-sampling`): longest gap
-1.45 s, the 8K request's first token after 5.4 s, and the uncached 8K
-follow-up turn 6.2-6.6 s (cached: 1.26 s).
-
-Standalone traced decode (`scripts/bench_decode.py --trace`, 128 steps,
-median): batch 1 17.54 -> 17.50 ms, batch 4 56.49 -> 35.42 ms (70.8 -> 112.9
-tok/s total), batch 2 28.92 ms. `perf/profiling`: batch 1 17.76 ms, batch 2
-22.67, batch 3 26.44, batch 4 29.49 (135.6 tok/s total).
-
-Uncertainty:
-
-- Single-user serving TPOT is 1.5% slower while standalone decode is
-  unchanged. The likely cause is host bookkeeping for six KV groups instead of
-  one (the plugin pads the global group's table every step); it was not
-  profiled.
-- Decode accuracy against the fp32 reference, 3 seeds with matched noise: KL
-  0.421 (round 2) vs 0.457 (now), top-1 0.777 vs 0.758. A bisect puts all of
-  it on the prefill reduction, the more exact of the two; prefill-only KL
-  moved the other way. This is within the known ulp sensitivity, but 3 seeds
-  cannot exclude a small effect (`results/accuracy/matched-noise/README.md`).
-- GPQA Diamond, upstream QB2 settings: 26/40, 7/10 on upstream's subset
-  (`results/quality/gpqa-feat-serving/`). Upstream gates its higher-precision
-  QB2 build on 8/10; with 40 sampled answers the 95% interval is about +-15
-  points, so this is a local baseline only.
-
-## Validation
-
-- `tests/smoke_chunked.py` (random weights): chunked prefill, a prefix hit on
-  shared blocks, vLLM-shaped tables, the null block never written, an
-  off-grid start refused. PCC >= 0.99998 against one full prefill.
-- `tests/smoke_consistency.py`, batches 1-4 and past the window: decode vs
-  prefill PCC 0.99996-0.99999. `tests/smoke_inactive.py`: 0.99998.
-- `scripts/bench_expert_stream.py --rows 4`: batched stream against the
-  prefill expert path, PCC 0.99972-0.99986 per row.
-- `scripts/greedy_check.py`: 4/4 prompts match the round-2 greedy tokens.
-- `scripts/serve_check.py` on the final code: concurrent requests (first 16
-  tokens, see Multi-user decode), raw tokens at temperature 0 twice, an 8K
-  arrival during a stream, a cancelled stream, a prefix hit confirmed through
-  vLLM's metrics against a salted miss, seeded sampling. All pass.
-- `scripts/serve_check.py preempt` (`feat/quality-sampling`), on a server
-  started with `GEMMA4_KV_POOL_GIB=0.2 ... --max-model-len 4096`: four number
-  lists outgrow the 313-block pool together, vLLM preempts one and resumes it
-  by recomputation, and all four equal their solo runs over 1,536 tokens
-  (twice, one preemption each). Code and raw-completion prompts were first
-  tried and dropped: their flat distributions diverge within a few tokens from
-  batch numerics alone, which hides what the check is for.
-- A feature probe against the server (`feat/quality-sampling`): tool calls
-  with `tool_choice=auto` and a tool-result turn, JSON schema and JSON object
-  outputs, regex and choice constraints (enforced: a choice of
-  "purple"/"seven" for a yes/no question returned "seven"), reasoning
-  output, logprobs with top logprobs, presence/frequency/repetition
-  penalties, min-p with top-k 5,000, `n=2`, stop strings with `min_tokens`,
-  `logit_bias`, `echo`. All behave as on vLLM's other backends.
-
-- `feat/quality-upstream`: `scripts/serve_check.py tools` (in the default
-  set): `auto` with and without a needed tool, `required` for a greeting, and
-  a named tool for a question that fits the other tool, with thinking on and
-  off. The streamed `required` call parses as well. `scripts/greedy_check.py`
-  matches its saved outputs 4/4 after the expert refactor, and
-  `scripts/bench_q4_stream.py` checks the Q4 streams against host math.
-
-- `perf/profiling`:
-  - **Kernels.** `tests/boundary_check.py --rows 1 4` (PCC >= 0.999998 per
-    output) and `tests/router_check.py --rows 1 2 3 4`.
-  - **Smokes.** `tests/smoke_consistency.py` at batches 1-4 (decode vs
-    prefill PCC 0.99997-0.99998, same top-1), `smoke_chunked`,
-    `smoke_inactive`, `mlp_stream_check`.
-  - **Greedy.** `greedy_check` matches 4/4.
-  - **Accuracy.** Decode against fp32 (`results/accuracy/compact-rows/`, 3
-    seeds): batch 1 KL 0.457, top-1 0.758 (bit-identical to before); batch 4
-    KL 0.449, top-1 0.766 (the old batch-4 path: 0.423 and 0.772, inside the
-    0.04-0.07 noise).
-  - **Serving.** `serve_check.py` passes isolation, raw, arrival, cancel,
-    seeded and tools; `preempt` passes on a 0.2 GiB pool.
-  - **Prefix check.** `prefix` fails on both `main` and this branch, the same
-    way (13/48 tokens). Its prompt is built from repository files, which this
-    milestone changed, and the new prompt has a near-tie at token 13 between
-    the cached BFP8 K/V and the fresh prefill. It is not a regression of
-    this code.
-  - **Reviews.** An independent review (GPT-6.2 Sol) found a Q4-mode crash
-    with more than one row (now refused at load), a router output allocator
-    that could undersize its buffer (one allocator now), an emulation that
-    could mislabel unfactorable blocks (now raises; none exist), and
-    oversized tail buffers (now one row's worth).
+The model-side sampler (`sample` in `vllm_adapter.py`) runs on the host after
+the logits are read back: greedy is an argmax, sampling takes the top
+k <= 1,024 candidates and applies temperature, top-p and a seed keyed by
+(seed, position). Only the candidates get the final softcap
+([lazy softcap](experiments/2026-11-21-lazy-softcap.md)); logprobs and vLLM's
+host sampler still get the whole capped row. Device sampling and async
+decode were evaluated and not built
+([device sampling](experiments/2026-11-21-device-sampling.md)).
+
+### Tool choice
+
+`src/tt_models/models/gemma4/tool_parser.py` registers xgrammar's `gemma_4`
+structural tag, so `tool_choice="required"` and named tools are enforced
+([tool choice](experiments/2026-11-21-tool-choice.md)). It needs the
+xgrammar override in `pixi.toml`.
+
+### Precision
+
+Experts are BFP4 at LoFi; attention, MLP, LM head and KV cache are BFP8; the
+residual stream between layers is FP32 (`config.Precision`). The checkpoint
+is Q4_0, which BFP4 cannot hold
+([weight formats](experiments/2026-11-17-weight-precision.md),
+[BFP4](experiments/2026-11-21-bfp4-mixed-precision.md)).
+`Precision(expert_q4=True)` reads the exact Q4_0 experts in batch-1 decode;
+it is for accuracy runs only, because prefill then runs one token at a time
+([Q4_0 decode experts](experiments/2026-11-21-q4-decode-experts.md)).
 
 ## Capabilities
 
 | Capability | Status |
 |---|---|
-| Continuous batching, 1-4 concurrent requests | Supported; more than 4 rows is refused at load |
-| Prefix caching | Supported, 128-token hit granularity |
+| Continuous batching | Up to `STREAM_ROWS` concurrent requests; more rows are refused at load |
+| Prefix caching | Supported, block-grid hit granularity |
 | Chunked prefill with decode interleave | Supported |
-| Preemption and resumption | Supported, verified with a small pool (`serve_check.py preempt`) |
+| Preemption and resumption | Supported (`serve_check.py preempt`) |
 | Streaming, stop sequences, EOS, cancellation | Supported |
 | Temperature, top-k <= 1,024, top-p, seed | Model-side sampler on the host; a seeded request can draw differently when a co-batched request forces vLLM's host sampler |
 | Penalties, min-p, larger top-k, logprobs | vLLM's host sampler (per-step fallback) |
 | Structured output, tool calls, reasoning parser | Through vLLM (host grammar, gemma4 parsers) |
-| `tool_choice="required"` or a named tool | Enforced (`feat/quality-upstream`): `gemma4_tt/tool_parser.py`, see Tool choice |
+| `tool_choice="required"` or a named tool | Enforced by `tool_parser.py` |
 | `n > 1`, `logit_bias`, `echo` | Supported |
-| Embeddings endpoint | No (generative model only) |
-| `prompt_logprobs` | No (refused by the TT plugin) |
-| Async decode, device sampling, penalties or grammar | No: evaluated twice; the ttnn-op top-k path saves 1.2% at batch 1 (see Device sampling and async decode) |
-| Q4_0 experts (exact checkpoint integers) | Experimental, accuracy runs only: batch-1 decode kernels (`max_batch=1`), no Q4 prefill (see Q4_0 decode experts) |
-| vLLM Python streaming-input sessions | No: can resume prefill off the block grid |
-| Multimodal, speculative decoding, data parallel | No (MTP: no heads in this checkpoint, see above) |
-| KV pool size | `GEMMA4_KV_POOL_GIB` (default 2.5 GiB per chip) |
+| Embeddings, `prompt_logprobs` | No (generative model; the plugin refuses prompt logprobs) |
+| Async decode, device sampling | No (evaluated, see above) |
+| Q4_0 experts | Accuracy runs only |
+| vLLM streaming-input sessions | No: they resume prefill off the block grid |
+| Multimodal, speculative decoding, data parallel | No (no MTP heads in this checkpoint) |
 
-## Future work
+## Checking a change
 
-- **Quality: Q4_0 serving.** The decode kernels exist and cut decode KL from
-  0.457 to 0.286. Serving needs:
-  - an expert-major prefill kernel that dequantizes Q4_0 inside the matmul and
-    keeps each weight tile for all of an expert's chunks;
-  - batch-2-4 versions of the down kernel (gate|up already places one token
-    per core);
-  - compact down step tiles (11 of 32 rows are used today, 0.75 GB per chip);
-  - a smaller KV pool for the steps (about 0.9 GB per chip compact).
+Run what the change can affect, from the repository root. `py` stands for
+`pixi run python`.
 
-  A persistent zeroed L1 buffer would save 6 us per gate|up op.
-- **Device sampling and async decode.** ttnn ops give only 1.2% at batch 1. A
-  fused LM-head top-k (per-core candidates written by the matmul's cores) and
-  a device embedding are the prerequisites.
-- **Batch 2-4 decode.** The compact boundaries and the router op are done.
-  The step is now experts first (8.3 ms at 4 rows, at the DRAM limit).
-  Expert slots that several users share are still read once per user;
-  deduplicating them would save about 10% of the expert time for random
-  routing, more when users share experts. The router op's per-row top-k
-  costs 54-68 us at 3-4 rows. RoPE at 2-4 rows still uses generic ops.
-- **Host overhead at batch 1.** 2.7 ms per step outside the device: input
-  build 0.43, readback 0.46, sampling 0.15-0.41, vLLM and the plugin ~0.9.
-  Only async decode with device sampling and a device embedding removes most
-  of it (see Device sampling).
-- **Prefill.** About 1,700 tokens/s at 2,048. The all-gathers (15%) are
-  link-bound on one Ethernet link; the gate|up sparse matmul uses 24 of 64
-  cores; the expert row gathers and the gather back still cost 6 ms per layer.
-- **Tool choice upstream.** The plugin in `gemma4_tt/tool_parser.py` can go
-  once vLLM sets `structural_tag_model` for gemma4 and pins xgrammar >= 0.2.9
-  (asked for in vllm-project/vllm#53363).
-- **Validation.** More GPQA questions or seeds before comparing precision
-  choices.
+| What | Command |
+|---|---|
+| Host logic | `pixi run pytest` |
+| Device paths, random weights | `pixi run pytest -m device` |
+| One kernel against torch or ttnn | `py scripts/kernels/<name>_check.py` |
+| Greedy outputs | `py scripts/accuracy/greedy_check.py --compare scripts/accuracy/greedy-base.json` |
+| Decode accuracy against fp32 | `py scripts/accuracy/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb <k>` for k = 1..3 |
+| Standalone speed | `py scripts/bench/decode.py --batch <B> --steps 128 --trace`, `py scripts/bench/prefill.py` |
+| Serving lifecycle | `py scripts/serve/serve_check.py` against a running server |
+| Preemption | `GEMMA4_KV_POOL_GIB=0.2 pixi run serve-gemma4 --max-model-len 4096`, then `py scripts/serve/serve_check.py preempt` |
+| Serving speed | `pixi run bash scripts/serve/bench_tis.sh <label> c1-128-128-n8 c4-128-128-n16` |
 
-## Reproduce
+All kernel checks, one process each:
 
-    pixi run python tests/smoke_chunked.py
-    pixi run python tests/smoke_consistency.py --prompt-len 1100 --batch 3
-    pixi run python scripts/bench_decode.py --batch 4 --steps 128 --trace
-    pixi run serve-gemma4   # then, in another shell:
-    pixi run python scripts/serve_check.py
-    pixi run python scripts/ttft_lengths.py 3
-    pixi run bash scripts/bench_tis.sh <label> c1-128-128-n8 c4-128-128-n16
-    GEMMA4_KV_POOL_GIB=0.2 pixi run serve-gemma4 --max-model-len 4096   # then:
-    pixi run python scripts/serve_check.py preempt
-    pixi run python scripts/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb 1 --batch 4
-    pixi run python scripts/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb 1 --precision expert_q4=1
-    pixi run python scripts/bench_q4_stream.py --seeds 2
-    pixi run python tests/boundary_check.py --rows 1 4
-    pixi run python tests/router_check.py --rows 1 2 3 4
-    pixi run bash scripts/bench_tis.sh <label> c1-128-128-n8 c2-128-128-n8 c4-128-128-n16
-    pixi run python scripts/q4_emulation.py results/q4/emulation.json q4exact q4clamp bfp4
-    uv run --no-project --with-requirements scripts/gpqa_eval.requirements.txt \
-        python scripts/gpqa_eval.py --count 40 --out results/quality/gpqa-<label>
+    for f in scripts/kernels/*_check.py; do pixi run python "$f" || break; done
+
+Accuracy needs 3 seeds and speed a same-day baseline
+([experiments](experiments/README.md)). A numerics-preserving change should
+leave `compare.py`'s metrics identical.
+
+## Profiling
+
+    pixi run tt-scope tracy scripts/profile/workload.py --programs 8000 -- --batch 4 --decode-steps 2 --trace
+    pixi run python scripts/profile/trace_breakdown.py artifacts/runs/<run> --phase decode1
+
+`trace_breakdown.py` recomputes op time and gaps from device firmware cycles,
+because tt-scope's op-to-op latency is host time under trace replay
+([tt-scope findings](experiments/2026-11-19-tt-scope-findings.md)). Other
+tools: `scripts/bench/trace_time.py` (blocking trace time),
+`scripts/profile/memory_report.py` (per-chip DRAM),
+`scripts/bench/soak.py` (DRAM growth over many traced steps), and server logs
+with `GEMMA4_TIMING=1` (per-chunk prefill and per-step decode time).
+
+## Open work
+
+- **Q4_0 serving.** Needs an expert-major prefill matmul that dequantizes
+  inside, batch 2-4 down kernels, compact step tiles, and DRAM for the steps
+  ([prefill dequantization](experiments/2026-11-21-q4-prefill-dequant.md)).
+- **Device sampling and async decode.** Needs a fused LM-head top-k and a
+  device embedding.
+- **Multi-row decode.** Expert slots shared by several users are read once
+  per user; RoPE at 2-4 rows uses generic ops.
+- **Host overhead.** Input build, readback, sampling and vLLM bookkeeping
+  run outside the device each step; only async decode removes most of it.
+- **Prefill.** The all-gathers are bound by one Ethernet link, and the
+  gate|up sparse matmul uses a fraction of the cores.
+- **Tool choice upstream.** Drop `tool_parser.py` once vLLM sets the
+  structural tag for gemma4 (vllm-project/vllm#53363).
+- **Quality.** More GPQA questions or seeds before comparing precision
+  choices ([GPQA baseline](experiments/2026-11-21-gpqa-baseline.md)).

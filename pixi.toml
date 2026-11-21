@@ -1,5 +1,5 @@
 [workspace]
-name = "tt-vllm"
+name = "tt-models"
 channels = ["conda-forge"]
 requires-pixi = ">=0.81"
 # The ttnn wheel needs glibc 2.34; Ubuntu 22.04 has 2.35.
@@ -26,10 +26,12 @@ VLLM_TARGET_DEVICE = "empty"
 TT_METAL_RUNTIME_ROOT = "$CONDA_PREFIX/lib/python3.12/site-packages/ttnn/"
 TT_METAL_HOME = "$CONDA_PREFIX/lib/python3.12/site-packages/ttnn"
 TT_METAL_PROFILER_DIR = "$PIXI_PROJECT_ROOT/artifacts/profiler"
-# Makes the gemma4_tt package importable from scripts and vLLM workers.
-PYTHONPATH = "$PIXI_PROJECT_ROOT"
 
 [pypi-dependencies]
+# This repository's package (src/tt_models), editable.
+tt-models = { path = ".", editable = true }
+# Test runner: `pytest` for host checks, `pytest -m device` for the N300 ones.
+pytest = "*"
 # Stanley5249/tt-metal release: Tracy-enabled ttnn with SFPI and tt_transformers' models/.
 ttnn = { url = "https://github.com/Stanley5249/tt-metal/releases/download/v0.81.1-conda.8/ttnn-0.81.1%2Bconda.8-cp312-cp312-linux_x86_64.whl" }
 # The torch pair tt-metal 0.81 is tested with, as CPU builds: PyPI's Linux
@@ -54,7 +56,7 @@ opencv-python-headless = "==4.11.*"
 # vllm-tt-plugin's supported range (docs/vllm-overrides.txt).
 transformers = ">=5.16.1,<5.17"
 # vLLM 0.32 pins 0.2.8; 0.2.9 adds the gemma_4 structural tag (Gemma 4's
-# <|"|> string syntax) that gemma4_tt/tool_parser.py uses for required and
+# <|"|> string syntax) that src/tt_models/models/gemma4/tool_parser.py uses for required and
 # named tool choice. The API is otherwise unchanged.
 xgrammar = "==0.2.9"
 
@@ -83,7 +85,8 @@ TT_CACHE_PATH = "$PIXI_PROJECT_ROOT/cache/Qwen3-8B"
 # stream's gap at ~1.7 s while an 8K prompt prefills, with the same TTFT as two
 # chunks per step (3.4 s gap). 1024-token chunks give 1.0 s at 10% more TTFT.
 # The 200 MB trace region holds four decode traces, one per active row count.
-# decode_only uses the model-side top-k sampler in gemma4_tt/vllm_model.py.
+# decode_only uses the model-side top-k sampler in tt_models.models.gemma4.vllm_adapter.
+# The model class and the gemma4_tt tool parser come from tt_models.vllm_plugin.
 cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
   --host 127.0.0.1 --port 8000 \
   --served-model-name gemma4 \
@@ -91,7 +94,7 @@ cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
   --max-num-seqs 4 \
   --max-model-len 32768 \
   --max-num-batched-tokens 2048 \
-  --enable-auto-tool-choice --tool-parser-plugin gemma4_tt/tool_parser.py --tool-call-parser gemma4_tt \
+  --enable-auto-tool-choice --tool-call-parser gemma4_tt \
   --reasoning-parser gemma4 \
   --default-chat-template-kwargs '{"enable_thinking": true}' \
   --limit-mm-per-prompt '{"image": 0, "audio": 0, "video": 0}' \
@@ -99,4 +102,3 @@ cmd = """vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
 
 [tasks.serve-gemma4.env]
 MESH_DEVICE = "N300"
-TT_MODEL_CLASS_OVERRIDES = "TTGemma4ForConditionalGeneration=gemma4_tt.vllm_model:Gemma4ForCausalLM"

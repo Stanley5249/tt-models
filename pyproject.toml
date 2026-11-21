@@ -1,0 +1,36 @@
+[project]
+name = "tt-models"
+version = "0.1.0"
+description = "Tenstorrent model implementations served through vLLM and vllm-tt-plugin"
+requires-python = ">=3.12"
+# The runtime stack (ttnn, torch, vLLM, vllm-tt-plugin) is pinned in pixi.toml.
+dependencies = []
+
+# vLLM loads this in every process: the model classes and the gemma4_tt tool parser.
+[project.entry-points."vllm.general_plugins"]
+tt_models = "tt_models.vllm_plugin:register"
+
+[build-system]
+requires = ["uv_build>=0.9.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+# B905: the zips pair sequences built to the same length. E741: H, I and E
+# name model dimensions, as in the checkpoint config.
+ignore = ["B905", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# The timed lambdas run within their own loop iteration.
+"scripts/kernels/*" = ["B023"]
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["device: needs the N300 (run with `pytest -m device`)"]
+addopts = "-m 'not device'"
