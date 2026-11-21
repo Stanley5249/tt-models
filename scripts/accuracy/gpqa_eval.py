@@ -91,8 +91,7 @@ def main():
                 "finish_reason": choice["finish_reason"],
                 "completion_tokens": response.json()["usage"]["completion_tokens"],
                 "seconds": round(time.perf_counter() - t0, 1),
-                "text": text,
-            }
+            }  # no answer text: it restates GPQA questions, which must stay unpublished
             rows.append(row)
             log.write(json.dumps(row) + "\n")
             log.flush()
