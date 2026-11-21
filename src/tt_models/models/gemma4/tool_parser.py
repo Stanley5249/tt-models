@@ -1,6 +1,6 @@
-"""Gemma 4 tool parser that enforces required and named tool choice.
+r"""Gemma 4 tool parser that enforces required and named tool choice.
 
-    vllm serve ... --tool-parser-plugin \\
+    vllm serve ... --tool-parser-plugin \
         src/tt_models/models/gemma4/tool_parser.py --tool-call-parser gemma4_tt
 
 vLLM 0.32's `gemma4` parser sets no structural tag, so `tool_choice="required"`
@@ -43,8 +43,9 @@ def _object_arguments(tool):
 def gemma4_structural_tag(
     function_tools, builtin_tools, tool_choice, reasoning, token_suffix
 ):
-    """vLLM's builder signature over xgrammar's Gemma 4 tag (no token suffix in this
-    format).
+    """Build the xgrammar Gemma 4 tag using vLLM's signature.
+
+    This tag format takes no token suffix.
     """
     if token_suffix:
         raise ValueError(
@@ -60,4 +61,6 @@ def gemma4_structural_tag(
 
 @ToolParserManager.register_module("gemma4_tt")
 class Gemma4TTToolParser(Gemma4EngineToolParser):
+    """Parse Gemma 4 tool calls and provide guided decoding tags."""
+
     structural_tag_model = TAG_MODEL

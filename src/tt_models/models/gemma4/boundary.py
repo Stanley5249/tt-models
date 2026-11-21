@@ -1,4 +1,6 @@
-"""Batch-1 decode layer boundaries on a compact hidden vector (kernels/compact*,
+"""Batch-1 decode boundaries on a compact hidden vector.
+
+Batch-1 decode layer boundaries on a compact hidden vector (kernels/compact*,
 tail_*).
 
 At batch 1 a decode hidden vector is row 0 of 88 [32, 32] tiles, and every
@@ -33,11 +35,14 @@ from tt_models.models.gemma4.generic_op import (
 
 
 class Boundary:
-    """Compact pack and the two tail ops of one mesh (core placement shared by the
+    """Compact pack and tail operators for one mesh.
+
+    Compact pack and the two tail ops of one mesh (core placement shared by the
     layers).
     """
 
     def __init__(self, mesh, hidden: int, eps: float, tail_cores: int = 6):
+        """Set up the compact operators for one mesh."""
         self.mesh = mesh
         self.hidden = hidden
         self.chunks = hidden // CHUNK  # 176
@@ -55,6 +60,7 @@ class Boundary:
     # -- tensors ---------------------------------------------------------------
 
     def compact(self, vectors: int = 1) -> ttnn.Tensor:
+        """Allocate a compact tensor for the given number of vectors."""
         return ttnn.allocate_tensor_on_device(
             ttnn.Shape([1, 1, TILE, vectors * self.V * TILE]),
             ttnn.float32,
@@ -64,6 +70,7 @@ class Boundary:
         )
 
     def row(self, rows: int = 1) -> ttnn.Tensor:
+        """Allocate a row-form tensor for the given number of rows."""
         return ttnn.allocate_tensor_on_device(
             ttnn.Shape([1, 1, rows, self.hidden]),
             ttnn.bfloat16,
@@ -82,9 +89,12 @@ class Boundary:
         dst_chunk0: int = 0,
         rows: int = 1,
     ) -> ttnn.Tensor:
-        """Row form FP32 [1, 1, rows, H] (any layout) -> compact vectors (one per row)
+        """Pack row-form FP32 input into compact vectors.
+
+        Row form FP32 [1, 1, rows, H] (any layout) -> compact vectors (one per row)
         from chunk dst_chunk0 of
-        dst; zeroes the padding."""
+        dst; zeroes the padding.
+        """
         n_tiles = self.hidden // TILE
         per = -(-n_tiles // len(cores))
         crs = core_range_set(cores)
@@ -265,13 +275,16 @@ class Boundary:
     def attn_tail(
         self, g, x, w, x_out, n, mlp_in, exp_in, x_page0: int = 0, rows: int = 1
     ):
-        """g: all-gathered compact attention partials [1, 2, 32, rows*V*32]; x: compact
+        """Sum the attention partials and prepare feedforward inputs.
+
+        g: all-gathered compact attention partials [1, 2, 32, rows*V*32]; x: compact
         residual (rows
         vectors); w: compact [post_attention | pre_feedforward | pre_feedforward_2]
         weights. Per row: writes
         x_out = x + rms(sum g) * w_post_attn (compact) and n = rms(x_out), n * w_pre_ff,
         n * w_pre_ff2 (row
-        form BF16 [1, 1, rows, H])."""
+        form BF16 [1, 1, rows, H]).
+        """
         return self._tail(
             "ATTN_TAIL",
             g,
@@ -285,7 +298,9 @@ class Boundary:
         )
 
     def ff_tail(self, g, x, w, x_out, h, scalar: float, rows: int = 1):
-        """g: all-gathered compact [mlp rows | expert rows] partials [1, 2, 32,
+        """Sum the feedforward partials and prepare the next layer's input.
+
+        g: all-gathered compact [mlp rows | expert rows] partials [1, 2, 32,
         2*rows*V*32]; w: compact
         [post_ff1 | post_ff2 | post_ff | next input norm]. Per row: writes x_out = (x +
         rms(rms(m) w1 +

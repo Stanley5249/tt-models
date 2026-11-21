@@ -15,10 +15,12 @@ from tt_models.models.gemma4.checkpoint import Checkpoint
 
 def embed_scale(hidden_size: int) -> float:
     # HF casts sqrt(hidden) to the weight dtype; with BF16 weights 53.07 becomes 53.0.
+    """Return the embedding scale rounded to BF16."""
     return torch.tensor(math.sqrt(hidden_size)).to(torch.bfloat16).item()
 
 
 def attention_masks(seq_len: int, sliding_window: int) -> dict[str, torch.Tensor]:
+    """Build additive attention masks for both attention types."""
     q = torch.arange(seq_len)[:, None]
     k = torch.arange(seq_len)[None, :]
     causal = k <= q
@@ -32,7 +34,9 @@ def attention_masks(seq_len: int, sliding_window: int) -> dict[str, torch.Tensor
 
 
 def roundtrip(w: torch.Tensor, ttnn_dtype) -> torch.Tensor:
-    """Quantize-dequantize `w` exactly as a TILE upload in `ttnn_dtype` would (host
+    """Emulate quantization by round-tripping a tensor in TILE layout.
+
+    Quantize-dequantize `w` exactly as a TILE upload in `ttnn_dtype` would (host
     only).
     """
     import ttnn
@@ -62,6 +66,7 @@ QUANT_GROUPS = {
 
 
 def quantize_layer(state: dict, quant: dict) -> dict:
+    """Apply the requested quantization emulation to layer weights."""
     out = dict(state)
     for group, dtype in quant.items():
         for key in QUANT_GROUPS.get(group, ()):
@@ -87,14 +92,21 @@ def quantize_layer(state: dict, quant: dict) -> dict:
 
 
 class Reference:
+    """Run the Hugging Face reference one layer at a time."""
+
     def __init__(
         self,
         ckpt: Checkpoint | None = None,
         dtype=torch.float32,
         quant: dict | None = None,
     ):
-        """quant: optional {"attention"|"mlp"|"experts"|"lm_head": ttnn dtype} weight
-        emulation.
+        """Set up the host reference and its weight emulation.
+
+        Args:
+            ckpt: Checkpoint to read. Resolves the default snapshot when omitted.
+            dtype: Torch dtype used for reference computation.
+            quant: Optional ttnn dtype by weight group: attention, mlp, experts,
+                or lm_head.
         """
         self.ckpt = ckpt or Checkpoint()
         self.dtype = dtype
@@ -105,6 +117,7 @@ class Reference:
         self.rotary = hf.Gemma4TextRotaryEmbedding(config)
 
     def load_layer(self, idx: int) -> hf.Gemma4TextDecoderLayer:
+        """Load the weights for a reference decoder layer."""
         with torch.device("meta"):
             layer = hf.Gemma4TextDecoderLayer(self.config, idx)
         state = quantize_layer(self.ckpt.layer(idx), self.quant)
@@ -113,6 +126,7 @@ class Reference:
         return layer.eval()
 
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
+        """Look up token embeddings for the reference."""
         weight = self.ckpt.get("embed_tokens.weight")
         return (weight[ids].float() * embed_scale(self.config.hidden_size)).to(
             self.dtype
@@ -122,6 +136,7 @@ class Reference:
     def layer_forward(
         self, layer, x: torch.Tensor, positions: torch.Tensor, masks
     ) -> torch.Tensor:
+        """Run one layer of the teacher-forced reference."""
         layer_type = self.config.layer_types[layer.layer_idx]
         cos_sin = self.rotary(x, positions[None], layer_type)
         return layer(
@@ -134,6 +149,7 @@ class Reference:
 
     @torch.no_grad()
     def logits(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply final normalization and project to vocabulary logits."""
         norm = hf.Gemma4RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
         norm.weight.data = self.ckpt.get("norm.weight").to(self.dtype)
         h = norm(x)
@@ -153,7 +169,9 @@ class Reference:
         keep_hidden: bool = False,
         num_layers: int | None = None,
     ):
-        """Teacher-forced forward over `ids` (1D). Returns logits [S, V] and optional
+        """Run a teacher-forced forward pass over one sequence.
+
+        Teacher-forced forward over `ids` (1D). Returns logits [S, V] and optional
         hiddens.
         """
         positions = torch.arange(ids.shape[0])

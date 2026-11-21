@@ -46,9 +46,6 @@ def sample(
 ):
     """Sample one token per row from float logits [B, V] with vLLM's semantics.
 
-    rows_idx: the batch rows these logits belong to (their sampling params); default
-    0..B-1.
-    softcap: the model's in-place final softcap when `logits` are taken before it.
     The softcap keeps the order, so greedy and top-k work on the raw logits and only
     the k candidates are capped; logprobs need the whole capped row. (Only raw
     logits above about 270, where fp32 tanh saturates, tie after capping; the raw
@@ -60,8 +57,17 @@ def sample(
     in about 0.5 ms. Temperature 0 is greedy. A seeded row draws from a
     generator seeded by (seed, position), so it is reproducible.
 
-    Returns token ids [B, 1] and, when any row asked for logprobs, the
-    (top logprobs, token ids) pair of the raw logits for the plugin to pack.
+    Args:
+        logits: Scores for each row and vocabulary token.
+        params: Sampling parameters indexed by scheduler row.
+        positions: Decode positions used to seed per-row sampling.
+        rows_idx: The batch rows these logits belong to, for indexing their
+            sampling parameters. Defaults to 0..B-1.
+        softcap: The model's in-place final softcap for uncapped logits.
+
+    Returns:
+        Token ids [B, 1] and, when requested, the (top logprobs, token ids) pair
+        of the raw logits for the plugin to pack.
     """
     rows = logits.shape[0]
     idx = list(range(rows)) if rows_idx is None else [int(r) for r in rows_idx]
@@ -107,6 +113,8 @@ def sample(
 
 
 class Gemma4ForCausalLM:
+    """Adapt Gemma4TT to the vLLM Tenstorrent plugin."""
+
     model_capabilities = {  # noqa: RUF012 - copied per instance
         "supports_prefix_caching": True,
         "supports_chunked_prefill": True,
@@ -124,6 +132,7 @@ class Gemma4ForCausalLM:
     longest_prefill = PREFILL_CHUNK
 
     def __init__(self, model: Gemma4TT):
+        """Wrap the model and configure instance capabilities."""
         self.model = model
         self._prefill_warmed = False
         self.model_capabilities = dict(type(self).model_capabilities)
@@ -145,6 +154,7 @@ class Gemma4ForCausalLM:
         optimizations=None,  # noqa: ARG003 - plugin API
         **_,
     ):
+        """Load Gemma 4 using the vLLM plugin settings."""
         if tt_data_parallel != 1:
             raise ValueError(
                 "Gemma 4 26B-A4B on N300 uses one 1x2 mesh; data parallelism is not "
@@ -165,8 +175,11 @@ class Gemma4ForCausalLM:
 
     @classmethod
     def get_max_tokens_all_users(cls, model_name="", num_devices=2, **_):
-        """Token slots of the KV pool: KV_POOL_BYTES over the bytes one token slot
-        costs on a chip, a K and a V row in each buffer a KV-cache group spans."""
+        """Return the number of token slots in the KV pool.
+
+        Token slots of the KV pool: KV_POOL_BYTES over the bytes one token slot
+        costs on a chip, a K and a V row in each buffer a KV-cache group spans.
+        """
         cfg = Checkpoint(model_name).config if model_name else Checkpoint().config
         per_token = max(
             heads // min(num_devices, heads) * head_dim
@@ -177,8 +190,11 @@ class Gemma4ForCausalLM:
 
     @classmethod
     def get_kv_cache_spec(cls, vllm_config):
-        """One spec per layer, so vLLM forms sliding and global KV-cache groups. The
-        dtype only sizes vLLM's page accounting; the device stores BFP8."""
+        """Build one KV-cache spec per layer.
+
+        One spec per layer, so vLLM forms sliding and global KV-cache groups. The
+        dtype only sizes vLLM's page accounting; the device stores BFP8.
+        """
         from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
         text = vllm_config.model_config.hf_config.get_text_config()
@@ -212,9 +228,12 @@ class Gemma4ForCausalLM:
 
     @staticmethod
     def _check_chunk_grid(vllm_config, dims):
-        """Prefill must start on the KV block grid, the lcm of the group block sizes
+        """Check that vLLM schedules prefill on the KV block grid.
+
+        Prefill must start on the KV block grid, the lcm of the group block sizes
         (Gemma4TT.prefill). vLLM's prefix hits fall on it; partial chunks end on the
-        plugin's prefill_chunk_alignment, which must therefore be a multiple of it."""
+        plugin's prefill_chunk_alignment, which must therefore be a multiple of it.
+        """
         from vllm_tt_plugin.config import get_tt_prefill_chunk_alignment
 
         block = vllm_config.cache_config.block_size
@@ -260,7 +279,7 @@ class Gemma4ForCausalLM:
     def _group_tables(
         self, per_layer: list[torch.Tensor], rows: int, *, check: bool = False
     ) -> torch.Tensor:
-        """vLLM's per-layer page tables as int32 [groups, rows, width]."""
+        """VLLM's per-layer page tables as int32 [groups, rows, width]."""
         tables = torch.stack([per_layer[i][:rows] for i in self._group_layer]).to(
             torch.int32
         )
@@ -288,7 +307,9 @@ class Gemma4ForCausalLM:
         page_tables_per_layer=None,
         **_,
     ):
-        """Row i computes tokens[i, start_pos[i]:prompt_lens[i]]; the cache holds the
+        """Run prefill for each requested range of positions.
+
+        Row i computes tokens[i, start_pos[i]:prompt_lens[i]]; the cache holds the
         positions before.
         """
         rows = tokens.shape[0]
@@ -316,6 +337,7 @@ class Gemma4ForCausalLM:
         sampling_params=None,
         **_,
     ):
+        """Run one scheduler decode step and sample when requested."""
         tables = self._group_tables(page_tables_per_layer, tokens.shape[0])
         t0 = time.perf_counter()
         # The model-side sampler caps only what it needs (see sample()).
@@ -366,14 +388,17 @@ class Gemma4ForCausalLM:
         can_sample_on_device,  # noqa: ARG002 - plugin API
         **_,
     ):
-        """Build the prefill programs of every padded length (prefill_rows), for a piece
+        """Build prefill programs for every padded length.
+
+        Build the prefill programs of every padded length (prefill_rows), for a piece
         from position 0 and a continuation piece, which reads the paged cache. A program
         built later, after the decode traces are captured, would cost the first request
         of that length and could allocate into trace memory. The pool holds no request
         yet; a small pool (GEMMA4_KV_POOL_GIB) warms only the lengths it fits.
 
         The plugin calls it again with enable_trace=True; prefill is not traced, so
-        the programs from the first call serve."""
+        the programs from the first call serve.
+        """
         if self._prefill_warmed:
             return
         self._prefill_warmed = True
@@ -409,8 +434,11 @@ class Gemma4ForCausalLM:
         enable_trace,
         **_,
     ):
-        """Compile (and capture) one decode program per active row count, since
-        decode drops inactive rows."""
+        """Compile one decode program per active row count.
+
+        Compile (and capture) one decode program per active row count, since
+        decode drops inactive rows.
+        """
         tokens = torch.zeros(max_batch_size, dtype=torch.long)
         tables = self.model.page_tables(max_batch_size, 64)
         for active in range(1, max_batch_size + 1):
@@ -419,4 +447,5 @@ class Gemma4ForCausalLM:
             self.model.decode(tokens, positions, tables, trace=enable_trace)
 
     def release_persistent_capture(self):
+        """Release the persistent decode traces."""
         self.model.release_traces()

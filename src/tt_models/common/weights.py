@@ -17,6 +17,7 @@ class WeightLoader:
     """
 
     def __init__(self, mesh: ttnn.MeshDevice, cache_dir: Path):
+        """Set up the weight cache for a mesh and checkpoint."""
         self.mesh = mesh
         self.cache_dir = Path(cache_dir)
         self.tp = mesh.get_num_devices()
@@ -33,6 +34,7 @@ class WeightLoader:
         layout=ttnn.TILE_LAYOUT,
         memory_config=DRAM,
     ) -> ttnn.Tensor:
+        """Load a cached tensor or build and upload it."""
         if shard_dim is None:
             mapper = ttnn.ReplicateTensorToMesh(self.mesh)
         else:

@@ -1,4 +1,6 @@
-"""Q4_0 decode experts: the checkpoint's 4-bit integers and learned steps, not BFP4
+"""Q4_0 decode experts with learned step sizes.
+
+Q4_0 decode experts: the checkpoint's 4-bit integers and learned steps, not BFP4
 roundings.
 
 The QAT checkpoint stores every 32-input block of an expert weight as q * s: integers q
@@ -52,7 +54,8 @@ def q4_factor(
 
     Returns (q as float with w's shape, s with dim shrunk 32x); see q4.factor_blocks.
     Works on
-    `chunk` slices of dim 0 at a time to bound host memory."""
+    `chunk` slices of dim 0 at a time to bound host memory.
+    """
     if w.dim() > 2 and w.shape[0] > chunk:
         parts = [
             q4_factor(w[i : i + chunk], dim, chunk) for i in range(0, w.shape[0], chunk)
@@ -65,7 +68,9 @@ def q4_factor(
 
 
 def step_tiles(s: torch.Tensor, groups: int) -> torch.Tensor:
-    """[..., E, K/32, N] steps -> [..., E, groups * 32, N]: row r of group g is block 32
+    """Pack expert steps by output row and group.
+
+    [..., E, K/32, N] steps -> [..., E, groups * 32, N]: row r of group g is block 32
     g + r, zero past K.
     """
     kb = s.shape[-2]
@@ -90,11 +95,14 @@ def gate_up_q4_op(
     rows=1,
     slots_per_row=8,
 ):
-    """gate|up from Q4_0 tiles (kernels/expert_q4_gate_up_*): as
+    """Build the Q4_0 gate and up operation.
+
+    gate|up from Q4_0 tiles (kernels/expert_q4_gate_up_*): as
     expert_stream.gate_up_op, with the step
     tensor steps ([1, E, groups * 32, N] BF16, interleaved). Each core's slots must
     belong to one token
-    (slot s to token s // slots_per_row)."""
+    (slot s to token s // slots_per_row).
+    """
     cb_x, cb_w, cb_sc, cb_rs, cb_ws, cb_m, cb_r, cb_one, cb_act = (
         0,
         1,
@@ -241,7 +249,9 @@ def down_q4_op(
     n_tiles,
     compact_chunk0=None,
 ):
-    """Batch-1 down from Q4_0 tiles (kernels/expert_q4_down_*): as expert_stream.down_op
+    """Build the batch-1 Q4_0 down operation.
+
+    Batch-1 down from Q4_0 tiles (kernels/expert_q4_down_*): as expert_stream.down_op
     with rows=1, plus
     the step tensor steps ([1, E, 32, banks * bank_cols * 32] BF16, interleaved, rows 0
     .. kt - 1 used).
@@ -349,16 +359,20 @@ def down_q4_op(
 
 
 class Q4Experts:
-    """One layer's routed experts as Q4_0 tiles and steps, for the batch-1 decode
+    """One layer's routed experts for batch-1 Q4_0 decode.
+
+    One layer's routed experts as Q4_0 tiles and steps, for the batch-1 decode
     streams.
 
     gate_up and down hold the integers in the layouts of the BFP4 weights
     (expert_stream.py), so the
-    weight readers are unchanged; the step tensors follow the writers' layouts."""
+    weight readers are unchanged; the step tensors follow the writers' layouts.
+    """
 
     def __init__(
         self, loader, ckpt, layer_idx: int, stream, assemble_gate_up, expert_pad: int
     ):
+        """Set up the Q4_0 decode programs for one mesh."""
         p = f"layers.{layer_idx}."
         tp = loader.tp
         memo = {}
@@ -415,6 +429,7 @@ class Q4Experts:
         self.stream = stream
 
     def gate_up_op(self, x, ids, weights, scale, act):
+        """Allocate storage for the gate and up activations."""
         st = self.stream
         return gate_up_q4_op(
             st.gu_assign,
@@ -433,6 +448,7 @@ class Q4Experts:
         )
 
     def down_op(self, act, ids, out, compact_chunk0=None):
+        """Run the Q4_0 down projection."""
         st = self.stream
         return down_q4_op(
             st.down_assign,

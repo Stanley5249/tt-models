@@ -12,7 +12,9 @@ STEP_TOL = 0.05  # |w / s - round(w / s)| of a BF16-rounded q * s stays below 2^
 
 
 def factor_blocks(b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """b [..., 32] -> integers q (-8..8, unclamped) and steps s [..., 1] with b ~= q *
+    """Factor each weight block into integers and a shared step.
+
+    B [..., 32] -> integers q (-8..8, unclamped) and steps s [..., 1] with b ~= q *
     s.
 
     The step of a block is its smallest nonzero |b| divided by the smallest k in 1..8

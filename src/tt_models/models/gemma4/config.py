@@ -29,6 +29,8 @@ def prefill_rows(tokens: int, start: int) -> int:
 
 @dataclass
 class Precision:
+    """Select the weight formats used by the model."""
+
     attention: ttnn.DataType = ttnn.bfloat8_b
     mlp: ttnn.DataType = ttnn.bfloat8_b
     experts: ttnn.DataType = ttnn.bfloat4_b
@@ -56,6 +58,7 @@ class Precision:
         return cls(**kwargs)
 
     def tag(self) -> str:
+        """Return the cache tag for these precision settings."""
         names = {ttnn.bfloat16: "bf16", ttnn.bfloat8_b: "bfp8", ttnn.bfloat4_b: "bfp4"}
         return "-".join(
             names[d] for d in (self.attention, self.mlp, self.experts, self.lm_head)

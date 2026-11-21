@@ -41,6 +41,8 @@ CHUNK_ALIGN = 128
 
 @dataclass(frozen=True)
 class AttnShape:
+    """Describe the attention dimensions on one chip."""
+
     sliding: bool
     head_dim: int
     n_q: int  # per chip
@@ -49,6 +51,7 @@ class AttnShape:
 
 
 def attn_shape(cfg, layer_idx: int, tp: int) -> AttnShape:
+    """Calculate the per-chip attention shape for one layer."""
     kind = cfg.layer_types[layer_idx]
     head_dim, n_kv = attention_dims(cfg)[kind]
     sliding = kind == "sliding_attention"
@@ -83,6 +86,7 @@ _QK_ROPE = per_mesh_cache()
 
 
 def qk_rope(mesh, width: int, head_dim: int, eps: float) -> QkRope:
+    """Get the cached fused query and key RoPE operator."""
     key = (id(mesh), width, head_dim)
     if key not in _QK_ROPE:
         _QK_ROPE[key] = QkRope(mesh, width, head_dim, eps)
@@ -93,7 +97,9 @@ _ROTATE = per_mesh_cache()
 
 
 def rotate_half(x: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:
-    """cat(-x2, x1) as one matmul with a constant +-1 matrix (exact in BF16 with fp32
+    """Rotate the two halves of the input in one matmul.
+
+    cat(-x2, x1) as one matmul with a constant +-1 matrix (exact in BF16 with fp32
     accumulation).
     """
     hd = x.shape[-1]
@@ -149,9 +155,12 @@ def head_norm(x: ttnn.Tensor, weight, eps: float, memory_config=DRAM) -> ttnn.Te
 
 
 class Attention:
+    """Run attention for one decoder layer."""
+
     def __init__(
         self, loader: WeightLoader, ckpt, cfg, layer_idx: int, dtype=ttnn.bfloat8_b
     ):
+        """Load the attention weights and prepare the decode operators."""
         tp = loader.tp
         self.cfg = cfg
         self.shape = s = attn_shape(cfg, layer_idx, tp)
@@ -240,7 +249,9 @@ class Attention:
     def prefill(
         self, x: ttnn.Tensor, rope, kv: LayerKv, chunk: PrefillChunk
     ) -> ttnn.Tensor:
-        """x [1, 1, S, H] replicated, the chunk's rows. Returns all-reduced attention
+        """Compute prefill attention over a replicated chunk.
+
+        X [1, 1, S, H] replicated, the chunk's rows. Returns all-reduced attention
         output [1, 1, S, H].
 
         rope: (cos, sin) [1, 1, S, hd] for this layer type at the chunk's positions.
@@ -300,9 +311,12 @@ class Attention:
 
     @staticmethod
     def _fill(k: ttnn.Tensor, v: ttnn.Tensor, kv: LayerKv, chunk: PrefillChunk):
-        """Write the chunk's K/V rows up to the last tile holding a real position, which
+        """Write the chunk's real K/V rows to the paged cache.
+
+        Write the chunk's K/V rows up to the last tile holding a real position, which
         lies in the block of the chunk's last position: padding never reaches a block
-        vLLM did not allocate (the plugin pads tables with the null block 0)."""
+        vLLM did not allocate (the plugin pads tables with the null block 0).
+        """
         live = -(-chunk.rows // TILE) * TILE
         table = chunk.fill_tables[kv.group]
         for t, cache in ((k, kv.k), (v, kv.v)):
@@ -348,7 +362,9 @@ class Attention:
         )
 
     def _sdpa_chunked_config(self):
-        """Chunked SDPA over the paged cache; the chunk start must be a multiple of both
+        """Configure chunked SDPA over the paged cache.
+
+        Chunked SDPA over the paged cache; the chunk start must be a multiple of both
         chunk sizes.
         """
         grid = (8, 4) if self.shape.head_dim >= 512 else (8, 8)
@@ -367,6 +383,7 @@ class Attention:
         return self.shape.n_q + 2 * self.shape.n_kv
 
     def head_weights(self, batch: int) -> ttnn.Tensor:
+        """Get per-head normalization weights for the batch."""
         if batch not in self._head_w_dev:
             q, k = self._head_w
             s = self.shape
@@ -390,7 +407,9 @@ class Attention:
     def decode_compact(
         self, x: ttnn.Tensor, rope, kv: LayerKv, page_table, cur_pos, boundary
     ) -> ttnn.Tensor:
-        """1-4 decode tokens: x is the normed row-form input [1, 1, rows, H]. Returns
+        """Compute compact attention partial sums for a decode step.
+
+        1-4 decode tokens: x is the normed row-form input [1, 1, rows, H]. Returns
         this chip's o_proj
         partial sums in compact FP32 form (boundary.py, one vector per row), packed
         straight from the
@@ -414,7 +433,9 @@ class Attention:
         return out
 
     def _heads_decode(self, x, rope, kv: LayerKv, page_table, cur_pos):
-        """QKV, q/k norm and RoPE, cache update and SDPA: the concatenated heads, one
+        """Compute one decode attention head per core.
+
+        QKV, q/k norm and RoPE, cache update and SDPA: the concatenated heads, one
         head per core.
         """
         s = self.shape

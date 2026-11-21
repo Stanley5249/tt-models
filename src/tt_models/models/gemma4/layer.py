@@ -14,7 +14,10 @@ from tt_models.models.gemma4.moe import FeedForward
 
 
 class DecoderLayer:
+    """Combine attention and feedforward for one decoder layer."""
+
     def __init__(self, loader, ckpt, cfg, idx, precision: Precision):
+        """Load the weights and operators for one layer."""
         p = f"layers.{idx}."
         rm = ttnn.ROW_MAJOR_LAYOUT
         self.idx = idx
@@ -57,10 +60,13 @@ class DecoderLayer:
 
     @property
     def input_norm(self) -> torch.Tensor:
+        """Return the host input normalization weight."""
         return self._raw["input_layernorm"]
 
     def boundary_weights(self, mesh, next_norm: torch.Tensor):
-        """Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's
+        """Load the compact weights for the two batch-1 tails.
+
+        Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's
         input norm (or the final norm).
         """
         r = self._raw
@@ -102,6 +108,7 @@ class DecoderLayer:
         return x3
 
     def prefill(self, x, rope, kv, chunk):
+        """Run one decoder layer over a prefill chunk."""
         h = self._rms(x, self.input_ln)
         a = self.attn.prefill(h, rope, kv, chunk)
         h.deallocate(True)
@@ -110,7 +117,9 @@ class DecoderLayer:
     def decode_compact(
         self, xc, h, rope, kv, page_table, cur_pos, b: Boundary, x_page0: int = 0
     ):
-        """1-4 decode tokens on compact boundaries: xc compact FP32 residuals (one
+        """Decode one layer using compact boundaries.
+
+        1-4 decode tokens on compact boundaries: xc compact FP32 residuals (one
         vector per row), h their
         normed row form [1, 1, rows, H]. Returns the next (xc, h); h of the last layer
         is final-normed.

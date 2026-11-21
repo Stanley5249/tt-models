@@ -1,4 +1,6 @@
-"""Cross-chip collectives on the N300 1x2 mesh (async all-gather with double-buffered
+"""Cross-chip collectives on the N300 1x2 mesh.
+
+Cross-chip collectives on the N300 1x2 mesh (async all-gather with double-buffered
 semaphores).
 """
 
@@ -9,7 +11,9 @@ from tt_models.common.mesh import per_mesh_cache
 
 
 class _Semaphores:
-    """Double-buffered global semaphores for the async all-gather, as tt_transformers'
+    """Double-buffered semaphores for async all-gather.
+
+    Double-buffered global semaphores for the async all-gather, as tt_transformers'
     TT_CCL.
     """
 
@@ -38,7 +42,9 @@ _SEMAPHORES: dict[int, _Semaphores] = per_mesh_cache()
 
 
 def init_ccl(mesh: ttnn.MeshDevice):
-    """Allocate the CCL semaphores; call before any trace capture (see
+    """Allocate CCL semaphores before trace capture.
+
+    Allocate the CCL semaphores; call before any trace capture (see
     Gemma4TT._prepare_traces).
     """
     if id(mesh) not in _SEMAPHORES:
@@ -88,7 +94,9 @@ def all_reduce(x: ttnn.Tensor) -> ttnn.Tensor:
 
 
 def all_gather_compact(x: ttnn.Tensor) -> ttnn.Tensor:
-    """[1, 1, 32, W] compact partials -> [1, 2, 32, W] with both chips' (boundary.py);
+    """Gather compact partial sums from both chips.
+
+    [1, 1, 32, W] compact partials -> [1, 2, 32, W] with both chips' (boundary.py);
     10 us for 3 tiles.
     """
     gather_sems, barrier = _SEMAPHORES[id(x.device())].next()

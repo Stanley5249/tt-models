@@ -13,6 +13,7 @@ FP32_TILE = 4096
 
 
 def tile_bytes(dtype) -> int:
+    """Return the byte size of a tile with the given dtype."""
     return {
         ttnn.bfloat4_b: BFP4_TILE,
         ttnn.bfloat8_b: BFP8_TILE,
@@ -40,11 +41,12 @@ def accessor(t) -> list[int]:
 
 
 def line_cores(n: int, y0: int = 0) -> list[ttnn.CoreCoord]:
-    """n logical cores, 8 per row from row y0."""
+    """N logical cores, 8 per row from row y0."""
     return [ttnn.CoreCoord(i % 8, y0 + i // 8) for i in range(n)]
 
 
 def core_range_set(cores) -> ttnn.CoreRangeSet:
+    """Build a core range set from individual coordinates."""
     return ttnn.CoreRangeSet([ttnn.CoreRange(c, c) for c in cores])
 
 

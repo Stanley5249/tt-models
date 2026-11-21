@@ -17,11 +17,14 @@ CHUNKS_PER_TILE = 64
 
 
 def compact_tiles(hidden: int) -> int:
+    """Return the number of compact tiles per hidden vector."""
     return -(-hidden // CHUNK // CHUNKS_PER_TILE)
 
 
 def to_compact(v: torch.Tensor) -> torch.Tensor:
-    """[n, H] -> [32, n * V * 32] float32 whose TILE layout puts chunk c of vector i at
+    """Pack host vectors into the compact FP32 layout.
+
+    [n, H] -> [32, n * V * 32] float32 whose TILE layout puts chunk c of vector i at
     byte 64 c of its V tiles.
     """
     n, h = v.shape

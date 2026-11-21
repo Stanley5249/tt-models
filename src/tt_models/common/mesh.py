@@ -21,6 +21,7 @@ def per_mesh_cache() -> dict:
 
 @contextlib.contextmanager
 def open_n300(trace_region_size: int = 0):
+    """Open a mesh using the configured topology."""
     ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
     mesh = ttnn.open_mesh_device(
         ttnn.MeshShape(1, 2), trace_region_size=trace_region_size, num_command_queues=1

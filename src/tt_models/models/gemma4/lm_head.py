@@ -1,4 +1,6 @@
-"""The tied LM head: the embedding table as a DRAM-sharded matmul split over the
+"""The tied LM head split across chips and DRAM banks.
+
+The tied LM head: the embedding table as a DRAM-sharded matmul split over the
 vocabulary.
 """
 
@@ -19,7 +21,10 @@ LM_CORES = 8
 
 
 class LmHead:
+    """Project hidden states through the tied embedding weights."""
+
     def __init__(self, mesh, loader, ckpt, cfg, dtype):
+        """Load the sharded embedding weight and final normalization weight."""
         self.mesh = mesh
         self.cfg = cfg
         self.tp = mesh.get_num_devices()
@@ -34,9 +39,12 @@ class LmHead:
         self.lm_in = width_sharded_l1(self.hidden, LM_CORES)
 
     def _weights(self, loader, ckpt, dtype) -> list[ttnn.Tensor]:
-        """LM_SPLITS DRAM-sharded column blocks per chip; chip c split i holds vocab
+        """Load the tied embedding weights in DRAM-sharded column blocks.
+
+        LM_SPLITS DRAM-sharded column blocks per chip; chip c split i holds vocab
         columns c * V/tp + i * width onwards, so concatenating the splits on each chip
-        and then the chips gives the vocabulary order."""
+        and then the chips gives the vocabulary order.
+        """
         per_chip = self.vocab // self.tp
         width = per_chip // LM_SPLITS
         mem = dram_sharded(self.mesh, self.hidden, width)
@@ -73,6 +81,7 @@ class LmHead:
         return heads
 
     def logits(self, x: ttnn.Tensor) -> torch.Tensor:
+        """Compute and read the final logits."""
         rows = x.shape[2]
         if rows > TILE:
             # ttnn.linear segfaults on the host for M > 32 against the 131072-wide
@@ -92,8 +101,11 @@ class LmHead:
         return logits
 
     def device(self, x: ttnn.Tensor, *, normed: bool = False) -> ttnn.Tensor:
-        """Raw fp32 logits, row-major; the host applies the final softcap
-        (three fp32 ops over the tile-padded [32, 65536] took 0.63 ms here)."""
+        """Compute raw FP32 logits on the device.
+
+        Raw fp32 logits, row-major; the host applies the final softcap
+        (three fp32 ops over the tile-padded [32, 65536] took 0.63 ms here).
+        """
         h = x if normed else rms_norm(x, self.final_norm, self.cfg.rms_norm_eps)
         hs = ttnn.to_memory_config(h, self.lm_in)
         if not normed:
@@ -127,9 +139,12 @@ class LmHead:
         return out
 
     def read(self, out: ttnn.Tensor, *, softcap: bool = True) -> torch.Tensor:
-        """fp32 logits [rows, V] of a row-major [1, 1, rows, V/tp] per-chip output.
+        """Read and combine the per-chip logits.
+
+        fp32 logits [rows, V] of a row-major [1, 1, rows, V/tp] per-chip output.
         (Copying into a kept host tensor and converting its shards was slower:
-        1.0 ms against 0.66 ms for one row.)"""
+        1.0 ms against 0.66 ms for one row.)
+        """
         logits = (
             ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=-1))
             .float()
@@ -138,13 +153,16 @@ class LmHead:
         return self.softcap(logits) if softcap else logits
 
     def softcap(self, logits: torch.Tensor) -> torch.Tensor:
-        """Apply the final logit softcap in place (cap * tanh(x / cap)) and return
+        """Apply the final logit softcap in place and return the logits.
+
+        Apply the final logit softcap in place (cap * tanh(x / cap)) and return
         logits.
 
         It costs 0.34 ms for one row of 262,144 logits and 1.35 ms for four, and it
         keeps the order, so greedy and top-k sampling can cap only their candidates.
         numpy ufuncs run on this thread: torch's pool sleeps during the device wait,
-        and waking it once made the same softcap take 1 ms instead of 0.2 ms."""
+        and waking it once made the same softcap take 1 ms instead of 0.2 ms.
+        """
         cap = self.cfg.final_logit_softcapping
         if cap:
             arr = logits.numpy()

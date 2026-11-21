@@ -13,7 +13,9 @@ from tt_models.models.gemma4.generic_op import (
 
 
 class Router:
-    """Decode router for 1-4 tokens: logits, top-k and softmax over the k logits in one
+    """Fused decode router for one to four tokens.
+
+    Decode router for 1-4 tokens: logits, top-k and softmax over the k logits in one
     op (kernels/router_*).
 
     topk_router_gpt took 68-72 us per layer, mostly in its top-k stage. Here 11 cores (8
@@ -26,7 +28,8 @@ class Router:
     (scripts/kernels/router_check.py).
     Its weights are closer to an fp32 reference (max error 0.0007 against
     topk_router_gpt's 0.11).
-    Outputs: row-major uint16 ids and BF16 weights, token-major (entry t * k + j)."""
+    Outputs: row-major uint16 ids and BF16 weights, token-major (entry t * k + j).
+    """
 
     def __init__(
         self,
@@ -38,7 +41,9 @@ class Router:
         core_row: int = 5,
         rows: int = 1,
     ):
-        """rows: decode tokens (1 .. 4). The reducer stacks every core's partial rows in
+        """Assign router partials to cores and output rows.
+
+        rows: decode tokens (1 .. 4). The reducer stacks every core's partial rows in
         one tile, so
         parts * rows must fit 32: 3-4 tokens use 8 parts of 11 K tiles (the first 8 of
         the 11 cores).
@@ -55,9 +60,12 @@ class Router:
         self.red = mesh.worker_core_from_logical_core(self.cores[0])
 
     def outputs(self):
-        """Row-major ids and weights, token-major (entry t * k + j), at least 16 entries
+        """Allocate row-major expert ids and weights.
+
+        Row-major ids and weights, token-major (entry t * k + j), at least 16 entries
         (32 bytes): the
-        layout the expert streams take."""
+        layout the expert streams take.
+        """
 
         def row(dtype):
             n = max(16, self.rows * self.top_k)
@@ -68,7 +76,9 @@ class Router:
         return row(ttnn.uint16), row(ttnn.bfloat16)
 
     def __call__(self, x, w, ids, wts, *, build=False):
-        """x: normed row form BF16 [1, 1, rows, H]; w: the [H, E] BF16 router weight
+        """Compute the router logits, ids and weights for the decode rows.
+
+        x: normed row form BF16 [1, 1, rows, H]; w: the [H, E] BF16 router weight
         (tile layout).
         build: return (program, tensors) to run merged with another op
         (expert_stream.run).

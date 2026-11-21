@@ -1,4 +1,6 @@
-"""Host planning and matmul configs for expert-major prefill
+"""Host planning and matmul configs for expert-major prefill.
+
+Host planning and matmul configs for expert-major prefill
 (moe.FeedForward._experts_prefill).
 """
 
@@ -15,6 +17,7 @@ CHUNK_GRANULE = 16
 def matmul_1d_config(
     m_tiles: int, n: int, k: int, grid=(8, 8), in0_block_w: int | None = None
 ):
+    """Configure a one-dimensional matmul for expert prefill."""
     n_tiles = n // TILE
     # The 1D mcast kernel needs every core of a full rectangle to own work.
     for per_core_n in range(1, n_tiles + 1):

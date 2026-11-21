@@ -48,7 +48,10 @@ def attention_dims(cfg) -> dict[str, tuple[int, int]]:
 
 
 class Checkpoint:
+    """Read config and tensors from a Gemma 4 checkpoint."""
+
     def __init__(self, model: str = DEFAULT_MODEL):
+        """Resolve the snapshot and index its tensor shards."""
         self.root = resolve_snapshot(model)
         index = json.loads((self.root / "model.safetensors.index.json").read_text())
         self.weight_map: dict[str, str] = index["weight_map"]

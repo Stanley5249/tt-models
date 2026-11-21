@@ -35,6 +35,8 @@ from tt_models.models.gemma4.reference import embed_scale
 
 
 class Gemma4TT:
+    """Run Gemma 4 prefill and decode on a Tenstorrent mesh."""
+
     def __init__(
         self,
         mesh: ttnn.MeshDevice,
@@ -46,6 +48,7 @@ class Gemma4TT:
         block_size: int = 64,
         num_layers: int | None = None,
     ):
+        """Load the model weights and initialize the device operators."""
         if max_batch > STREAM_ROWS:
             raise ValueError(
                 f"decode streams the experts of at most {STREAM_ROWS} rows; got "
@@ -107,7 +110,9 @@ class Gemma4TT:
     # -- host-side tables ----------------------------------------------------
 
     def _rope_tables(self, n: int) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-        """float32 [n, hd] cos/sin per layer type; prefill uploads them as BF16, decode
+        """Build cosine and sine tables per layer type.
+
+        float32 [n, hd] cos/sin per layer type; prefill uploads them as BF16, decode
         as fp32.
         """
         rotary = hf.Gemma4TextRotaryEmbedding(self.cfg)
@@ -119,6 +124,7 @@ class Gemma4TT:
         return out
 
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
+        """Look up token embeddings on the host."""
         return self.embed_table[ids] * self.embed_scale  # BF16 math, as HF
 
     def _to_device(
@@ -136,9 +142,12 @@ class Gemma4TT:
     # -- KV cache ------------------------------------------------------------
 
     def allocate_kv_cache(self, rows: int, tokens: int) -> torch.Tensor:
-        """For scripts and tests without vLLM: allocate the layout vLLM would, sized
+        """Allocate a standalone KV cache and return its page tables.
+
+        For scripts and tests without vLLM: allocate the layout vLLM would, sized
         for `rows` sequences of up to `tokens` positions, and return their page tables
-        [groups, rows, width]. The adapter builds `kv` from vLLM's plan instead."""
+        [groups, rows, width]. The adapter builds `kv` from vLLM's plan instead.
+        """
         shapes = [layer.attn.shape for layer in self.layers]
         types = self.cfg.layer_types[: self.num_layers]
         self.use_kv(
@@ -179,14 +188,20 @@ class Gemma4TT:
         )
 
     def page_tables(self, rows: int, tokens: int) -> torch.Tensor:
-        """Disjoint page tables [groups, rows, width] for `rows` sequences of up to
-        `tokens` positions, for scripts and warmup."""
+        """Build disjoint page tables for standalone use.
+
+        Disjoint page tables [groups, rows, width] for `rows` sequences of up to
+        `tokens` positions, for scripts and warmup.
+        """
         return self.kv.tables(rows, tokens, self.table_width, self._ring_tokens)
 
     @property
     def _ring_tokens(self) -> int:
-        """Sliding positions a script's page table keeps apart: the window behind a
-        prefill chunk, plus the chunk."""
+        """Return the sliding positions that must use separate cache slots.
+
+        Sliding positions a script's page table keeps apart: the window behind a
+        prefill chunk, plus the chunk.
+        """
         return self.window + PREFILL_CHUNK + CHUNK_ALIGN
 
     # -- prefill -------------------------------------------------------------
@@ -199,7 +214,9 @@ class Gemma4TT:
         *,
         all_logits: bool = False,
     ) -> torch.Tensor:
-        """Compute positions [start, len(tokens)) of one sequence whose cache holds [0,
+        """Compute a suffix of one sequence using the cached prefix.
+
+        Compute positions [start, len(tokens)) of one sequence whose cache holds [0,
         start).
 
         tokens: the sequence from position 0. tables: int32 [groups, width], the
@@ -232,8 +249,11 @@ class Gemma4TT:
     def _prefill_chunk(
         self, tokens, c0: int, c1: int, tables: torch.Tensor
     ) -> ttnn.Tensor:
-        """Run positions [c0, c1) through every layer, writing their K/V. Returns the
-        final hidden rows, padded."""
+        """Run a prefill chunk through every layer and write its K/V.
+
+        Run positions [c0, c1) through every layer, writing their K/V. Returns the
+        final hidden rows, padded.
+        """
         n = c1 - c0
         padded = prefill_rows(n, c0)
         ids = torch.zeros(padded, dtype=torch.long)
@@ -290,7 +310,9 @@ class Gemma4TT:
         *,
         trace: bool = False,
     ) -> torch.Tensor:
-        """One decode step for B rows. positions -1 marks inactive rows; tables is
+        """Decode a batch and return logits in the original row order.
+
+        One decode step for B rows. positions -1 marks inactive rows; tables is
         int32 [groups, B, width], every row's page table in each KV-cache group.
 
         Inactive rows are dropped before the device step: vLLM pads decode to
@@ -310,7 +332,9 @@ class Gemma4TT:
     def decode_active(
         self, tokens, positions, tables, *, trace: bool = False, softcap: bool = True
     ):
-        """decode() without the inactive rows: (active row indices, float logits [A,
+        """Decode only the active rows and return their indices and logits.
+
+        decode() without the inactive rows: (active row indices, float logits [A,
         V]).
 
         Building the zero-filled [B, V] result of decode() costs ~1 ms per step; the
@@ -374,7 +398,9 @@ class Gemma4TT:
         return self.head.read(out, softcap=softcap)
 
     def _prepare_traces(self):
-        """Allocate every batch size's trace inputs and run its decode once, eagerly,
+        """Prepare one decode trace for every active row count.
+
+        Allocate every batch size's trace inputs and run its decode once, eagerly,
         before the first capture.
 
         A buffer allocated after a capture can overlap that trace's intermediates,

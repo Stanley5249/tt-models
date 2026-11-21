@@ -45,6 +45,7 @@ def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:
 
 
 def router_op(mesh, cfg, rows: int = 1) -> Router:
+    """Build the router for the given decode row count."""
     key = ("router", id(mesh), rows)
     if key not in _STREAMS:
         _STREAMS[key] = Router(
@@ -54,6 +55,7 @@ def router_op(mesh, cfg, rows: int = 1) -> Router:
 
 
 def mlp_stream(mesh, cfg, mlp_pad: int) -> MlpStream:
+    """Build the dense MLP stream for the padded intermediate width."""
     key = ("mlp", id(mesh))
     if key not in _STREAMS:
         # leaves the router's cores free: router and MLP gate|up run as one merged op
@@ -69,6 +71,8 @@ GELU_TANH = ttnn.UnaryOpType.GELU_TANH
 
 
 class FeedForward:
+    """Run the dense MLP and routed experts for one layer."""
+
     def __init__(
         self,
         loader: WeightLoader,
@@ -81,6 +85,7 @@ class FeedForward:
         *,
         expert_q4: bool = False,
     ):
+        """Load the feedforward weights and prepare the decode streams."""
         tp = loader.tp
         self.tp = tp
         self.expert_compute = compute_config(
@@ -180,7 +185,9 @@ class FeedForward:
         self.router = put(f"L{layer_idx}.router", router, ttnn.bfloat16)
 
         def assemble_gate_up(t):
-            """[E, H, 2I] (gate columns, then up) -> the device order: per chip, gate c,
+            """Reorder gate and up weights for the device.
+
+            [E, H, 2I] (gate columns, then up) -> the device order: per chip, gate c,
             padding, up c, padding.
             """
             inter = cfg.moe_intermediate_size
@@ -300,7 +307,9 @@ class FeedForward:
         return weights, top_i
 
     def decode_constants(self, tokens: int):
-        """Allocate the decode constants for `tokens` rows now (see
+        """Allocate the decode constants for the given row count.
+
+        Allocate the decode constants for `tokens` rows now (see
         Gemma4TT._prepare_traces).
         """
         self._bias(tokens)
@@ -317,7 +326,9 @@ class FeedForward:
         return self._zero_bias[tokens]
 
     def _route(self, normed: ttnn.Tensor, tokens: int):
-        """topk_router_gpt: row-major [T, k] uint16 ids and BF16 softmax weights over
+        """Compute the expert ids and weights with topk_router_gpt.
+
+        topk_router_gpt: row-major [T, k] uint16 ids and BF16 softmax weights over
         the k logits.
         """
         return ttnn.experimental.topk_router_gpt(
@@ -331,12 +342,15 @@ class FeedForward:
     def _experts_q4_rows(
         self, x: ttnn.Tensor, normed: ttnn.Tensor, group: int = 256
     ) -> ttnn.Tensor:
-        """Q4_0 experts for every row of x [1, 1, T, H], one batch-1 stream pair per row
+        """Run the Q4_0 experts for every prefill row.
+
+        Q4_0 experts for every row of x [1, 1, T, H], one batch-1 stream pair per row
         (slow).
 
         Rows are concatenated in groups: one ttnn.concat takes at most about 2,000
         inputs (two
-        runtime arguments each), and the one-row tensors are freed group by group."""
+        runtime arguments each), and the one-row tensors are freed group by group.
+        """
         groups = []
         for g0 in range(0, x.shape[2], group):
             outs = []
@@ -398,11 +412,14 @@ class FeedForward:
         return self._unpad(out)
 
     def decode_compact(self, normed, mlp_in, exp_in, boundary) -> ttnn.Tensor:
-        """1-4 decode tokens on compact boundaries (boundary.py). normed, mlp_in,
+        """Run feedforward decode on compact boundaries.
+
+        1-4 decode tokens on compact boundaries (boundary.py). normed, mlp_in,
         exp_in: row form BF16
         [1, 1, rows, H] from the attention tail. Returns this chip's [mlp rows | expert
         rows] partial sums,
-        compact FP32 (2 * rows vectors)."""
+        compact FP32 (2 * rows vectors).
+        """
         rows = normed.shape[2]
         out = boundary.compact(2 * rows)
         ms = self.mlp_stream
@@ -616,9 +633,12 @@ class FeedForward:
         return out
 
     def __call__(self, residual: ttnn.Tensor) -> ttnn.Tensor:
-        """Prefill: residual [1, 1, T, H] replicated. Returns the block output to add to
+        """Run the feedforward block for a prefill chunk.
+
+        Prefill: residual [1, 1, T, H] replicated. Returns the block output to add to
         the residual.
-        (Decode runs decode_compact.)"""
+        (Decode runs decode_compact.)
+        """
         t = residual.shape[2]
         normed = rms_norm(residual, None, self.eps)
         mlp_in = ttnn.mul(normed, self.pre_ff, memory_config=DRAM)

@@ -1,4 +1,6 @@
-"""vLLM general plugin: registers this package's models and parsers in every vLLM
+"""Register models and parsers in each vLLM process.
+
+vLLM general plugin: registers this package's models and parsers in every vLLM
 process.
 
 vLLM loads it through the `vllm.general_plugins` entry point in pyproject.toml, so
@@ -18,6 +20,7 @@ MODELS = {
 
 
 def register() -> None:
+    """Register the Gemma 4 models and tool parser with vLLM."""
     from vllm.model_executor.models.registry import ModelRegistry
 
     import tt_models.models.gemma4.tool_parser  # noqa: F401  registers the gemma4_tt parser

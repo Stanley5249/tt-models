@@ -66,6 +66,7 @@ class LayerKv:
     )  # None when the view is the buffer's own shape
 
     def update_args(self) -> dict:
+        """Return the cache and metadata arguments for a decode update."""
         return (
             {}
             if self.geometry is None
@@ -73,9 +74,11 @@ class LayerKv:
         )
 
     def fill_args(self) -> dict:
+        """Return the cache and page table arguments for a prefill fill."""
         return {} if self.geometry is None else {"block_size": self.block_size}
 
     def sdpa_args(self) -> dict:
+        """Return the cache and page table arguments for paged attention."""
         return {} if self.geometry is None else {"paged_cache_geometry": self.geometry}
 
 
@@ -91,8 +94,11 @@ class KvCache:
         group_of: list[int],
         dtype,
     ):
-        """shapes: per layer (num_blocks, KV heads per chip, block_size, head_dim);
-        buffer_of: the shared buffer of every layer; group_of: its KV-cache group."""
+        """Allocate the paged KV cache for all layers.
+
+        shapes: per layer (num_blocks, KV heads per chip, block_size, head_dim);
+        buffer_of: the shared buffer of every layer; group_of: its KV-cache group.
+        """
         self.num_blocks = shapes[0][0]
         self.groups = max(group_of) + 1
         self.sliding = [False] * self.groups
@@ -147,7 +153,9 @@ class KvCache:
         tokens: int,
         ring_tokens: int,
     ) -> "KvCache":
-        """The layout vLLM builds, sized for `rows` sequences of `tokens` positions,
+        """Allocate a standalone cache using vLLM's layout.
+
+        The layout vLLM builds, sized for `rows` sequences of `tokens` positions,
         for scripts and tests that run without vLLM (see tables()).
 
         attn_shapes: every layer's AttnShape. The largest per-token view keeps
@@ -179,7 +187,9 @@ class KvCache:
     def tables(
         self, rows: int, tokens: int, width: int, ring_tokens: int
     ) -> torch.Tensor:
-        """Page tables [groups, rows, width] for scripts and warmup: every row gets
+        """Build page tables for scripts and warmup.
+
+        Page tables [groups, rows, width] for scripts and warmup: every row gets
         `tokens` positions in blocks of its own, after the null block 0.
 
         Sliding groups cycle through enough blocks for `ring_tokens` positions (the

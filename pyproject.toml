@@ -142,7 +142,6 @@ ignore = [
   "S311",  # benchmark inputs and cache salts need no cryptography
   # Not yet fixed; remove one family per change.
   "ANN",  # annotations in src/
-  "D",  # Google docstrings in src/
 ]
 
 [tool.ruff.lint.pydocstyle]

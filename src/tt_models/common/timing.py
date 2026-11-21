@@ -6,7 +6,9 @@ import ttnn
 
 
 def device_time_us(mesh: ttnn.MeshDevice, fn, iters: int = 50) -> float:
-    """Device time per call: replay a trace of `iters` calls, so host dispatch is
+    """Measure device time per call.
+
+    Device time per call: replay a trace of `iters` calls, so host dispatch is
     excluded.
     """
     fn().deallocate(True)

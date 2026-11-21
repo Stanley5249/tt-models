@@ -20,7 +20,9 @@ from tt_models.models.gemma4.generic_op import (
 
 
 def rope_partner(width: int, head_dim: int) -> torch.Tensor:
-    """Index of every fused-row value's rotate_half partner (the other half of its
+    """Find the rotate_half partner of every value in a fused QKV row.
+
+    Index of every fused-row value's rotate_half partner (the other half of its
     head).
     """
     d = torch.arange(width)
@@ -29,16 +31,20 @@ def rope_partner(width: int, head_dim: int) -> torch.Tensor:
 
 
 class QkRope:
-    """q/k RMSNorm, head weights and RoPE of the fused batch-1 QKV row in one op
+    """Fused q/k RMSNorm, head weights and RoPE for batch-1 QKV.
+
+    q/k RMSNorm, head weights and RoPE of the fused batch-1 QKV row in one op
     (kernels/qk_rope_*).
 
     One core per compact tile (4 heads of 256 or 2 of 512); V heads have weight 1, cos
     1, sin 0.
     Replaces reshape, rms_norm, the weight multiply, the rotate_half matmul, three RoPE
     eltwise ops and the
-    reshape back (~60 us per layer)."""
+    reshape back (~60 us per layer).
+    """
 
     def __init__(self, mesh, width: int, head_dim: int, eps: float, core_row: int = 6):
+        """Set up the fused RMSNorm and RoPE operation."""
         self.mesh, self.width, self.head_dim, self.eps = mesh, width, head_dim, eps
         self.V = width // (CHUNK * CHUNKS_PER_TILE)
         assert width == self.V * CHUNK * CHUNKS_PER_TILE
@@ -53,13 +59,17 @@ class QkRope:
         return compact_tensor(self.mesh, torch.stack([w_row, w_row[self.partner]]))
 
     def host_tables(self, cos_row: torch.Tensor, sin_row: torch.Tensor) -> torch.Tensor:
-        """Per-step [cos | sin * rotate_half sign] for one token, as host compact FP32
+        """Pack one token's cosine and signed sine rows into compact form.
+
+        Per-step [cos | sin * rotate_half sign] for one token, as host compact FP32
         [1, 1, 32, 2 V 32].
         """
         return to_compact(torch.stack([cos_row, sin_row * self.sign]))[None, None]
 
     def __call__(self, x, cs, w, out, cs_page0: int = 0):
-        """x: FP32 row-form QKV matmul output [1, 1, 1, W]; out: BF16 row form [1, 1, 1,
+        """Apply fused RMSNorm and RoPE to the QKV row.
+
+        x: FP32 row-form QKV matmul output [1, 1, 1, W]; out: BF16 row form [1, 1, 1,
         W].
         """
         crs = core_range_set(self.cores)
