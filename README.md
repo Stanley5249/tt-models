@@ -40,3 +40,7 @@ A new model goes in `src/tt_models/models/<name>/`, with its adapter class added
     pixi run python scripts/accuracy/greedy_check.py --compare scripts/accuracy/greedy-base.json
 
 [docs/serving.md](docs/serving.md) lists which check covers what. Results go to `artifacts/` (not tracked) until they back a decision; then they move into a new doc under [docs/experiments/](docs/experiments/README.md), and README and guides link to it rather than quoting numbers. `AGENTS.md` holds device behaviour seen on this machine but not yet understood.
+
+## License
+
+Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option. Files adapted from Apache-2.0 projects stay Apache-2.0 and say so in an SPDX header: `scripts/accuracy/gpqa_eval.py` and `src/tt_models/models/gemma4/kernels/stream_common.hpp`. `docs/experiments/2026-11-19-official-comparison/official/` holds copies of tt-inference-server files under its Apache-2.0 license.

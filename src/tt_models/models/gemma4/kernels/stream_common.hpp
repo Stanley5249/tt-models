@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Block streaming from one DRAM bank with transaction ids (NCRISC), after the gpt-oss fused
 // decode streamers (models/demos/gpt_oss/tt/fused_decode/kernels/stream_*_reader.cpp, Apache-2.0).
 //

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """GPQA Diamond accuracy of a running server, as upstream's QB2 release check scores it.
 
     uv run --no-project --with-requirements \\

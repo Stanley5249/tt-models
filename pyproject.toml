@@ -3,6 +3,8 @@ name = "tt-models"
 version = "0.1.0"
 description = "Tenstorrent model implementations served through vLLM and vllm-tt-plugin"
 requires-python = ">=3.12"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
 # The runtime stack (ttnn, torch, vLLM, vllm-tt-plugin) is pinned under [tool.pixi].
 dependencies = []
 
