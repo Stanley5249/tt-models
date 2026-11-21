@@ -1,4 +1,6 @@
-"""Blocking trace execution, readback and host softcap of a batch-1 decode step (diagnostic)."""
+"""Blocking trace execution, readback and host softcap of a batch-1 decode step
+(diagnostic).
+"""
 
 import statistics
 import time
@@ -18,7 +20,13 @@ with open_n300(trace_region_size=300_000_000) as mesh:
     tid, dev, out = m.traces[1]
     print("out", out.shape, out.layout, out.memory_config().memory_layout)
     host = m._decode_inputs(torch.tensor([5]), torch.tensor([70]), tables)
-    r, c, e, full, sc, am, sc1 = [], [], [], [], [], [], []
+    r: list[float] = []
+    c: list[float] = []
+    e: list[float] = []
+    full: list[float] = []
+    sc: list[float] = []
+    am: list[float] = []
+    sc1: list[float] = []
     for _ in range(20):
         ttnn.synchronize_device(mesh)
         t0 = time.perf_counter()
@@ -51,7 +59,7 @@ with open_n300(trace_region_size=300_000_000) as mesh:
         sc1.append(time.perf_counter() - t0)
         torch.set_num_threads(20)
 
-    def f(v):
+    def f(v: list[float]):
         return round(statistics.median(v) * 1e3, 3)
 
     print(

@@ -1,12 +1,24 @@
 """Device time of an op, measured by trace replay."""
 
+from __future__ import annotations
+
 import time
+from typing import TYPE_CHECKING
 
 import ttnn
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def device_time_us(mesh: ttnn.MeshDevice, fn, iters: int = 50) -> float:
-    """Device time per call: replay a trace of `iters` calls, so host dispatch is excluded."""
+
+def device_time_us(
+    mesh: ttnn.MeshDevice, fn: Callable[[], ttnn.Tensor], iters: int = 50
+) -> float:
+    """Measure device time per call.
+
+    Device time per call: replay a trace of `iters` calls, so host dispatch is
+    excluded.
+    """
     fn().deallocate(True)
     ttnn.synchronize_device(mesh)
     tid = ttnn.begin_trace_capture(mesh, cq_id=0)

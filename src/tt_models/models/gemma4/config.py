@@ -1,12 +1,15 @@
 """Gemma 4 model settings: weight precisions, prefill pieces, decode rows."""
 
 from dataclasses import dataclass
+from typing import cast
 
 import ttnn
+from typing_extensions import TypedDict
 
 from tt_models.common.config import TILE
 
-# Decode batches up to this many tokens take the expert streams (their scratch holds 32 slots).
+# Decode batches up to this many tokens take the expert streams (their scratch holds 32
+# slots).
 STREAM_ROWS = 4
 # Longest piece of a prompt one prefill pass computes. It bounds activation memory
 # (the expert-major MoE gathers k = 8 rows per token) whatever chunk vLLM schedules.
@@ -26,15 +29,29 @@ def prefill_rows(tokens: int, start: int) -> int:
     return -(-tokens // step) * step
 
 
+class _PrecisionOverrides(TypedDict, total=False, closed=True):
+    attention: ttnn.DataType
+    mlp: ttnn.DataType
+    experts: ttnn.DataType
+    lm_head: ttnn.DataType
+    kv_cache: ttnn.DataType
+    expert_fidelity: str
+    expert_q4: bool
+
+
 @dataclass
 class Precision:
+    """Select the weight formats used by the model."""
+
     attention: ttnn.DataType = ttnn.bfloat8_b
     mlp: ttnn.DataType = ttnn.bfloat8_b
     experts: ttnn.DataType = ttnn.bfloat4_b
     lm_head: ttnn.DataType = ttnn.bfloat8_b
     kv_cache: ttnn.DataType = ttnn.bfloat8_b
     expert_fidelity: str = "LoFi"  # compute fidelity of the expert sparse matmuls
-    expert_q4: bool = False  # experimental Q4_0 experts (expert_q4.py): batch-1 decode only
+    expert_q4: bool = (
+        False  # experimental Q4_0 experts (expert_q4.py): batch-1 decode only
+    )
 
     @classmethod
     def parse(cls, spec: str) -> "Precision":
@@ -43,9 +60,18 @@ class Precision:
         kwargs = {}
         for item in filter(None, spec.split(",")):
             key, value = item.split("=")
-            kwargs[key] = value if key.endswith("fidelity") else value == "1" if key == "expert_q4" else names[value]
-        return cls(**kwargs)
+            kwargs[key] = (
+                value
+                if key.endswith("fidelity")
+                else value == "1"
+                if key == "expert_q4"
+                else names[value]
+            )
+        return cls(**cast("_PrecisionOverrides", kwargs))
 
     def tag(self) -> str:
+        """Return the cache tag for these precision settings."""
         names = {ttnn.bfloat16: "bf16", ttnn.bfloat8_b: "bfp8", ttnn.bfloat4_b: "bfp4"}
-        return "-".join(names[d] for d in (self.attention, self.mlp, self.experts, self.lm_head))
+        return "-".join(
+            names[d] for d in (self.attention, self.mlp, self.experts, self.lm_head)
+        )

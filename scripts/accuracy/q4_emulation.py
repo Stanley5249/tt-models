@@ -1,7 +1,9 @@
 """Teacher-forced accuracy of emulated expert weight formats on the CPU reference.
 
-    pixi run python scripts/accuracy/q4_emulation.py artifacts/q4/emulation.json q4exact q4clamp bfp4 [...]
-    EMU_TOKENS=512 EMU_DTYPE=bfloat16 pixi run python scripts/accuracy/q4_emulation.py out.json none q4clamp
+    pixi run python scripts/accuracy/q4_emulation.py \\
+        artifacts/q4/emulation.json q4exact q4clamp bfp4 [...]
+    EMU_TOKENS=512 EMU_DTYPE=bfloat16 pixi run python \\
+        scripts/accuracy/q4_emulation.py out.json none q4clamp
 
 Every routed-expert weight of the HF reference is replaced by one format, and the
 README logits are scored against the cached fp32 reference (precision_study.py):
@@ -18,18 +20,24 @@ No ttnn import: a ttnn host conversion starts the device cluster, which breaks a
 device job running next to this one.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from precision_study import score, tokens  # a sibling script
 
-import tt_models.models.gemma4.reference as R
+from tt_models.models.gemma4 import reference
 from tt_models.models.gemma4.checkpoint import Checkpoint
 from tt_models.models.gemma4.q4 import factor_blocks
+
+if TYPE_CHECKING:
+    import ttnn
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -56,7 +64,9 @@ def bfp4(w: torch.Tensor) -> torch.Tensor:
 
 
 def bfp8(w: torch.Tensor) -> torch.Tensor:
-    """Torch BFP8 tile rounding: blocks of 16 along the last dim, sign + 7-bit magnitude."""
+    """Torch BFP8 tile rounding: blocks of 16 along the last dim, sign + 7-bit
+    magnitude.
+    """
     b = w.to(torch.bfloat16).float().reshape(-1, 16)
     e = torch.floor(torch.log2(b.abs().amax(-1, keepdim=True).clamp(min=1e-38)))
     st = torch.exp2(e - 6)
@@ -64,11 +74,15 @@ def bfp8(w: torch.Tensor) -> torch.Tensor:
 
 
 def dense(w: torch.Tensor, mode: str) -> torch.Tensor:
-    """An HF [out, in] weight in `mode`; the device stores [in, out], so BFP blocks run along the outputs."""
+    """An HF [out, in] weight in `mode`; the device stores [in, out], so BFP blocks run
+    along the outputs.
+    """
     if mode == "bfp8":
         return bfp8(w.T.contiguous()).T.contiguous()
     if w.shape[0] > 4096:
-        return torch.cat([dense(w[i : i + 4096], mode) for i in range(0, w.shape[0], 4096)])
+        return torch.cat(
+            [dense(w[i : i + 4096], mode) for i in range(0, w.shape[0], 4096)]
+        )
     return q4(w[None], mode)[0]
 
 
@@ -86,34 +100,52 @@ DENSE_KEYS = (
 def main():
     out = Path(sys.argv[1])
     modes = sys.argv[2:]
-    state = {"mode": None}
+    mode = "none"
 
-    def quantize_layer(layer_state, quant):
+    def quantize_layer(
+        layer_state: dict[str, torch.Tensor], _quant: dict[str, ttnn.DataType]
+    ):
         result = dict(layer_state)
-        if state["mode"] == "none":
+        if mode == "none":
             return result
-        for key in ("experts.gate_up_proj", "experts.down_proj"):  # HF layout [E, out, in]
+        for key in (
+            "experts.gate_up_proj",
+            "experts.down_proj",
+        ):  # HF layout [E, out, in]
             w = result[key]
-            if state["mode"] == "bfp4":  # the device stores [in, out]: blocks along the outputs
-                result[key] = bfp4(w.transpose(-1, -2).contiguous()).transpose(-1, -2).contiguous()
+            if mode == "bfp4":  # the device stores [in, out]: blocks along the outputs
+                result[key] = (
+                    bfp4(w.transpose(-1, -2).contiguous())
+                    .transpose(-1, -2)
+                    .contiguous()
+                )
             else:
-                result[key] = q4(w, state["mode"])
+                result[key] = q4(w, mode)
         return result
 
     dense_mode = os.environ.get("EMU_DENSE", "")
     plain_quantize = quantize_layer
 
-    def quantize_all(layer_state, quant):
-        result = plain_quantize(layer_state, quant)
+    def quantize_all(state: dict[str, torch.Tensor], quant: dict[str, ttnn.DataType]):
+        result = plain_quantize(state, quant)
         if dense_mode:
             for key in DENSE_KEYS:
                 if key in result:
                     result[key] = dense(result[key], dense_mode)
         return result
 
-    R.quantize_layer = quantize_all
-    if dense_mode:  # Reference.logits sends the LM head [H, V] through roundtrip when "lm_head" is quantized
-        R.roundtrip = lambda head_t, _dtype: dense(head_t.T.contiguous(), dense_mode).T.contiguous()
+    reference.quantize_layer = quantize_all
+    # Reference.logits sends the LM head [H, V] through roundtrip when "lm_head" is
+    # quantized
+    if dense_mode:
+        # The caller supplies a dtype, but dense_mode selects the emulation.
+        def roundtrip_head(
+            w: torch.Tensor,
+            ttnn_dtype: ttnn.DataType,  # noqa: ARG001
+        ) -> torch.Tensor:
+            return dense(w.T.contiguous(), dense_mode).T.contiguous()
+
+        reference.roundtrip = roundtrip_head
     assert "ttnn" not in sys.modules, "ttnn would start the device cluster"
     ck = Checkpoint()
     n = int(os.environ.get("EMU_TOKENS", "2048"))
@@ -122,9 +154,10 @@ def main():
     base = torch.load(ROOT / "cache" / "ref" / f"readme-{n}-fp32-logits.pt")
     results = json.loads(out.read_text()) if out.exists() else {}
     for mode in modes:
-        state["mode"] = mode
         t0 = time.time()
-        logits, _ = R.Reference(ck, dtype=dtype, quant={"lm_head": "emulated"} if dense_mode else None).forward(ids)
+        logits, _ = reference.Reference(
+            ck, dtype=dtype, quant={"lm_head": "emulated"} if dense_mode else None
+        ).forward(ids)
         key = f"{mode}{'+dense-' + dense_mode if dense_mode else ''}@{n}" + (
             "" if dtype == torch.float32 else f"-{str(dtype).removeprefix('torch.')}"
         )

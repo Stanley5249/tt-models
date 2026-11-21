@@ -1,9 +1,10 @@
 """GPQA Diamond accuracy of a running server, as upstream's QB2 release check scores it.
 
-    uv run --no-project --with-requirements scripts/accuracy/gpqa_eval.requirements.txt \\
+    uv run --no-project --with-requirements \\
+        scripts/accuracy/gpqa_eval.requirements.txt \\
         python scripts/accuracy/gpqa_eval.py --count 10 --out artifacts/gpqa/<label>
 
-Needs a running `pixi run serve-gemma4` and Hugging Face access to the gated
+Needs a running `just serve-gemma4` and Hugging Face access to the gated
 Idavidrein/gpqa dataset. Port of tt-metal's
 models/demos/gemma4_26b_a4b_qb2/tests/benchmark.py (Apache-2.0): the same
 lm-eval task (r1_gpqa_diamond at the pinned dataset revision, choices shuffled
@@ -26,10 +27,11 @@ SEED = 42
 
 
 def load_gpqa(count: int):
-    import datasets
-    from lm_eval.api.task import ConfigurableTask
-    from lm_eval.tasks import TaskManager
-    from lm_eval.utils import load_yaml_config
+    # These packages are installed by gpqa_eval.requirements.txt.
+    import datasets  # pyrefly: ignore [missing-import]
+    from lm_eval.api.task import ConfigurableTask  # pyrefly: ignore [missing-import]
+    from lm_eval.tasks import TaskManager  # pyrefly: ignore [missing-import]
+    from lm_eval.utils import load_yaml_config  # pyrefly: ignore [missing-import]
 
     # Choice permutations must come from this seed, not a previous map cache.
     datasets.disable_caching()
@@ -51,11 +53,17 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "summary.json").unlink(missing_ok=True)  # a failed rerun must not leave the old summary
+    (args.out / "summary.json").unlink(
+        missing_ok=True
+    )  # a failed rerun must not leave the old summary
     task, cases = load_gpqa(args.count)
     rows = []
-    with httpx.Client(base_url=args.url, timeout=3600) as client, (args.out / "responses.jsonl").open("w") as log:
+    with (
+        httpx.Client(base_url=args.url, timeout=3600) as client,
+        (args.out / "responses.jsonl").open("w") as log,
+    ):
         for i, doc, prompt in cases:
+            stops: list[str] = []
             payload = {
                 "model": args.model,
                 "messages": [{"role": "user", "content": prompt}],
@@ -65,7 +73,7 @@ def main():
                 "top_k": 20,
                 "seed": SEED,
                 "chat_template_kwargs": {"enable_thinking": False},
-                "stop": [],
+                "stop": stops,
             }
             t0 = time.perf_counter()
             response = client.post("/v1/chat/completions", json=payload)
@@ -84,7 +92,11 @@ def main():
             rows.append(row)
             log.write(json.dumps(row) + "\n")
             log.flush()
-            print(f"GPQA {i}: correct={correct} tokens={row['completion_tokens']} {row['seconds']} s", flush=True)
+            print(
+                f"GPQA {i}: correct={correct} tokens={row['completion_tokens']} "
+                f"{row['seconds']} s",
+                flush=True,
+            )
     correct = sum(r["correct"] for r in rows)
     summary = {
         "questions": len(rows),

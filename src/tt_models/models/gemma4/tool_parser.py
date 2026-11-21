@@ -1,6 +1,7 @@
-"""Gemma 4 tool parser that enforces required and named tool choice.
+r"""Gemma 4 tool parser that enforces required and named tool choice.
 
-    vllm serve ... --tool-parser-plugin src/tt_models/models/gemma4/tool_parser.py --tool-call-parser gemma4_tt
+    vllm serve ... --tool-parser-plugin \
+        src/tt_models/models/gemma4/tool_parser.py --tool-call-parser gemma4_tt
 
 vLLM 0.32's `gemma4` parser sets no structural tag, so `tool_choice="required"`
 or a named tool only reaches the model as prompt text (vllm-project/vllm#50477,
@@ -20,27 +21,51 @@ argument block at all (`call:name<tool_call|>`), which the gemma4 parser cannot
 read as a call.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.gemma4_engine_tool_parser import Gemma4EngineToolParser
-from vllm.tool_parsers.structural_tag_registry import register_vllm_structural_tag
+from vllm.tool_parsers.structural_tag_registry import (
+    SimplifiedToolChoice,
+    register_vllm_structural_tag,
+)
 from xgrammar.builtin_structural_tag import get_gemma_4_structural_tag
+
+if TYPE_CHECKING:
+    from xgrammar import StructuralTag
+    from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
 
 TAG_MODEL = "gemma_4"
 
 
-def _object_arguments(tool):
+def _object_arguments(tool: FunctionToolParam) -> FunctionToolParam:
     """A non-strict tool as a strict one whose arguments are any object."""
     if tool.function.strict is not False:
         return tool
-    function = tool.function.model_copy(update={"strict": True, "parameters": {"type": "object"}})
+    function = tool.function.model_copy(
+        update={"strict": True, "parameters": {"type": "object"}}
+    )
     return tool.model_copy(update={"function": function})
 
 
 @register_vllm_structural_tag(TAG_MODEL)
-def gemma4_structural_tag(function_tools, builtin_tools, tool_choice, reasoning, token_suffix):
-    """vLLM's builder signature over xgrammar's Gemma 4 tag (no token suffix in this format)."""
+def gemma4_structural_tag(
+    function_tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,  # noqa: FBT001 - vLLM builder signature
+    token_suffix: str,
+) -> StructuralTag:
+    """Build the xgrammar Gemma 4 tag using vLLM's signature.
+
+    This tag format takes no token suffix.
+    """
     if token_suffix:
-        raise ValueError(f"the Gemma 4 structural tag takes no token suffix, got {token_suffix!r}")
+        raise ValueError(
+            f"the Gemma 4 structural tag takes no token suffix, got {token_suffix!r}"
+        )
     return get_gemma_4_structural_tag(
         tools=[_object_arguments(t) for t in function_tools],
         builtin_tools=builtin_tools,
@@ -51,4 +76,6 @@ def gemma4_structural_tag(function_tools, builtin_tools, tool_choice, reasoning,
 
 @ToolParserManager.register_module("gemma4_tt")
 class Gemma4TTToolParser(Gemma4EngineToolParser):
+    """Parse Gemma 4 tool calls and provide guided decoding tags."""
+
     structural_tag_model = TAG_MODEL

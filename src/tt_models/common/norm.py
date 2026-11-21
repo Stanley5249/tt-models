@@ -1,5 +1,7 @@
 """RMSNorm on decode and prefill rows."""
 
+from __future__ import annotations
+
 import ttnn
 
 from tt_models.common.config import DRAM, HIFI4, TILE
@@ -7,7 +9,7 @@ from tt_models.common.config import DRAM, HIFI4, TILE
 _NORM_SHARD = {}
 
 
-def rms_norm(x: ttnn.Tensor, weight, eps: float) -> ttnn.Tensor:
+def rms_norm(x: ttnn.Tensor, weight: ttnn.Tensor, eps: float) -> ttnn.Tensor:
     """RMSNorm over the last dim of [1, 1, T, H].
 
     For decode (T <= 32) the interleaved op runs on few cores (63 us on
@@ -16,7 +18,13 @@ def rms_norm(x: ttnn.Tensor, weight, eps: float) -> ttnn.Tensor:
     """
     rows, width = x.shape[2], x.shape[3]
     if rows > TILE or (width // TILE) % 8:
-        return ttnn.rms_norm(x, weight=weight, epsilon=eps, memory_config=DRAM, compute_kernel_config=HIFI4)
+        return ttnn.rms_norm(
+            x,
+            weight=weight,
+            epsilon=eps,
+            memory_config=DRAM,
+            compute_kernel_config=HIFI4,
+        )
     if width not in _NORM_SHARD:
         per = width // TILE // 8
         shard = ttnn.create_sharded_memory_config(
@@ -35,7 +43,14 @@ def rms_norm(x: ttnn.Tensor, weight, eps: float) -> ttnn.Tensor:
         _NORM_SHARD[width] = (shard, cfg)
     shard, cfg = _NORM_SHARD[width]
     xs = ttnn.to_memory_config(x, shard)
-    y = ttnn.rms_norm(xs, weight=weight, epsilon=eps, program_config=cfg, memory_config=shard, compute_kernel_config=HIFI4)
+    y = ttnn.rms_norm(
+        xs,
+        weight=weight,
+        epsilon=eps,
+        program_config=cfg,
+        memory_config=shard,
+        compute_kernel_config=HIFI4,
+    )
     xs.deallocate(True)
     out = ttnn.to_memory_config(y, DRAM)
     y.deallocate(True)

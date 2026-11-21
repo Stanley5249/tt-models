@@ -19,11 +19,14 @@ def test_prefill_rows():
     assert prefill_rows(1, 0) == 32
     assert prefill_rows(SHORT_PIECE, 0) == SHORT_PIECE
     assert prefill_rows(SHORT_PIECE + 1, 0) == 640
-    assert prefill_rows(33, 128) == PREFILL_BUCKET  # a later piece always pads to the bucket
+    assert (
+        prefill_rows(33, 128) == PREFILL_BUCKET
+    )  # a later piece always pads to the bucket
 
 
 def test_kv_groups_gemma4():
-    # 25 sliding and 5 global layers: 5 sliding groups of 5 and 1 global group, as vLLM forms them.
+    # 25 sliding and 5 global layers: 5 sliding groups of 5 and 1 global group, as vLLM
+    # forms them.
     types = (["sliding_attention"] * 5 + ["full_attention"]) * 5
     groups = kv_groups(types)
     assert sorted(set(groups)) == list(range(6))
@@ -36,7 +39,9 @@ def test_plan_chunks_places_every_pair():
     tokens, k, rows, experts = 50, 8, 32, 128
     ids = torch.stack([torch.randperm(experts)[:k] for _ in range(tokens)])
     w = torch.rand(tokens, k)
-    gather, row_w, chunk_expert, row_of_pair = plan_chunks(ids, w, rows, experts)  # row_of_pair is slot-major
+    gather, row_w, chunk_expert, row_of_pair = plan_chunks(
+        ids, w, rows, experts
+    )  # row_of_pair is slot-major
     assert chunk_expert.numel() % CHUNK_GRANULE == 0
     assert gather.numel() == row_w.numel() == chunk_expert.numel() * rows
     for pair, row in enumerate(row_of_pair.tolist()):
@@ -57,4 +62,18 @@ def test_q4_factor_recovers_the_grid():
     q2, s2 = factor_blocks(b)
     assert torch.allclose(q2 * s2, b, rtol=0.01, atol=1e-6)
     zero_q, zero_s = factor_blocks(torch.zeros(1, 32))
-    assert zero_s.item() == 0 and torch.all(zero_q == 0)
+    assert zero_s.item() == 0
+    assert torch.all(zero_q == 0)
+
+
+def test_sampler_accepts_a_scalar_seed():
+    from vllm_tt_plugin.model_input import TTSamplingParams
+
+    from tt_models.models.gemma4.vllm_adapter import sample
+
+    logits = torch.zeros(2, 4)
+    positions = torch.tensor([7, 11])
+    params = {"temperature": [1.0, 1.0], "top_k": [4, 4], "top_p": [1.0, 1.0]}
+    scalar, _ = sample(logits, TTSamplingParams(**params, seed=13), positions)
+    per_row, _ = sample(logits, TTSamplingParams(**params, seed=[13, 13]), positions)
+    assert torch.equal(scalar, per_row)

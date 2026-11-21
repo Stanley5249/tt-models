@@ -1,4 +1,5 @@
-"""Device check of the compact boundary ops (tt_models.models.gemma4.boundary) against torch.
+"""Device check of the compact boundary ops (tt_models.models.gemma4.boundary) against
+torch.
 
     pixi run python scripts/kernels/boundary_check.py
 
@@ -18,14 +19,18 @@ from tt_models.models.gemma4.compact import compact_tensor, from_compact, to_com
 H, EPS = 2816, 1e-6
 
 
-def rms(v):
+def rms(v: torch.Tensor):
     return v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + EPS)
 
 
-def report(name, got, ref):
+def report(name: str, got: torch.Tensor, ref: torch.Tensor):
     got, ref = got.float().flatten(), ref.float().flatten()
     pcc = torch.corrcoef(torch.stack([got, ref]))[0, 1].item()
-    print(f"{name}: max err {(got - ref).abs().max():.5f} (ref max {ref.abs().max():.3f}), pcc {pcc:.6f}", flush=True)
+    print(
+        f"{name}: max err {(got - ref).abs().max():.5f} (ref max "
+        f"{ref.abs().max():.3f}), pcc {pcc:.6f}",
+        flush=True,
+    )
 
 
 def main():
@@ -33,7 +38,9 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--tail-cores", type=int, default=11)
-    ap.add_argument("--rows", type=int, nargs="+", default=[1, 4], help="decode tokens per boundary")
+    ap.add_argument(
+        "--rows", type=int, nargs="+", default=[1, 4], help="decode tokens per boundary"
+    )
     args = ap.parse_args()
     v = torch.randn(2, H)
     assert torch.equal(from_compact(to_compact(v), 2, H), v), "host compact round trip"
@@ -45,7 +52,12 @@ def main():
         shard0 = ttnn.ShardTensorToMesh(mesh, dim=0)
         cores = [ttnn.CoreCoord(i, 7) for i in range(8)]
 
-        def dev(t, dtype=ttnn.float32, mapper=None, mem=ttnn.L1_MEMORY_CONFIG):
+        def dev(
+            t: torch.Tensor,
+            dtype: ttnn.DataType = ttnn.float32,
+            mapper: ttnn.CppTensorToMesh | None = None,
+            mem: ttnn.MemoryConfig = ttnn.L1_MEMORY_CONFIG,
+        ):
             return ttnn.from_torch(
                 t,
                 dtype=dtype,
@@ -55,10 +67,10 @@ def main():
                 memory_config=mem,
             )
 
-        def chip(t, i=0):
+        def chip(t: ttnn.Tensor, i: int = 0):
             return ttnn.to_torch(ttnn.get_device_tensors(t)[i]).float()
 
-        def gather(t):
+        def gather(t: ttnn.Tensor):
             s, br = _SEMAPHORES[id(mesh)].next()
             return ttnn.experimental.all_gather_async(
                 t,
@@ -77,18 +89,29 @@ def main():
 
         for R in args.rows:
             print(f"== {R} row(s)", flush=True)
-            # pack: per-chip row-form FP32 rows -> compact vectors, after one vector of offset
+            # pack: per-chip row-form FP32 rows -> compact vectors, after one vector of
+            # offset
             rows = torch.randn(2, 1, R, H)
             src = dev(rows, mapper=shard0)
             dst = b.compact(R + 1)
             b.pack(src, dst, cores, dst_chunk0=b.V * 64, rows=R)
             for i in range(2):
-                report(f"pack chip {i}", from_compact(chip(dst, i)[0, 0], R + 1, H)[1:], rows[i, 0])
-            print("pack us", device_time_us(mesh, lambda: b.pack(src, b.compact(R), cores, rows=R)))
+                report(
+                    f"pack chip {i}",
+                    from_compact(chip(dst, i)[0, 0], R + 1, H)[1:],
+                    rows[i, 0],
+                )
+            print(
+                "pack us",
+                device_time_us(mesh, lambda: b.pack(src, b.compact(R), cores, rows=R)),
+            )
 
             # all-gather of compact vectors
             parts = torch.randn(2, R, H)
-            pc = dev(torch.stack([to_compact(parts[i]) for i in range(2)])[:, None], mapper=shard0)
+            pc = dev(
+                torch.stack([to_compact(parts[i]) for i in range(2)])[:, None],
+                mapper=shard0,
+            )
             g = gather(pc)
             print("gathered", g.shape, "us", device_time_us(mesh, lambda: gather(pc)))
 
@@ -105,11 +128,24 @@ def main():
             report("attn n", chip(n)[0, 0, :R], nn)
             report("attn m_in", chip(m_in)[0, 0, :R], nn * w_attn[1])
             report("attn e_in", chip(e_in, 1)[0, 0, :R], nn * w_attn[2])
-            print("attn_tail us", device_time_us(mesh, lambda: b.attn_tail(g, xt, wt, b.compact(R), b.row(R), b.row(R), b.row(R), rows=R)))
+            print(
+                "attn_tail us",
+                device_time_us(
+                    mesh,
+                    lambda: b.attn_tail(
+                        g, xt, wt, b.compact(R), b.row(R), b.row(R), b.row(R), rows=R
+                    ),
+                ),
+            )
 
             # feed-forward tail: per chip [mlp rows | expert rows]
             ffp = torch.randn(2, 2, R, H)  # [chip, (mlp, experts), row, H]
-            fc = dev(torch.stack([to_compact(ffp[i].reshape(2 * R, H)) for i in range(2)])[:, None], mapper=shard0)
+            fc = dev(
+                torch.stack([to_compact(ffp[i].reshape(2 * R, H)) for i in range(2)])[
+                    :, None
+                ],
+                mapper=shard0,
+            )
             gf = gather(fc)
             w_ff = torch.rand(4, H) + 0.5
             wft = compact_tensor(mesh, w_ff)
@@ -122,7 +158,15 @@ def main():
             ref_x3 = (x2d + rms(t) * w_ff[2]) * scalar
             report("ff x3", from_compact(chip(x3)[0, 0], R, H), ref_x3)
             report("ff h", chip(h, 1)[0, 0, :R], rms(ref_x3) * w_ff[3])
-            print("ff_tail us", device_time_us(mesh, lambda: b.ff_tail(gf, x_out, wft, b.compact(R), b.row(R), scalar, rows=R)))
+            print(
+                "ff_tail us",
+                device_time_us(
+                    mesh,
+                    lambda: b.ff_tail(
+                        gf, x_out, wft, b.compact(R), b.row(R), scalar, rows=R
+                    ),
+                ),
+            )
 
 
 if __name__ == "__main__":

@@ -10,37 +10,52 @@ Configurations:
                 spec like experts=bfp4,attention=bfp8,mlp=bfp8,lm_head=bfp8
   tt            the device model prefill (all positions)
 
-    pixi run python scripts/accuracy/precision_study.py --tokens 512 --configs fp32,emu:experts=bfp4,tt
+    pixi run python scripts/accuracy/precision_study.py --tokens 512 --configs \\
+        fp32,emu:experts=bfp4,tt
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 
 from tt_models.models.gemma4.checkpoint import Checkpoint
 
+if TYPE_CHECKING:
+    import ttnn
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def tokens(ckpt, n):
+def tokens(ckpt: Checkpoint, n: int):
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(ckpt.root)
+    assert tok is not None
     ids = tok((ckpt.root / "README.md").read_text(), return_tensors="pt").input_ids[0]
     return ids[:n]
 
 
-def parse_quant(spec: str) -> dict:
+def parse_quant(spec: str) -> dict[str, ttnn.DataType]:
     import ttnn
 
     names = {"bfp4": ttnn.bfloat4_b, "bfp8": ttnn.bfloat8_b, "bf16": ttnn.bfloat16}
-    return {k: names[v] for k, v in (item.split("=") for item in spec.split(",") if item)}
+    return {
+        k: names[v] for k, v in (item.split("=") for item in spec.split(",") if item)
+    }
 
 
-def run_reference(ckpt, ids, dtype, quant):
+def run_reference(
+    ckpt: Checkpoint,
+    ids: torch.Tensor,
+    dtype: torch.dtype,
+    quant: dict[str, ttnn.DataType],
+):
     from tt_models.models.gemma4.reference import Reference
 
     ref = Reference(ckpt, dtype=dtype, quant=quant)
@@ -48,17 +63,19 @@ def run_reference(ckpt, ids, dtype, quant):
     return logits.float()
 
 
-def run_tt(ckpt, ids, args):
+def run_tt(ckpt: Checkpoint, ids: torch.Tensor, args: argparse.Namespace):
     from tt_models.common.mesh import open_n300
     from tt_models.models.gemma4.model import Gemma4TT
 
     with open_n300() as mesh:
-        model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, precision=args.precision)
+        model = Gemma4TT(
+            mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, precision=args.precision
+        )
         tables = model.allocate_kv_cache(1, ids.shape[0])
         return model.prefill(ids, 0, tables[:, 0], all_logits=True)
 
 
-def score(logits, base, ids):
+def score(logits: torch.Tensor, base: torch.Tensor, ids: torch.Tensor):
     n = ids.shape[0] - 1
     lg, bs = logits[:n].float(), base[:n].float()
     nll = torch.nn.functional.cross_entropy(lg, ids[1:])
@@ -66,7 +83,9 @@ def score(logits, base, ids):
     kl = (logp.exp() * (logp - logq)).sum(-1)
     return {
         "ppl": round(nll.exp().item(), 4),
-        "top1_vs_fp32": round((lg.argmax(-1) == bs.argmax(-1)).float().mean().item(), 4),
+        "top1_vs_fp32": round(
+            (lg.argmax(-1) == bs.argmax(-1)).float().mean().item(), 4
+        ),
         "kl_mean": round(kl.mean().item(), 5),
         "kl_p95": round(kl.quantile(0.95).item(), 5),
     }
@@ -76,8 +95,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tokens", type=int, default=512)
     ap.add_argument("--configs", default="fp32,tt")
-    ap.add_argument("--precision", default="", help='TT Precision overrides, e.g. "expert_fidelity=HiFi2"')
-    ap.add_argument("--out", type=Path, default=ROOT / "artifacts" / "accuracy" / "precision_study.json")
+    ap.add_argument(
+        "--precision",
+        default="",
+        help='TT Precision overrides, e.g. "expert_fidelity=HiFi2"',
+    )
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=ROOT / "artifacts" / "accuracy" / "precision_study.json",
+    )
     args = ap.parse_args()
     spec = args.precision
     from tt_models.models.gemma4.config import Precision
@@ -97,7 +124,8 @@ def main():
         print(f"fp32 reference {time.time() - t0:.0f}s", flush=True)
 
     results = json.loads(args.out.read_text()) if args.out.exists() else {}
-    for cfg in args.configs.split(";" if ";" in args.configs else ","):
+    for config in args.configs.split(";" if ";" in args.configs else ","):
+        cfg = config
         t0 = time.time()
         if cfg == "fp32":
             logits = base
@@ -111,7 +139,12 @@ def main():
         else:
             raise ValueError(cfg)
         results[f"{cfg}@{args.tokens}"] = score(logits, base, ids)
-        print(cfg, results[f"{cfg}@{args.tokens}"], f"({time.time() - t0:.0f}s)", flush=True)
+        print(
+            cfg,
+            results[f"{cfg}@{args.tokens}"],
+            f"({time.time() - t0:.0f}s)",
+            flush=True,
+        )
         del logits
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(results, indent=1))

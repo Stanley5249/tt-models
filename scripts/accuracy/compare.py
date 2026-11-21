@@ -6,8 +6,10 @@ same context on both sides. Reference logits are cached under cache/ref/.
 With several `--offsets`, each one starts a text segment at that token of the
 README and the rows of all segments are pooled (one model load).
 
-    pixi run python scripts/accuracy/compare.py --layers 6 --prompt-len 128 --decode-steps 8
-    pixi run python scripts/accuracy/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace
+    pixi run python scripts/accuracy/compare.py --layers 6 --prompt-len 128 \\
+        --decode-steps 8
+    pixi run python scripts/accuracy/compare.py --decode-steps 128 --offsets 0 \\
+        1024 2048 3072 --trace
 """
 
 import argparse
@@ -25,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def prompt_tokens(ckpt: Checkpoint, n: int) -> torch.Tensor:
     tok = AutoTokenizer.from_pretrained(ckpt.root)
+    assert tok is not None
     text = (ckpt.root / "README.md").read_text()
     ids = tok(text, return_tensors="pt").input_ids[0]
     while ids.shape[0] < n:
@@ -32,9 +35,13 @@ def prompt_tokens(ckpt: Checkpoint, n: int) -> torch.Tensor:
     return ids[:n]
 
 
-def reference_logits(ckpt, ids, first, layers, offset=0) -> torch.Tensor:
+def reference_logits(
+    ckpt: Checkpoint, ids: torch.Tensor, first: int, layers: int, offset: int = 0
+) -> torch.Tensor:
     tag = f"-at{offset}" if offset else ""
-    path = ROOT / "cache" / "ref" / f"readme{tag}-n{ids.shape[0]}-from{first}-L{layers}.pt"
+    path = (
+        ROOT / "cache" / "ref" / f"readme{tag}-n{ids.shape[0]}-from{first}-L{layers}.pt"
+    )
     if path.exists():
         return torch.load(path)
     from tt_models.models.gemma4.reference import Reference
@@ -57,12 +64,14 @@ def reference_logits(ckpt, ids, first, layers, offset=0) -> torch.Tensor:
     return logits
 
 
-def metrics(tt: torch.Tensor, ref: torch.Tensor) -> dict:
+def metrics(tt: torch.Tensor, ref: torch.Tensor) -> dict[str, bool | int | float]:
     tt, ref = tt.float(), ref.float()
     pcc = torch.corrcoef(torch.stack([tt, ref]))[0, 1].item()
     t5, r5 = tt.topk(5).indices, ref.topk(5).indices
     p_ref = torch.softmax(ref, -1)
-    kl = torch.sum(p_ref * (torch.log_softmax(ref, -1) - torch.log_softmax(tt, -1))).item()
+    kl = torch.sum(
+        p_ref * (torch.log_softmax(ref, -1) - torch.log_softmax(tt, -1))
+    ).item()
     return {
         "pcc": round(pcc, 5),
         "top1": bool(t5[0] == r5[0]),
@@ -79,11 +88,26 @@ def main():
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--trace", action="store_true")
     ap.add_argument("--offsets", type=int, nargs="+", default=[0])
-    ap.add_argument("--batch", type=int, default=1, help="decode this many identical rows and score row 0 (the batch-B decode path)")
     ap.add_argument(
-        "--perturb", type=int, default=0, help="seed of a 2^-9 relative noise on the embeddings (0: none), to sample the noise floor"
+        "--batch",
+        type=int,
+        default=1,
+        help="decode this many identical rows and score row 0 (the batch-B decode "
+        "path)",
     )
-    ap.add_argument("--precision", default="", help='Precision overrides, e.g. "expert_q4=1" (tt_models.models.gemma4.model.Precision)')
+    ap.add_argument(
+        "--perturb",
+        type=int,
+        default=0,
+        help="seed of a 2^-9 relative noise on the embeddings (0: none), to sample the "
+        "noise floor",
+    )
+    ap.add_argument(
+        "--precision",
+        default="",
+        help='Precision overrides, e.g. "expert_q4=1" '
+        "(tt_models.models.gemma4.model.Precision)",
+    )
     args = ap.parse_args()
     if args.batch < 1:
         ap.error("--batch must be at least 1")
@@ -94,7 +118,15 @@ def main():
     segments = []
     for offset in args.offsets:
         ids = text[offset : offset + total + 1]
-        segments.append((offset, ids, reference_logits(ckpt, ids[:total], args.prompt_len - 1, args.layers, offset)))
+        segments.append(
+            (
+                offset,
+                ids,
+                reference_logits(
+                    ckpt, ids[:total], args.prompt_len - 1, args.layers, offset
+                ),
+            )
+        )
 
     import ttnn
 
@@ -106,40 +138,76 @@ def main():
     with open_n300(trace_region_size=200_000_000 if args.trace else 0) as mesh:
         t0 = time.time()
         model = Gemma4TT(
-            mesh, ckpt, cache_root=ROOT / "cache", max_batch=args.batch, num_layers=args.layers, precision=Precision.parse(args.precision)
+            mesh,
+            ckpt,
+            cache_root=ROOT / "cache",
+            max_batch=args.batch,
+            num_layers=args.layers,
+            precision=Precision.parse(args.precision),
         )
         print(f"model loaded in {time.time() - t0:.0f}s", flush=True)
         if args.perturb:
             plain = model.embed
 
-            def embed(t):
+            def embed(ids: torch.Tensor):
                 # Noise keyed by the call's tokens, so calls the model makes for itself
                 # (trace warm-up) do not shift the noise of the measured steps.
-                x = plain(t)
-                gen = torch.Generator().manual_seed(args.perturb * 1_000_003 + int((t.long() * (torch.arange(t.numel()) + 1)).sum()))
-                return (x.float() * (1 + 2**-9 * torch.randn(x.shape, generator=gen))).to(x.dtype)
+                x = plain(ids)
+                gen = torch.Generator().manual_seed(
+                    args.perturb * 1_000_003
+                    + int((ids.long() * (torch.arange(ids.numel()) + 1)).sum())
+                )
+                return (
+                    x.float() * (1 + 2**-9 * torch.randn(x.shape, generator=gen))
+                ).to(x.dtype)
 
-            model.embed = embed
+            # Perturb embeddings for this diagnostic run only.
+            model.embed = embed  # pyrefly: ignore [method-assign]
         pt = model.allocate_kv_cache(args.batch, total)
         for offset, ids, ref in segments:
             t0 = time.time()
+            logits = None
             for row in range(args.batch):
                 logits = model.prefill(ids[: args.prompt_len], 0, pt[:, row])
-            print(f"prefill {args.prompt_len} tokens at {offset}: {time.time() - t0:.2f}s", flush=True)
-            rows.append({"offset": offset, "pos": args.prompt_len - 1, **metrics(logits, ref[0])})
+            assert logits is not None
+            print(
+                f"prefill {args.prompt_len} tokens at {offset}: "
+                f"{time.time() - t0:.2f}s",
+                flush=True,
+            )
+            rows.append(
+                {
+                    "offset": offset,
+                    "pos": args.prompt_len - 1,
+                    **metrics(logits, ref[0]),
+                }
+            )
             for step in range(args.decode_steps):
                 pos = args.prompt_len + step
                 t0 = time.time()
                 tokens = ids[pos : pos + 1].repeat(args.batch)
-                logits = model.decode(tokens, torch.full((args.batch,), pos), pt, trace=args.trace)
+                logits = model.decode(
+                    tokens, torch.full((args.batch,), pos), pt, trace=args.trace
+                )
                 dt = time.time() - t0
-                rows.append({"offset": offset, "pos": pos, "sec": round(dt, 3), **metrics(logits[0], ref[step + 1])})
+                rows.append(
+                    {
+                        "offset": offset,
+                        "pos": pos,
+                        "sec": round(dt, 3),
+                        **metrics(logits[0], ref[step + 1]),
+                    }
+                )
         ttnn.synchronize_device(mesh)
     for r in rows:
         print(json.dumps(r))
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps({"args": vars(args) | {"out": str(args.out)}, "rows": rows}, indent=1))
+        args.out.write_text(
+            json.dumps(
+                {"args": vars(args) | {"out": str(args.out)}, "rows": rows}, indent=1
+            )
+        )
 
 
 if __name__ == "__main__":

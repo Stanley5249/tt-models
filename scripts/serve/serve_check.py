@@ -1,9 +1,10 @@
 """Request lifecycle checks against a running server: outputs must not depend on
 what else the server is doing.
 
-    pixi run python scripts/serve/serve_check.py [--url http://127.0.0.1:8000] [check ...]
+    pixi run python scripts/serve/serve_check.py [--url http://127.0.0.1:8000] \\
+        [check ...]
 
-Needs a running `pixi run serve-gemma4`. Every check but tools compares greedy token ids
+Needs a running `just serve-gemma4`. Every check but tools compares greedy token ids
 with the same request run alone:
 
 - isolation: four chat requests at once, stopping at different lengths, so decode
@@ -34,12 +35,14 @@ flip a late token. It fails only if the first 16 tokens differ.
 """
 
 import argparse
+import itertools
 import json
 import random
 import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 from tt_models.models.gemma4.checkpoint import resolve_snapshot
@@ -55,28 +58,64 @@ LENGTHS = [64, 48, 32, 16]
 GREEDY = {"temperature": 0}
 
 
-def post(url: str, path: str, body: dict, stream: bool = False):
-    req = urllib.request.Request(f"{url}{path}", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-    resp = urllib.request.urlopen(req, timeout=900)
+def post(url: str, path: str, body: Mapping[str, object], *, stream: bool = False):
+    # The benchmark operator supplies the server URL.
+    req = urllib.request.Request(  # noqa: S310
+        f"{url}{path}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    # The benchmark operator supplies the server URL.
+    resp = urllib.request.urlopen(req, timeout=900)  # noqa: S310
     return resp if stream else json.load(resp)
 
 
-def chat(url: str, prompt: str | list[dict], max_tokens: int, **extra) -> list[int]:
-    """Token ids of a chat completion; thinking tokens count, since they are sampled too."""
-    messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
-    body = {"model": MODEL, "messages": messages, "max_tokens": max_tokens, "return_token_ids": True, **GREEDY, **extra}
+def chat(
+    url: str,
+    prompt: str | Sequence[Mapping[str, object]],
+    max_tokens: int,
+    **extra: object,
+) -> list[int]:
+    """Token ids of a chat completion; thinking tokens count, since they are sampled
+    too.
+    """
+    messages = (
+        [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
+    )
+    body = {
+        "model": MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "return_token_ids": True,
+        **GREEDY,
+        **extra,
+    }
     return post(url, "/v1/chat/completions", body)["choices"][0]["token_ids"]
 
 
-def complete(url: str, prompt: list[int], max_tokens: int, **extra) -> list[int]:
-    body = {"model": MODEL, "prompt": prompt, "max_tokens": max_tokens, "return_token_ids": True, **GREEDY, **extra}
+def complete(
+    url: str, prompt: list[int], max_tokens: int, **extra: object
+) -> list[int]:
+    body = {
+        "model": MODEL,
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "return_token_ids": True,
+        **GREEDY,
+        **extra,
+    }
     return post(url, "/v1/completions", body)["choices"][0]["token_ids"]
 
 
 def metric(url: str, name: str) -> float:
     """A vLLM counter from /metrics, summed over its labels."""
-    text = urllib.request.urlopen(f"{url}/metrics", timeout=30).read().decode()
-    return sum(float(line.rsplit(" ", 1)[1]) for line in text.splitlines() if line.startswith(name + "{") or line.startswith(name + " "))
+    # The benchmark operator supplies the server URL.
+    text = urllib.request.urlopen(f"{url}/metrics", timeout=30).read().decode()  # noqa: S310
+    return sum(
+        float(line.rsplit(" ", 1)[1])
+        for line in text.splitlines()
+        if line.startswith((name + "{", name + " "))
+    )
 
 
 def prefix_hits(url: str) -> float:
@@ -84,16 +123,30 @@ def prefix_hits(url: str) -> float:
     return metric(url, "vllm:prefix_cache_hits_total")
 
 
-def stream(url: str, prompt: list[int], max_tokens: int, stop_after: int | None = None, first=None) -> tuple[list[int], list[float]]:
+def stream(
+    url: str,
+    prompt: list[int],
+    max_tokens: int,
+    stop_after: int | None = None,
+    first: threading.Event | None = None,
+) -> tuple[list[int], list[float]]:
     """Stream a raw-token greedy completion; returns its token ids and arrival times.
     stop_after closes the connection after that many tokens, which aborts the request.
     first, a threading.Event, is set when the first token arrives."""
-    body = {"model": MODEL, "prompt": prompt, "max_tokens": max_tokens, "stream": True, "return_token_ids": True, **GREEDY}
+    body = {
+        "model": MODEL,
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "stream": True,
+        "return_token_ids": True,
+        **GREEDY,
+    }
     resp = post(url, "/v1/completions", body, stream=True)
-    ids, times = [], []
+    ids: list[int] = []
+    times: list[float] = []
     with resp:
-        for line in resp:
-            line = line.strip()
+        for raw_line in resp:
+            line = raw_line.strip()
             if not line.startswith(b"data: ") or line == b"data: [DONE]":
                 continue
             choice = json.loads(line[6:])["choices"][0]
@@ -108,44 +161,59 @@ def stream(url: str, prompt: list[int], max_tokens: int, stop_after: int | None 
 
 
 def compare(name: str, ref: list[int], got: list[int], need: int | None = None) -> bool:
-    agree = next((i for i, (a, b) in enumerate(zip(ref, got)) if a != b), min(len(ref), len(got)))
+    agree = next(
+        (i for i, (a, b) in enumerate(zip(ref, got)) if a != b), min(len(ref), len(got))
+    )
     ok = agree >= (need if need is not None else max(len(ref), len(got)))
-    label = "DIFF" if not ok else "same" if agree == max(len(ref), len(got)) else "near-tie"
+    label = (
+        "DIFF" if not ok else "same" if agree == max(len(ref), len(got)) else "near-tie"
+    )
     print(f"[{label}] {name}: {agree}/{len(ref)} tokens agree", flush=True)
     return ok
 
 
-def tokens(url: str, text: str, bos: bool) -> list[int]:
-    ids = post(url, "/tokenize", {"model": MODEL, "prompt": text, "add_special_tokens": False})["tokens"]
+def tokens(url: str, text: str, *, bos: bool) -> list[int]:
+    ids = post(
+        url, "/tokenize", {"model": MODEL, "prompt": text, "add_special_tokens": False}
+    )["tokens"]
     return ([2] if bos else []) + ids  # 2 is Gemma's <bos>
 
 
 def document(n_chars: int) -> str:
-    """The checkpoint's model card, repeated to n_chars: a long prompt that stays the same as this
-    repository changes (prompts built from the repository's own files moved its near-ties)."""
+    """The checkpoint's model card, repeated to n_chars: a long prompt that stays the
+    same as this
+    repository changes (prompts built from the repository's own files moved its
+    near-ties).
+    """
     text = (resolve_snapshot() / "README.md").read_text()
     return (text * (n_chars // len(text) + 1))[:n_chars]
 
 
-def check_isolation(url):
+def check_isolation(url: str):
     alone = [chat(url, p, n) for p, n in zip(PROMPTS, LENGTHS)]
     ok = True
     for rnd in range(2):  # the second round replays every captured trace again
         with ThreadPoolExecutor(len(PROMPTS)) as pool:
-            together = list(pool.map(lambda pn: chat(url, *pn), zip(PROMPTS, LENGTHS)))
+            together = list(pool.map(chat, itertools.repeat(url), PROMPTS, LENGTHS))
         for p, a, b in zip(PROMPTS, alone, together):
-            ok &= compare(f"concurrent round {rnd}: {p[:40]!r}", a, b, need=min(16, len(a)))
+            ok &= compare(
+                f"concurrent round {rnd}: {p[:40]!r}", a, b, need=min(16, len(a))
+            )
     return ok
 
 
-def check_raw(url):
-    prompt = list(range(1000, 1128))  # no <bos>: flat logits, where any difference shows
+def check_raw(url: str):
+    prompt = list(
+        range(1000, 1128)
+    )  # no <bos>: flat logits, where any difference shows
     a, b = complete(url, prompt, 96), complete(url, prompt, 96)
     return compare("raw tokens, temperature 0, twice", a, b)
 
 
-def check_arrival(url):
-    short = tokens(url, "Count from one to fifty in English words, separated by commas:", bos=True)
+def check_arrival(url: str):
+    short = tokens(
+        url, "Count from one to fifty in English words, separated by commas:", bos=True
+    )
     ref = complete(url, short, 128)
     long = tokens(url, document(40000), bos=True)[:8192]
     decoding = threading.Event()
@@ -156,19 +224,25 @@ def check_arrival(url):
             raise TimeoutError("the stream produced no token within 120 s")
         t0 = time.perf_counter()
         # A fresh cache_salt keeps an earlier run's blocks from serving this prompt.
-        arrived = pool.submit(lambda: (complete(url, long, 1, cache_salt=f"arrival-{random.random()}"), time.perf_counter() - t0)[1])
+        arrived = pool.submit(
+            lambda: (
+                complete(url, long, 1, cache_salt=f"arrival-{random.random()}"),
+                time.perf_counter() - t0,
+            )[1]
+        )
         ids, times = streamed.result()
         long_ttft = arrived.result()
-    gaps = [b - a for a, b in zip(times, times[1:])]
+    gaps = [b - a for a, b in itertools.pairwise(times)]
     print(
-        f"    stream gaps: median {sorted(gaps)[len(gaps) // 2] * 1e3:.1f} ms, max {max(gaps) * 1e3:.0f} ms;"
+        f"    stream gaps: median {sorted(gaps)[len(gaps) // 2] * 1e3:.1f} ms, max "
+        f"{max(gaps) * 1e3:.0f} ms;"
         f" the 8192-token request's first token after {long_ttft:.2f} s",
         flush=True,
     )
     return compare("stream while an 8192-token prompt arrives", ref, ids)
 
 
-def check_cancel(url):
+def check_cancel(url: str):
     prompt = tokens(url, "Write a long story about a lighthouse keeper.", bos=True)
     ref = complete(url, prompt, 64)
     stream(url, prompt, 512, stop_after=1)
@@ -176,11 +250,23 @@ def check_cancel(url):
     return compare("after a cancelled stream", ref, complete(url, prompt, 64))
 
 
-def check_prefix(url):
+def check_prefix(url: str):
     doc = document(24000)
-    turn1 = [{"role": "user", "content": f"Here is some code:\n\n{doc}\n\nSummarize what the first class does."}]
-    answer = post(url, "/v1/chat/completions", {"model": MODEL, "messages": turn1, "max_tokens": 64, **GREEDY})["choices"][0]["message"]
-    turn2 = turn1 + [
+    turn1 = [
+        {
+            "role": "user",
+            (
+                "content"
+            ): f"Here is some code:\n\n{doc}\n\nSummarize what the first class does.",
+        }
+    ]
+    answer = post(
+        url,
+        "/v1/chat/completions",
+        {"model": MODEL, "messages": turn1, "max_tokens": 64, **GREEDY},
+    )["choices"][0]["message"]
+    turn2 = [
+        *turn1,
         {"role": "assistant", "content": answer.get("content") or ""},
         {"role": "user", "content": "Now name one function that touches the KV cache."},
     ]
@@ -200,21 +286,24 @@ def check_prefix(url):
     )
     ok = h1 - h0 > 0 and h2 == h1
     if not ok:
-        print("[DIFF] the cached turn missed the prefix cache, or the salted turn hit it", flush=True)
+        print(
+            "[DIFF] the cached turn missed the prefix cache, or the salted turn hit it",
+            flush=True,
+        )
     return compare("turn 2 from the prefix cache vs fresh", fresh, hit, need=16) and ok
 
 
-def check_seeded(url):
+def check_seeded(url: str):
     sampled = {"temperature": 1.0, "top_k": 64, "top_p": 0.95, "seed": 1234}
     a = chat(url, PROMPTS[2], 48, **sampled)
     b = chat(url, PROMPTS[2], 48, **sampled)
     return compare("seeded sampling, twice", a, b)
 
 
-def check_preempt(url):
+def check_preempt(url: str):
     """Start the server with a pool too small for four of these requests:
 
-        GEMMA4_KV_POOL_GIB=0.2 pixi run serve-gemma4 --max-model-len 4096
+        GEMMA4_KV_POOL_GIB=0.2 just serve-gemma4 --max-model-len 4096
 
     vLLM admits a request only when its prompt fits, so the four short prompts
     start together and run out of KV pages as they grow: at 1,560 tokens each
@@ -223,21 +312,37 @@ def check_preempt(url):
     from its prompt and the tokens it had. Listing numbers has a clear next token
     at every step, so batch numerics do not flip it and the outputs must agree."""
     starts = [1, 5000, 20000, 70000]
-    prompts = [f"Write every integer from {n} to {n + 700} on its own line. Do not write code; output only the numbers." for n in starts]
-    salts = [f"preempt-{random.random()}" for _ in prompts]  # no prefix hits between the runs
+    prompts = [
+        f"Write every integer from {n} to {n + 700} on its own line. Do not write "
+        "code; output only the numbers."
+        for n in starts
+    ]
+    salts = [
+        f"preempt-{random.random()}" for _ in prompts
+    ]  # no prefix hits between the runs
     run = {"chat_template_kwargs": {"enable_thinking": False}}
     alone = [chat(url, p, 1536, cache_salt=s, **run) for p, s in zip(prompts, salts)]
     short = [n for n, a in zip(starts, alone) if len(a) < 1536]
     if short:  # each request must outlive the page shortage to cover the resume
-        print(f"[DIFF] the lists from {short} ended early; pick other start values", flush=True)
+        print(
+            f"[DIFF] the lists from {short} ended early; pick other start values",
+            flush=True,
+        )
     before = metric(url, "vllm:num_preemptions_total")
+
+    def replay(prompt: str, salt: str) -> list[int]:
+        return chat(url, prompt, 1536, cache_salt=salt + "-b", **run)
+
     with ThreadPoolExecutor(len(prompts)) as pool:
-        together = list(pool.map(lambda ps: chat(url, ps[0], 1536, cache_salt=ps[1] + "-b", **run), zip(prompts, salts)))
+        together = list(pool.map(replay, prompts, salts))
     preempted = metric(url, "vllm:num_preemptions_total") - before
     print(f"    {preempted:.0f} preemptions during the concurrent run", flush=True)
     ok = preempted > 0 and not short
     if not preempted:
-        print("[DIFF] no request was preempted; start the server with a smaller pool", flush=True)
+        print(
+            "[DIFF] no request was preempted; start the server with a smaller pool",
+            flush=True,
+        )
     for n, a, b in zip(starts, alone, together):
         ok &= compare(f"numbers from {n} with preemption vs alone", a, b)
     return ok
@@ -248,7 +353,11 @@ WEATHER = {
     "function": {
         "name": "get_weather",
         "description": "Current weather for a city.",
-        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
     },
 }
 CLOCK = {
@@ -256,12 +365,16 @@ CLOCK = {
     "function": {
         "name": "get_time",
         "description": "Current local time in a city.",
-        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
     },
 }
 
 
-def check_tools(url):
+def check_tools(url: str):
     """Tool choice is enforced by the structural tag of gemma4_tt/tool_parser.py."""
     tools = [WEATHER, CLOCK]
     named = {"type": "function", "function": {"name": "get_time"}}
@@ -286,21 +399,31 @@ def check_tools(url):
             choice0 = post(url, "/v1/chat/completions", body)["choices"][0]
             calls = choice0["message"].get("tool_calls") or []
             names = [c["function"]["name"] for c in calls]
-            args_ok = all(isinstance(json.loads(c["function"]["arguments"]), dict) for c in calls)
+            args_ok = all(
+                isinstance(json.loads(c["function"]["arguments"]), dict) for c in calls
+            )
             if want is None:
                 good = not calls and bool(choice0["message"].get("content"))
             else:
                 if isinstance(choice, str):
-                    good = bool(names) and set(names) <= ({want} if isinstance(want, str) else want)
+                    good = bool(names) and set(names) <= (
+                        {want} if isinstance(want, str) else want
+                    )
                 else:  # a named choice allows exactly one call, to that tool
                     good = names == [want]
                 good &= args_ok
                 # OpenAI (and vLLM) finish a forced named call with "stop"
-                good &= choice0["finish_reason"] in (("tool_calls",) if isinstance(choice, str) else ("stop", "tool_calls"))
+                good &= choice0["finish_reason"] in (
+                    ("tool_calls",)
+                    if isinstance(choice, str)
+                    else ("stop", "tool_calls")
+                )
             label = choice if isinstance(choice, str) else "named get_time"
             print(
-                f"[{'OK' if good else 'DIFF'}] {label}, thinking {'on' if thinking else 'off'}: "
-                f"{names or repr((choice0['message'].get('content') or '')[:60])} ({choice0['finish_reason']})",
+                f"[{'OK' if good else 'DIFF'}] {label}, thinking "
+                f"{'on' if thinking else 'off'}: "
+                f"{names or repr((choice0['message'].get('content') or '')[:60])} "
+                f"({choice0['finish_reason']})",
                 flush=True,
             )
             ok &= good
@@ -322,7 +445,12 @@ EXTRA_CHECKS = {"preempt": check_preempt}
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://127.0.0.1:8000")
-    ap.add_argument("checks", nargs="*", help=f"any of {', '.join(CHECKS | EXTRA_CHECKS)} (default: {', '.join(CHECKS)})")
+    ap.add_argument(
+        "checks",
+        nargs="*",
+        help=f"any of {', '.join(CHECKS | EXTRA_CHECKS)} (default: "
+        f"{', '.join(CHECKS)})",
+    )
     args = ap.parse_args()
     known = CHECKS | EXTRA_CHECKS
     unknown = set(args.checks) - set(known)
