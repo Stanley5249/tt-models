@@ -23,8 +23,8 @@ def main():
     rng = random.Random(int(sys.argv[1]) if len(sys.argv) > 1 else 0)
     doc = document(40000)
     times = []
-    for chars in (1200, 1900, 2600, 4100, 5300, 7000, 9100, 11500):
-        chars += rng.randint(0, 300)
+    for length in (1200, 1900, 2600, 4100, 5300, 7000, 9100, 11500):
+        chars = length + rng.randint(0, 300)
         body = {
             "model": MODEL,
             "messages": [{"role": "user", "content": doc[:chars] + "\nSummarize."}],

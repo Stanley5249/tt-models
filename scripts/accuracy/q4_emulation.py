@@ -27,7 +27,7 @@ from pathlib import Path
 import torch
 from precision_study import score, tokens  # a sibling script
 
-import tt_models.models.gemma4.reference as R
+from tt_models.models.gemma4 import reference
 from tt_models.models.gemma4.checkpoint import Checkpoint
 from tt_models.models.gemma4.q4 import factor_blocks
 
@@ -122,9 +122,9 @@ def main():
                     result[key] = dense(result[key], dense_mode)
         return result
 
-    R.quantize_layer = quantize_all
+    reference.quantize_layer = quantize_all
     if dense_mode:  # Reference.logits sends the LM head [H, V] through roundtrip when "lm_head" is quantized
-        R.roundtrip = lambda head_t, _dtype: dense(
+        reference.roundtrip = lambda head_t, _dtype: dense(
             head_t.T.contiguous(), dense_mode
         ).T.contiguous()
     assert "ttnn" not in sys.modules, "ttnn would start the device cluster"
@@ -137,7 +137,7 @@ def main():
     for mode in modes:
         state["mode"] = mode
         t0 = time.time()
-        logits, _ = R.Reference(
+        logits, _ = reference.Reference(
             ck, dtype=dtype, quant={"lm_head": "emulated"} if dense_mode else None
         ).forward(ids)
         key = f"{mode}{'+dense-' + dense_mode if dense_mode else ''}@{n}" + (

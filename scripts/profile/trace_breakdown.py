@@ -71,8 +71,8 @@ def main():
         else sorted(p for p in df["phase"].unique() if p.startswith("decode"))
     )
     for ph in phases:
-        for dev, g in df[df["phase"] == ph].groupby("DEVICE ID"):
-            g = g.sort_values("DEVICE FW START CYCLE")
+        for dev, group in df[df["phase"] == ph].groupby("DEVICE ID"):
+            g = group.sort_values("DEVICE FW START CYCLE")
             start, end = (
                 g["DEVICE FW START CYCLE"].to_numpy(),
                 g["DEVICE FW END CYCLE"].to_numpy(),

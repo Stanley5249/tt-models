@@ -111,7 +111,8 @@ def main():
         print(f"fp32 reference {time.time() - t0:.0f}s", flush=True)
 
     results = json.loads(args.out.read_text()) if args.out.exists() else {}
-    for cfg in args.configs.split(";" if ";" in args.configs else ","):
+    for config in args.configs.split(";" if ";" in args.configs else ","):
+        cfg = config
         t0 = time.time()
         if cfg == "fp32":
             logits = base

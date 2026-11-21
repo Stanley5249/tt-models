@@ -130,8 +130,8 @@ def stream(
     resp = post(url, "/v1/completions", body, stream=True)
     ids, times = [], []
     with resp:
-        for line in resp:
-            line = line.strip()
+        for raw_line in resp:
+            line = raw_line.strip()
             if not line.startswith(b"data: ") or line == b"data: [DONE]":
                 continue
             choice = json.loads(line[6:])["choices"][0]
