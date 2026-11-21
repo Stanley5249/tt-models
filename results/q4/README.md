@@ -50,3 +50,20 @@ with the checkpoint weights; device time from a tt-scope capture
 
 Times are chip 0 / chip 1. The Q4 outputs match host math on the clamped
 integers to 52 dB, so the remaining gap is the -8 clamp.
+
+## Prefill dequantization (`perf/profiling`, not kept)
+
+A device kernel that multiplied each integer tile by its step row and packed a
+temporary BFP4 or BFP8 tensor for the prefill sparse matmuls, timed by
+tt-scope on layer 0 (both matrices): 3.7 ms per layer to BFP4, 5.9 ms to BFP8,
+so 110-180 ms more per prefill chunk. The packer truncates to BFP formats
+(57% of values matched host round-to-nearest even with `bfp8_pack_precise`),
+so the BFP4 output was less accurate than the host-converted weights. Rejected;
+see docs/serving.md, Q4_0 decode experts.
+
+## Dense weights (`perf/profiling`)
+
+`EMU_DENSE=<mode> EMU_DTYPE=bfloat16 EMU_TOKENS=512 scripts/q4_emulation.py ... bfp4`
+also replaces the attention, dense MLP and LM-head weights (experts BFP4):
+BFP8 0.391, Q4_0 clamped 0.561, +1 shift 0.348, exact 0.311
+(`emulation-bf16-512.json`). Every dense and embedding block factors as Q4_0.

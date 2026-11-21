@@ -1,0 +1,46 @@
+tt-scope tracy capture 20261121-232833-decode-b4-compact2 (git-excluded)
+pixi run tt-scope tracy scripts/profile_workload.py --programs 8000 -- --batch 4 --decode-steps 2 --trace
+Phase decode1 (one traced step), device kernel time by op and by op and input widths.
+
+decode1 chip 0.0: 784 ops, span 25.60 ms, FW 44.00 ms, kernel 24.83 ms, gaps 0.24 ms (0.31 us/op)
+decode1 chip 1.0: 784 ops, span 26.14 ms, FW 45.22 ms, kernel 25.35 ms, gaps 0.26 ms (0.33 us/op)
+
+== chip 0.0: 784 ops, kernel 24.83 ms, op-to-op gaps 197.62 ms
+                                        count      ms   avg_us  share
+key                                                                  
+GenericOpDeviceOperation                  210  13.515   64.359   54.4
+MatmulDeviceOperation                     106   5.632   53.128   22.7
+AllGatherAsyncDeviceOperation              60   1.644   27.401    6.6
+SdpaDecodeDeviceOperation                  30   1.114   37.142    4.5
+ReshapeViewDeviceOperation                 60   0.729   12.153    2.9
+PagedUpdateCacheDeviceOperation            60   0.629   10.487    2.5
+BinaryNgDeviceOperation                   120   0.535    4.456    2.2
+LayerNormDeviceOperation                   30   0.338   11.264    1.4
+NLPCreateQKVHeadsDecodeDeviceOperation     30   0.261    8.716    1.1
+UntilizeWithUnpaddingDeviceOperation       16   0.147    9.216    0.6
+ConcatDeviceOperation                       1   0.119  118.789    0.5
+NLPConcatHeadsDecodeDeviceOperation        30   0.090    3.013    0.4
+InterleavedToShardedDeviceOperation        31   0.073    2.345    0.3
+
+== chip 0.0: 784 ops, kernel 24.83 ms, op-to-op gaps 197.62 ms
+                                                                               count     ms   avg_us  share
+key                                                                                                        
+GenericOpDeviceOperation a=2816[2816]x768[768] b=32[4]x2816[2816] BFLOAT16        30  5.703  190.108   23.0
+GenericOpDeviceOperation a=352[352]x3072[3072] b=32[32]x11264[11264] BFLOAT16     30  2.609   86.981   10.5
+GenericOpDeviceOperation a=32[4]x2816[2816] b=2816[2816]x128[128] BFLOAT16        30  2.056   68.517    8.3
+MatmulDeviceOperation a=32[4]x2816[2816] b=2816[2816]x8192[8192] BFLOAT8_B        16  1.871  116.932    7.5
+MatmulDeviceOperation a=32[4]x2816[2816] b=2816[2816]x4096[4096] BFLOAT8_B        25  1.703   68.128    6.9
+GenericOpDeviceOperation a=32[32]x768[768] b=32[32]x384[384] FLOAT32              30  1.306   43.527    5.3
+GenericOpDeviceOperation a=32[32]x384[384] b=32[32]x384[384] FLOAT32              30  0.942   31.393    3.8
+MatmulDeviceOperation a=32[32]x2048[2048] b=2048[2048]x2816[2816] BFLOAT8_B       25  0.923   36.922    3.7
+SdpaDecodeDeviceOperation a=32[8]x256[256] b=64[64]x256[256] BFLOAT8_B            25  0.922   36.885    3.7
+GenericOpDeviceOperation a=1152[1152]x3072[3072] b=32[4]x1152[1152] BFLOAT16      30  0.616   20.520    2.5
+PagedUpdateCacheDeviceOperation a=64[64]x256[256] b=32[4]x256[256] BFLOAT16       50  0.547   10.937    2.2
+BinaryNgDeviceOperation a=32[32]x256[256] b=32[32]x256[256] FLOAT32              120  0.535    4.456    2.2
+MatmulDeviceOperation a=32[4]x2816[2816] b=2816[2816]x5120[5120] BFLOAT8_B         5  0.403   80.506    1.6
+MatmulDeviceOperation a=32[32]x4096[4096] b=4096[4096]x2816[2816] BFLOAT8_B        5  0.319   63.877    1.3
+MatmulDeviceOperation a=64[64]x256[256] b=256[256]x256[256] BFLOAT16              25  0.317   12.688    1.3
+GenericOpDeviceOperation a=32[32]x2816[2816] b=32[32]x384[384] FLOAT32            30  0.284    9.465    1.1
+SdpaDecodeDeviceOperation a=32[8]x512[512] b=64[64]x256[256] BFLOAT8_B             5  0.192   38.430    0.8
+ConcatDeviceOperation a=4[4]x8192[8192] b=4[4]x8192[8192] FLOAT32                  1  0.119  118.789    0.5
+MatmulDeviceOperation a=64[40]x512[512] b=512[512]x512[512] BFLOAT16               5  0.095   19.064    0.4
