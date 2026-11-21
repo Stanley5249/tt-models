@@ -12,7 +12,7 @@ def rms_norm(x: ttnn.Tensor, weight, eps: float) -> ttnn.Tensor:
 
     For decode (T <= 32) the interleaved op runs on few cores (63 us on
     [32, 2816]); width-sharding over 8 cores is 18.6 us with both conversions
-    (scripts/bench_norm.py), so small inputs take that path.
+    (docs/experiments/2026-11-17-decode-round-1.md), so small inputs take that path.
     """
     rows, width = x.shape[2], x.shape[3]
     if rows > TILE or (width // TILE) % 8:

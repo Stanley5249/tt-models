@@ -19,7 +19,7 @@ def matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8), in0_block_w: int
             gx, gy = shape
             break
     # Large K blocks matter for these DRAM-bound decode shapes: measured in
-    # scripts/bench_sparse_matmul.py, down (K=11 tiles) took 154 us at
+    # docs/experiments/2026-11-17-decode-round-1.md, down (K=11 tiles) took 154 us at
     # in0_block_w=1 and 92 us at 11; gate_up (K=88) 194 us at 8 and 184 us at 22.
     k_tiles = k // TILE
     in0_block_w = in0_block_w or next(w for w in (22, 11, 8, 4, 2, 1) if k_tiles % w == 0)

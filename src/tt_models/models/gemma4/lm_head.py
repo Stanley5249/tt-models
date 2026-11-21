@@ -9,7 +9,7 @@ from tt_models.common.norm import rms_norm
 from tt_models.common.weights import norm_weight
 
 # The LM head is read as LM_SPLITS DRAM-sharded matmuls per chip: 2.5 -> 1.37 ms per
-# decode step against one interleaved matmul (scripts/bench_lm_head_dram.py).
+# decode step against one interleaved matmul (docs/experiments/2026-11-19-decode-round-2.md).
 # A single DRAM-sharded matmul over all 65536 columns does not fit L1.
 LM_SPLITS = 16
 LM_CORES = 8

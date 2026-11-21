@@ -14,7 +14,7 @@ confirmed or no longer reproduces.
   CPU-only script that called `ttnn.from_torch(..., dtype=bfloat4_b)` without a
   device logged "Starting devices in cluster". Run next to a device job, it
   coincided with an Ethernet flush timeout and a reset. The CPU emulation in
-  `scripts/q4_emulation.py` uses a torch BFP4 emulator instead.
+  `scripts/accuracy/q4_emulation.py` uses a torch BFP4 emulator instead.
 - **A `pixi run bash` wrapper does not pass `kill` on** (2026-11-21, once). A
   server started as `pixi run bash script.sh` kept running after `kill` of the
   recorded PID. The next server could not bind port 8000, while a health

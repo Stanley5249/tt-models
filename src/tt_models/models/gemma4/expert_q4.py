@@ -22,38 +22,22 @@ import ttnn
 from tt_models.common.config import TILE
 from tt_models.models.gemma4.expert_stream import _id_bytes, pad_down
 from tt_models.models.gemma4.generic_op import BF16_TILE, KERNELS, accessor, cb, tile_bytes
+from tt_models.models.gemma4.q4 import BLOCK, factor_blocks
 
 KERNELS_Q4 = "expert_q4_gate_up"
-STEP_TOL = 0.05  # |w / s - round(w / s)| of a BF16-rounded q * s stays below 2^-9 * 8
 
 
 def q4_factor(w: torch.Tensor, dim: int = -2, chunk: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
     """Factor w into integers q (clamped to -7..7) and steps s along 32-blocks of `dim`.
 
-    Returns (q as float with w's shape, s with dim shrunk 32x). The step of a block is its smallest
-    nonzero |w| divided by the smallest k in 1..8 that makes every w / s an integer of at most 8; a
-    block of zeros gets step 0. Works on `chunk` slices of dim 0 at a time to bound host memory."""
+    Returns (q as float with w's shape, s with dim shrunk 32x); see q4.factor_blocks. Works on
+    `chunk` slices of dim 0 at a time to bound host memory."""
     if w.dim() > 2 and w.shape[0] > chunk:
         parts = [q4_factor(w[i : i + chunk], dim, chunk) for i in range(0, w.shape[0], chunk)]
         return torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
     w = w.float().movedim(dim, -1)
-    b = w.reshape(*w.shape[:-1], -1, TILE)
-    nz = torch.where(b != 0, b.abs(), torch.full_like(b, float("inf")))
-    s0 = nz.amin(-1, keepdim=True)
-    del nz
-    zero = torch.isinf(s0)
-    s0 = torch.where(zero, torch.ones_like(s0), s0)
-    s = s0.clone()
-    done = zero.clone()
-    for k in range(1, 9):
-        r = b / (s0 / k)
-        ok = ((r - r.round()).abs().amax(-1, keepdim=True) < STEP_TOL) & (r.round().abs().amax(-1, keepdim=True) <= 8)
-        s = torch.where(ok & ~done, s0 / k, s)
-        done |= ok
-    if not bool(done.all()):
-        raise ValueError(f"{int((~done).sum())} blocks are not integer multiples of one step")
-    q = (b / s).round().clamp(-7, 7)
-    s = torch.where(zero, torch.zeros_like(s), s)
+    q, s = factor_blocks(w.reshape(*w.shape[:-1], -1, BLOCK))
+    q = q.clamp(-7, 7)
     return q.reshape(w.shape).movedim(-1, dim), s.squeeze(-1).movedim(-1, dim)
 
 

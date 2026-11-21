@@ -34,7 +34,7 @@ def all_reduce(x: ttnn.Tensor) -> ttnn.Tensor:
 
     all_gather_async + fast_reduce_nc takes 34 us on a [32, 2816] decode row and
     58 us on [32, 5632], against 43 and 71 us for ttnn.all_reduce's reduce-scatter
-    plus all-gather (scripts/bench_ccl_async.py). Prefill takes the same path in
+    plus all-gather (docs/experiments/2026-11-19-decode-round-2.md). Prefill takes the same path in
     DRAM: ttnn.all_reduce caches semaphores and buffers per new shape, and one
     cached after a decode trace capture is overwritten by the trace's replays.
     """

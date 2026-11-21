@@ -12,7 +12,7 @@ class Router:
     topk_router_gpt took 68-72 us per layer, mostly in its top-k stage. Here 11 cores (8 at 3-4 tokens)
     each multiply their K slice of the normed rows by the BF16 router weight, the reducer core gathers the
     partial rows (semaphore), sums each token's rows and takes exp on the FPU/SFPU, and its RISC picks every
-    token's top k and normalizes them: 37-42 us at 1-2 tokens, 57-68 us at 3-4 (tests/router_check.py).
+    token's top k and normalizes them: 37-42 us at 1-2 tokens, 57-68 us at 3-4 (scripts/kernels/router_check.py).
     Its weights are closer to an fp32 reference (max error 0.0007 against topk_router_gpt's 0.11).
     Outputs: row-major uint16 ids and BF16 weights, token-major (entry t * k + j)."""
 

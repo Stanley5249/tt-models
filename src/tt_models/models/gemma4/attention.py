@@ -135,7 +135,7 @@ class Attention:
         self.wo = loader.put(f"L{layer_idx}.wo", wo, dtype, shard_dim=-2)
         # Decode reads wo DRAM-sharded, fed by the concat-heads output, which is
         # already width-sharded one head per core: 47 -> 34 us (sliding), 86 -> 62 us
-        # (global) in scripts/bench_dram_sharded.py. Prefill keeps the interleaved copy.
+        # (global) in docs/experiments/2026-11-17-decode-round-1.md. Prefill keeps the interleaved copy.
         k_local, hidden = s.n_q * s.head_dim, cfg.hidden_size
         # A cached tensor keeps the memory layout it was saved with, so the copy has its own name.
         self.wo_dram = loader.put(f"L{layer_idx}.wo_dram", wo, dtype, shard_dim=-2, memory_config=dram_sharded(loader.mesh, k_local, hidden))
