@@ -2,7 +2,7 @@
 
 **Question.** Can batch-1 decode get close to the DRAM roofline with custom kernels where ttnn ops stall: the expert sparse matmuls, the boundaries between layers, the router and the all-reduce?
 
-**Setup.** Baseline `5887694`, final `f158df1`, CPU governor `performance` for both, measured back to back. tt-scope v0.4.0 `tracy` captures of `scripts/profile/workload.py --trace`, folded by `scripts/profile/trace_breakdown.py`. `trace_time.py` for blocking trace time, `final_standalone.sh` (last at `7f72451`) for 3-run standalone timing. CCL, LM head and router microbenchmarks `bench_ccl*.py`, `bench_lm_head.py`, `bench_router.py`, `bench_sparse_ksplit.py` (all last at `7f72451`).
+**Setup.** Baseline `5887694`, final `f158df1`, CPU governor `performance` for both, measured back to back. tt-scope v0.4.0 `tracy` captures of `scripts/profile/workload.py --trace`, folded by `scripts/profile/trace_breakdown.py`. `trace_time.py` for blocking trace time, `final_standalone.sh` (last at `da811f2`) for 3-run standalone timing. CCL, LM head and router microbenchmarks `bench_ccl*.py`, `bench_lm_head.py`, `bench_router.py`, `bench_sparse_ksplit.py` (all last at `da811f2`).
 
 **Result.** Trace execution 31.5 -> 15.6 ms, ops per step 2,199 -> 574, standalone decode 33.3 -> 17.5 ms, serving TPOT 35.2 -> 18.7 ms at one user. Decode KL 0.387 -> 0.368 over 6 seeds. Steps, each measured at its commit:
 

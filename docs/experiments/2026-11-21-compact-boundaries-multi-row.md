@@ -2,7 +2,7 @@
 
 **Question.** After the batched streams, what else makes a batch-4 step slow, and does batch 1's compact boundary path generalize to 2-4 rows?
 
-**Setup.** `a712ab9`, merged in `91d4461`. tt-scope captures of one traced batch-1 and batch-4 step on `main` and after. Tail cost by `scripts/kernels/boundary_check.py --rows 1 4 --tail-cores 6` (trace replay); standalone steps by `scripts/bench/decode.py --trace` (128 steps); serving by `scripts/serve/bench_tis.sh` against both servers, same day; accuracy 3 seeds per batch size.
+**Setup.** `333c5e8`, merged in `efbe7cf`. tt-scope captures of one traced batch-1 and batch-4 step on `main` and after. Tail cost by `scripts/kernels/boundary_check.py --rows 1 4 --tail-cores 6` (trace replay); standalone steps by `scripts/bench/decode.py --trace` (128 steps); serving by `scripts/serve/bench_tis.sh` against both servers, same day; accuracy 3 seeds per batch size.
 
 **Result.** The batch-4 capture on `main` showed 32.4 ms of kernel time and 1,778 ops on chip 0. About 7 ms went to glue between matmuls (211 LayerNorms, 300 binary ops, 423 layout conversions, slices, concats) and 3.3 ms to 60 all-gathers moving 32-row tiles for 4 real rows. The compact path keeps one FP32 vector per row (3 dense tiles), the o_proj pack and the down streams write each row's vector, and one tail op per boundary does the chip sum, every RMSNorm, the residual adds and the layer scalar.
 

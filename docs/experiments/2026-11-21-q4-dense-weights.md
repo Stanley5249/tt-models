@@ -2,7 +2,7 @@
 
 **Question.** Every 2-D tensor in the checkpoint is Q4_0, including attention, dense MLP, router and the tied embedding. Their BFP8 copies are what the decode streams and LM head read most. Would Q4_0 help them?
 
-**Setup.** `43d6d89`. BF16-compute emulation with BFP4 experts, 512 tokens:
+**Setup.** `8baf2b7`. BF16-compute emulation with BFP4 experts, 512 tokens:
 
     EMU_DENSE=<mode> EMU_DTYPE=bfloat16 EMU_TOKENS=512 pixi run python scripts/accuracy/q4_emulation.py <out.json> bfp4
 

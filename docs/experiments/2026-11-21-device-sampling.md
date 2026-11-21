@@ -2,7 +2,7 @@
 
 **Question.** The plugin's async decode overlaps host work with the next step if the model samples on the device. Is it worth building? Is MTP speculative decoding?
 
-**Setup.** `feat/quality-sampling`, reassessed in `feat/quality-upstream` (`c29271f`). A one-off split of a traced step (30 steps, median), `ttnn.topk` microbenchmarks, and a device top-k candidate path.
+**Setup.** `feat/quality-sampling`, reassessed in `feat/quality-upstream` (`f3b345b`). A one-off split of a traced step (30 steps, median), `ttnn.topk` microbenchmarks, and a device top-k candidate path.
 
 **Result.** Host work per step that async decode could hide:
 

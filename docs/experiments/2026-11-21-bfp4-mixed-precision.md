@@ -2,7 +2,7 @@
 
 **Question.** The checkpoint is quantization-aware. Can a BFP4 layout or rounding recover its grid, or can a few layers afford BFP8 experts?
 
-**Setup.** `feat/quality-sampling` (`16b7a3b`). Weight SNR of layer 3's experts on the host; CPU emulation of the fp32 reference with bit-exact torch BFP4 experts (`scripts/accuracy/q4_emulation.py`, 2,048 README tokens, and 512 tokens).
+**Setup.** `feat/quality-sampling` (`2d0d735`). Weight SNR of layer 3's experts on the host; CPU emulation of the fp32 reference with bit-exact torch BFP4 experts (`scripts/accuracy/q4_emulation.py`, 2,048 README tokens, and 512 tokens).
 
 **Result.** Every 32-input block of the expert, MLP and attention weights is an integer multiple of one learned step (integers -8..7, 6% of the blocks use -8), stored in BF16. BFP4 shares a power-of-two exponent per 16 outputs with 15 levels, so it cannot land on a learned step's 16 levels:
 

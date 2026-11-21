@@ -2,7 +2,7 @@
 
 **Question.** Can vLLM own all 30 layers' KV cache, so that prefix caching, chunked prefill and preemption work without adapter state?
 
-**Setup.** `c712a83` (hybrid KV), `0ecdc9e` (block-grid starts), `a485d83` (alignment check), `d2772a5` (preemption check). Before, vLLM paged only the 5 global layers and the adapter kept a 1,024-token ring per batch slot for the 25 sliding layers. Checked with the random-weight device tests (`tests/test_device.py`), `scripts/serve/serve_check.py`, and `serve_check.py preempt` on a server started with `GEMMA4_KV_POOL_GIB=0.2 ... --max-model-len 4096`.
+**Setup.** `c712a83` (hybrid KV), `0ecdc9e` (block-grid starts), `a485d83` (alignment check), `3ba52fb` (preemption check). Before, vLLM paged only the 5 global layers and the adapter kept a 1,024-token ring per batch slot for the 25 sliding layers. Checked with the random-weight device tests (`tests/test_device.py`), `scripts/serve/serve_check.py`, and `serve_check.py preempt` on a server started with `GEMMA4_KV_POOL_GIB=0.2 ... --max-model-len 4096`.
 
 **Result.**
 

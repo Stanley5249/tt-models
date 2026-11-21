@@ -2,7 +2,7 @@
 
 **Question.** Can the code move into an installable `tt_models` package, with large modules split, scripts regrouped and a vLLM plugin entry point, without changing numerics or speed?
 
-**Setup.** Baseline `348b9fe` (main), restructure `46074a1..271f3f0`, same day. Commands from the repository root:
+**Setup.** Baseline `2eab885` (main), restructure `135736c..9ace1fc`, same day. Commands from the repository root:
 
     pixi run python scripts/accuracy/compare.py --decode-steps 32 --offsets 0 2048 --trace --batch <1|4>
     pixi run python scripts/bench/decode.py --batch <1|4> --steps 128 --trace     # 3 runs each

@@ -2,14 +2,14 @@ scripts/ttft_lengths.py <seed>: chat prompts of eight lengths the server has not
 seen (unique cache_salt, 1 output token), one at a time, right after startup;
 wall time per request in seconds. `pixi run serve-gemma4`, 1 user.
 
-feat-serving (95c8036), fresh server, seed 3:
+feat-serving (9f8579a), fresh server, seed 3:
   417 0.53 | 676 1.80 | 819 9.03 | 1312 9.66 | 1736 9.60 | 2291 2.25 | 2873 2.82 | 3614 3.35   mean 4.88
 feat-serving, fresh server, seed 4:
   416 0.44 | 641 9.19 | 814 0.71 | 1318 7.50 | 1736 1.38 | 2234 2.29 | 2880 2.27 | 3622 3.30   mean 3.39
 feat-serving, the seed-3 lengths again (programs built):
   417 0.42 | 676 0.54 | 819 0.71 | 1312 0.96 | 1736 1.39 | 2291 1.90 | 2873 2.29 | 3614 2.92   mean 1.39
 
-this branch (d4587d2 + short-piece buckets), after serve_check and benchmarks, seed 3:
+this branch (d07601a + short-piece buckets), after serve_check and benchmarks, seed 3:
   417 0.40 | 676 0.57 | 819 0.62 | 1312 0.89 | 1736 1.09 | 2291 1.60 | 2873 1.89 | 3614 2.32   mean 1.17
 this branch, fresh server (256-row buckets, before the short-piece buckets), seed 1:
   396 0.45 | 603 0.95 | 876 0.62 | 1324 1.29 | 1694 1.48 | 2213 1.59 | 2924 1.89 | 3612 2.71   mean 1.37

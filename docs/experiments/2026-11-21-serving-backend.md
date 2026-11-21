@@ -1,8 +1,8 @@
 # Serving backend: end-to-end numbers
 
-**Question.** After the hybrid KV cache, trace fixes and batched streams (`feat/serving`, merged at `95c8036`), how does serving compare with round 2, and what did the follow-up milestones change?
+**Question.** After the hybrid KV cache, trace fixes and batched streams (`feat/serving`, merged at `9f8579a`), how does serving compare with round 2, and what did the follow-up milestones change?
 
-**Setup.** `scripts/serve/bench_tis.sh` (tt-inference-server's client recipe), mean of 3 runs after a discarded warm-up, CPU governor `performance`. Round 2 from [official comparison](2026-11-19-official-comparison.md); "now" is `feat/quality-sampling` (`16b7a3b`).
+**Setup.** `scripts/serve/bench_tis.sh` (tt-inference-server's client recipe), mean of 3 runs after a discarded warm-up, CPU governor `performance`. Round 2 from [official comparison](2026-11-19-official-comparison.md); "now" is `feat/quality-sampling` (`2d0d735`).
 
 **Result.**
 

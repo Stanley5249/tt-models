@@ -2,7 +2,7 @@
 
 **Question.** A prompt length the server had not seen built new programs on its first prefill. How much did that cost, and which padding avoids it?
 
-**Setup.** `d4587d2` (128-token buckets warmed at startup), `a62cac4` (whole tiles for short first pieces). `scripts/serve/ttft_lengths.py` sends one-token chat requests at new lengths and times the whole request.
+**Setup.** `d07601a` (128-token buckets warmed at startup), `28d3a0b` (whole tiles for short first pieces). `scripts/serve/ttft_lengths.py` sends one-token chat requests at new lengths and times the whole request.
 
 **Result.** On a fresh `feat/serving` server, eight chat prompts at new lengths took 3.4-4.9 s on average, single requests up to 9.7 s; the same lengths took 1.39 s once built. With buckets: 1.17-1.37 s. 256-row buckets were tried first and cost a 144-token prompt 56 ms of TTFT (238 -> 294 ms), hence whole tiles for first pieces up to 512 tokens.
 

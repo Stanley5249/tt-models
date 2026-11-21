@@ -2,7 +2,7 @@
 
 **Question.** Q4_0 serving needs a prefill path. Is dequantizing the Q4 experts to a temporary BFP tensor for today's sparse matmul cheap enough? Gate: 3.5 ms per layer.
 
-**Setup.** `perf/profiling` (`91d4461`). Earlier options were already out: ttnn's indexed sparse matmul has no per-(block, output) scale, `ttnn.multiply` with row-broadcast steps took 34 ms per layer for gate|up alone, the step matrices are not low rank (a rank-8 log fit gives 18 dB weights), and BFP4 kept for prefill next to Q4 for decode needs 6 GB more per chip. The new kernel ran one work item per (expert, 32-K group, column tile), multiplied each integer tile by its step row and packed the result. Timed by tt-scope on layer 0, both matrices.
+**Setup.** `perf/profiling` (`efbe7cf`). Earlier options were already out: ttnn's indexed sparse matmul has no per-(block, output) scale, `ttnn.multiply` with row-broadcast steps took 34 ms per layer for gate|up alone, the step matrices are not low rank (a rank-8 log fit gives 18 dB weights), and BFP4 kept for prefill next to Q4 for decode needs 6 GB more per chip. The new kernel ran one work item per (expert, 32-K group, column tile), multiplied each integer tile by its step row and packed the result. Timed by tt-scope on layer 0, both matrices.
 
 **Result.**
 

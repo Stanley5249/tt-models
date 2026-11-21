@@ -2,7 +2,7 @@
 
 **Question.** Where does a 2,048-token prefill spend its time, and how much of the expert matmul work is padding?
 
-**Setup.** `7a1dfcc`. tt-scope capture of one 2,048-token prefill of random tokens, before and after:
+**Setup.** `c4015e0`. tt-scope capture of one 2,048-token prefill of random tokens, before and after:
 
     pixi run tt-scope tracy scripts/profile/workload.py --name prefill2048 --programs 12000 -- --prompt-len 2048 --decode-steps 0
 

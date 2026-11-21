@@ -2,7 +2,7 @@
 
 **Question.** If decode reads the checkpoint's own Q4_0 integers and steps instead of BFP4 roundings, how much accuracy comes back, at what cost?
 
-**Setup.** `ab185fe`. TT-Metal has no Q4_0 or int4 tile format on Wormhole (`MxInt4` and `MxFp4` unpack only on Quasar), so the kernels (`src/tt_models/models/gemma4/expert_q4.py`, `kernels/expert_q4_*`) keep the integers in BFP4 tiles, which hold -7..7 exactly, and the steps as BF16 tiles. The rare -8 (0.2% of values, 6% of blocks) is clamped to -7. Device accuracy by `scripts/accuracy/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb <k> [--precision expert_q4=1]`, 3 seeds each; kernel checks and times by `scripts/kernels/q4_stream_check.py` with tt-scope captures; host emulation by `scripts/accuracy/q4_emulation.py`.
+**Setup.** `64b8375`. TT-Metal has no Q4_0 or int4 tile format on Wormhole (`MxInt4` and `MxFp4` unpack only on Quasar), so the kernels (`src/tt_models/models/gemma4/expert_q4.py`, `kernels/expert_q4_*`) keep the integers in BFP4 tiles, which hold -7..7 exactly, and the steps as BF16 tiles. The rare -8 (0.2% of values, 6% of blocks) is clamped to -7. Device accuracy by `scripts/accuracy/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb <k> [--precision expert_q4=1]`, 3 seeds each; kernel checks and times by `scripts/kernels/q4_stream_check.py` with tt-scope captures; host emulation by `scripts/accuracy/q4_emulation.py`.
 
 **Result.** Device decode against fp32:
 
