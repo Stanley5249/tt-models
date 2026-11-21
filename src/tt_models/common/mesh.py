@@ -4,6 +4,20 @@ import contextlib
 
 import ttnn
 
+_PER_MESH: list[dict] = []
+
+
+def per_mesh_cache() -> dict:
+    """A module-level cache of mesh-bound objects, keyed by id(mesh).
+
+    open_n300 clears every such cache when it closes its mesh, because a later
+    mesh can reuse the closed one's id while the cached objects still point at
+    the old device. (Under vLLM the plugin owns one mesh per process.)
+    """
+    cache: dict = {}
+    _PER_MESH.append(cache)
+    return cache
+
 
 @contextlib.contextmanager
 def open_n300(trace_region_size: int = 0):
@@ -12,5 +26,7 @@ def open_n300(trace_region_size: int = 0):
     try:
         yield mesh
     finally:
+        for cache in _PER_MESH:
+            cache.clear()
         ttnn.close_mesh_device(mesh)
         ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)

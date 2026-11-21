@@ -18,6 +18,7 @@ import ttnn
 
 from tt_models.common.ccl import all_reduce
 from tt_models.common.config import DRAM, HIFI2, HIFI4, L1, TILE, compute_config
+from tt_models.common.mesh import per_mesh_cache
 from tt_models.common.norm import rms_norm
 from tt_models.common.weights import WeightLoader, norm_weight
 from tt_models.models.gemma4.expert_plan import matmul_1d_config, plan_chunks
@@ -25,7 +26,7 @@ from tt_models.models.gemma4.expert_q4 import Q4Experts
 from tt_models.models.gemma4.expert_stream import ExpertStream, MlpStream, pad_down, run
 from tt_models.models.gemma4.router import Router
 
-_STREAMS: dict[tuple, object] = {}
+_STREAMS: dict[tuple, object] = per_mesh_cache()
 
 
 def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:

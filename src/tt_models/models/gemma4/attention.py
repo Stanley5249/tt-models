@@ -21,6 +21,7 @@ import ttnn
 
 from tt_models.common.ccl import all_reduce
 from tt_models.common.config import DRAM, HIFI2, HIFI4, TILE, dram_sharded, width_sharded_l1
+from tt_models.common.mesh import per_mesh_cache
 from tt_models.common.weights import WeightLoader, norm_weight
 from tt_models.models.gemma4.checkpoint import attention_dims
 from tt_models.models.gemma4.kv_cache import LayerKv
@@ -63,7 +64,7 @@ class PrefillChunk:
     fill_tables: list[ttnn.Tensor]
 
 
-_QK_ROPE = {}
+_QK_ROPE = per_mesh_cache()
 
 
 def qk_rope(mesh, width: int, head_dim: int, eps: float) -> QkRope:
@@ -73,7 +74,7 @@ def qk_rope(mesh, width: int, head_dim: int, eps: float) -> QkRope:
     return _QK_ROPE[key]
 
 
-_ROTATE = {}
+_ROTATE = per_mesh_cache()
 
 
 def rotate_half(x: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:

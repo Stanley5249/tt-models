@@ -3,6 +3,7 @@
 import ttnn
 
 from tt_models.common.config import DRAM, HIFI4, L1, TILE
+from tt_models.common.mesh import per_mesh_cache
 
 
 class _Semaphores:
@@ -20,7 +21,7 @@ class _Semaphores:
         return self.gather[self.turn], self.barrier[self.turn]
 
 
-_SEMAPHORES: dict[int, _Semaphores] = {}
+_SEMAPHORES: dict[int, _Semaphores] = per_mesh_cache()
 
 
 def init_ccl(mesh: ttnn.MeshDevice):
