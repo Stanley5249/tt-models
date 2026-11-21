@@ -57,12 +57,14 @@ GREEDY = {"temperature": 0}
 
 
 def post(url: str, path: str, body: dict, *, stream: bool = False):
-    req = urllib.request.Request(
+    # The benchmark operator supplies the server URL.
+    req = urllib.request.Request(  # noqa: S310
         f"{url}{path}",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
     )
-    resp = urllib.request.urlopen(req, timeout=900)
+    # The benchmark operator supplies the server URL.
+    resp = urllib.request.urlopen(req, timeout=900)  # noqa: S310
     return resp if stream else json.load(resp)
 
 
@@ -96,7 +98,8 @@ def complete(url: str, prompt: list[int], max_tokens: int, **extra) -> list[int]
 
 def metric(url: str, name: str) -> float:
     """A vLLM counter from /metrics, summed over its labels."""
-    text = urllib.request.urlopen(f"{url}/metrics", timeout=30).read().decode()
+    # The benchmark operator supplies the server URL.
+    text = urllib.request.urlopen(f"{url}/metrics", timeout=30).read().decode()  # noqa: S310
     return sum(
         float(line.rsplit(" ", 1)[1])
         for line in text.splitlines()

@@ -138,14 +138,12 @@ ignore = [
   "TRY003",  # messages stay at the raise site
   "EM101",  # same
   "EM102",  # same
+  "S101",  # internal assertions document kernel layout invariants
+  "S311",  # benchmark inputs and cache salts need no cryptography
   # Not yet fixed; remove one family per change.
   "ANN",  # annotations in src/
   "D",  # Google docstrings in src/
   "E501",  # docstrings and strings over the default width
-  # Single rules with few findings each.
-  "S101",
-  "S310",
-  "S311",
 ]
 
 [tool.ruff.lint.pydocstyle]
