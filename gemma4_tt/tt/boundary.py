@@ -271,20 +271,26 @@ class QkRope:
 
 
 class Router:
-    """Batch-1 router: logits, top-k and softmax over the k logits in one op (kernels/router_*).
+    """Decode router for 1-4 tokens: logits, top-k and softmax over the k logits in one op (kernels/router_*).
 
-    topk_router_gpt took 68 us per layer, mostly in its top-k stage. Here 11 cores each multiply 8 K tiles
-    of the normed row by the BF16 router weight, the reducer core gathers the partial rows (semaphore),
-    sums them and takes exp on the FPU/SFPU, and its RISC picks the top k and normalizes them.
-    Outputs match topk_router_gpt's: row-major uint16 ids and BF16 weights, first k entries of row 0."""
+    topk_router_gpt took 68-72 us per layer, mostly in its top-k stage. Here 11 cores (8 at 3-4 tokens)
+    each multiply their K slice of the normed rows by the BF16 router weight, the reducer core gathers the
+    partial rows (semaphore), sums each token's rows and takes exp on the FPU/SFPU, and its RISC picks every
+    token's top k and normalizes them: 37-42 us at 1-2 tokens, 57-68 us at 3-4 (tests/router_check.py).
+    Its weights are closer to an fp32 reference (max error 0.0007 against topk_router_gpt's 0.11).
+    Outputs: row-major uint16 ids and BF16 weights, token-major (entry t * k + j)."""
 
-    def __init__(self, mesh, hidden: int, n_experts: int, top_k: int, parts: int = 11, core_row: int = 5):
-        self.mesh, self.top_k = mesh, top_k
+    def __init__(self, mesh, hidden: int, n_experts: int, top_k: int, parts: int = 11, core_row: int = 5, rows: int = 1):
+        """rows: decode tokens (1 .. 4). The reducer stacks every core's partial rows in one tile, so
+        parts * rows must fit 32: 3-4 tokens use 8 parts of 11 K tiles (the first 8 of the 11 cores)."""
+        self.mesh, self.top_k, self.rows = mesh, top_k, rows
         self.kx = hidden // TILE
         self.n_tiles = n_experts // TILE
+        while parts * rows > TILE or self.kx % parts:
+            parts -= 1
         self.parts = parts
         self.kt = self.kx // parts
-        assert self.kt * parts == self.kx and parts <= 32
+        assert rows * top_k <= TILE
         self.cores = [ttnn.CoreCoord(i % 8, core_row - i // 8) for i in range(parts)]
         self.red = mesh.worker_core_from_logical_core(self.cores[0])
 
@@ -294,8 +300,15 @@ class Router:
 
         return row(ttnn.uint16), row(ttnn.bfloat16)
 
+    def flat_outputs(self):
+        """Row-major [1, rows * k] ids and weights, token-major: the layout the expert streams take."""
+        def row(dtype):
+            return ttnn.allocate_tensor_on_device(ttnn.Shape([1, self.rows * self.top_k]), dtype, ttnn.ROW_MAJOR_LAYOUT, self.mesh, L1)
+
+        return row(ttnn.uint16), row(ttnn.bfloat16)
+
     def __call__(self, x, w, ids, wts, build=False):
-        """x: normed row form BF16 [1, 1, 1, H]; w: the [H, E] BF16 router weight (tile layout).
+        """x: normed row form BF16 [1, 1, rows, H]; w: the [H, E] BF16 router weight (tile layout).
         build: return (program, tensors) to run merged with another op (expert_stream.run)."""
         crs = _crs(self.cores)
         cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, cb_out = 0, 1, 2, 3, 4, 5, 6
@@ -321,12 +334,13 @@ class Router:
         kernels = [
             ttnn.KernelDescriptor(
                 kernel_source=str(KERNELS / "router_reader.cpp"), core_ranges=crs,
-                compile_time_args=[cb_x, cb_w, cb_j, self.kt, n] + _accessor(x) + _accessor(w), runtime_args=reader_rt,
+                compile_time_args=[cb_x, cb_w, cb_j, self.kt, n, self.rows] + _accessor(x) + _accessor(w), runtime_args=reader_rt,
                 config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
             ),
             ttnn.KernelDescriptor(
                 kernel_source=str(KERNELS / "router_writer.cpp"), core_ranges=crs,
-                compile_time_args=[cb_partial, cb_part, cb_e, cb_out, n, self.parts, self.top_k, sem_id] + _accessor(ids) + _accessor(wts),
+                compile_time_args=[cb_partial, cb_part, cb_e, cb_out, n, self.parts, self.top_k, sem_id, self.rows, max(32, 2 * self.rows * self.top_k)]
+                + _accessor(ids) + _accessor(wts),
                 runtime_args=writer_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
             ),
             ttnn.KernelDescriptor(

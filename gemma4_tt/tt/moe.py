@@ -36,10 +36,10 @@ def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:
     return _STREAMS[key]
 
 
-def router_op(mesh, cfg) -> Router:
-    key = ("router", id(mesh))
+def router_op(mesh, cfg, rows: int = 1) -> Router:
+    key = ("router", id(mesh), rows)
     if key not in _STREAMS:
-        _STREAMS[key] = Router(mesh, cfg.hidden_size, cfg.num_experts, cfg.top_k_experts)
+        _STREAMS[key] = Router(mesh, cfg.hidden_size, cfg.num_experts, cfg.top_k_experts, rows=rows)
     return _STREAMS[key]
 
 
@@ -262,13 +262,12 @@ class FeedForward:
         tokens = x.shape[2]
         if self.q4 is not None:
             return self._experts_q4_rows(x, normed)
-        ids, weights = self._route(normed, tokens)
-        if tokens > 1:  # [T, k] -> [1, T * k]; a uint16 reshape that moves rows is unsupported
-            flat = ttnn.reshape(ttnn.typecast(ids, ttnn.uint32), (1, tokens * self.top_k))
-            ids.deallocate(True)
-            ids = ttnn.typecast(flat, ttnn.uint16)
-            flat.deallocate(True)
-            weights = ttnn.reshape(weights, (1, tokens * self.top_k))
+        # The router op writes the token-major [1, T * k] ids and weights the streams read; against
+        # topk_router_gpt and the four reshape and typecast ops that flattened its [T, k] output, a
+        # batch-4 step took 33.8 ms instead of 34.8 (scripts/bench_decode.py --batch 4 --trace).
+        router = router_op(self.mesh, self.cfg, tokens)
+        ids, weights = router.flat_outputs()
+        router(normed, self.router, ids, weights)
         st = self.stream if tokens == 1 else expert_stream(self.mesh, self.cfg, self.expert_local, tokens)
         act = st.act_tensor()
         st.gate_up(x, ids, weights, self.scale_row, self.exp_gate_up, act)
