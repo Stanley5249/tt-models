@@ -18,7 +18,12 @@ from tt_models.common.norm import rms_norm
 from tt_models.common.timing import device_time_us
 from tt_models.common.weights import WeightLoader
 from tt_models.models.gemma4.checkpoint import Checkpoint
-from tt_models.models.gemma4.expert_q4 import down_q4_op, gate_up_q4_op, q4_factor, step_tiles
+from tt_models.models.gemma4.expert_q4 import (
+    down_q4_op,
+    gate_up_q4_op,
+    q4_factor,
+    step_tiles,
+)
 from tt_models.models.gemma4.expert_stream import TILE, pad_down
 from tt_models.models.gemma4.moe import FeedForward
 
@@ -36,7 +41,9 @@ def main():
     cfg = ckpt.config
     p = f"layers.{args.layer}."
     with open_n300(trace_region_size=100_000_000) as mesh:
-        loader = WeightLoader(mesh, Path("cache/gemma4-26b-qat-tp2-bfp8-bfp8-bfp4-bfp8"))
+        loader = WeightLoader(
+            mesh, Path("cache/gemma4-26b-qat-tp2-bfp8-bfp8-bfp4-bfp8")
+        )
         ff = FeedForward(loader, ckpt, cfg, args.layer)
         ff.decode_constants(1)
         st = ff.stream
@@ -44,17 +51,43 @@ def main():
         E, H, I, tp = ff.n_experts, ff.hidden, cfg.moe_intermediate_size, ff.tp
         n, pad = ff.expert_local, ff.expert_pad - ff.expert_local
 
-        def assembled(t):  # [E, H, 2I] (gate | up) -> device order per chip: gate c, pad, up c, pad
+        def assembled(
+            t,
+        ):  # [E, H, 2I] (gate | up) -> device order per chip: gate c, pad, up c, pad
             g, u = t[..., :I], t[..., I:]
             z = t.new_zeros(*t.shape[:-1], pad)
-            return torch.cat([torch.cat([g[..., c * n : (c + 1) * n], z, u[..., c * n : (c + 1) * n], z], -1) for c in range(tp)], -1)
+            return torch.cat(
+                [
+                    torch.cat(
+                        [
+                            g[..., c * n : (c + 1) * n],
+                            z,
+                            u[..., c * n : (c + 1) * n],
+                            z,
+                        ],
+                        -1,
+                    )
+                    for c in range(tp)
+                ],
+                -1,
+            )
 
         gu = ckpt.get(p + "experts.gate_up_proj").transpose(1, 2)  # [E, H, 2I]
         q, s = q4_factor(gu, dim=-2)  # blocks along H
-        w_exact = (q * s.repeat_interleave(TILE, -2)).to(torch.float64)  # clamped Q4_0, exact on device
-        q_dev = loader.put(f"L{args.layer}.exp_gate_up_q4_p{ff.expert_pad}", lambda: assembled(q)[None], ttnn.bfloat4_b, shard_dim=-1)
+        w_exact = (q * s.repeat_interleave(TILE, -2)).to(
+            torch.float64
+        )  # clamped Q4_0, exact on device
+        q_dev = loader.put(
+            f"L{args.layer}.exp_gate_up_q4_p{ff.expert_pad}",
+            lambda: assembled(q)[None],
+            ttnn.bfloat4_b,
+            shard_dim=-1,
+        )
         s_dev = loader.put(
-            f"L{args.layer}.exp_gate_up_q4s_p{ff.expert_pad}", lambda: step_tiles(assembled(s), groups)[None], ttnn.bfloat16, shard_dim=-1
+            f"L{args.layer}.exp_gate_up_q4s_p{ff.expert_pad}",
+            lambda: step_tiles(assembled(s), groups)[None],
+            ttnn.bfloat16,
+            shard_dim=-1,
         )
         gu64 = gu.to(torch.float64)
 
@@ -62,14 +95,24 @@ def main():
         qd, sd = q4_factor(dn, dim=-2)  # blocks along I
         kt = st.kt
         qd_dev = loader.put(
-            f"L{args.layer}.exp_down_q4_p{st.down_width}", lambda: pad_down(qd, st.down_width)[None], ttnn.bfloat4_b, shard_dim=-2
+            f"L{args.layer}.exp_down_q4_p{st.down_width}",
+            lambda: pad_down(qd, st.down_width)[None],
+            ttnn.bfloat4_b,
+            shard_dim=-2,
         )
 
         def down_steps():  # [E, I / 32, W] -> per chip [E, 32, W], rows 0 .. kt - 1
             sp = pad_down(sd, st.down_width).reshape(E, tp, kt, st.down_width)
-            return torch.nn.functional.pad(sp, (0, 0, 0, TILE - kt)).reshape(E, tp * TILE, st.down_width)[None]
+            return torch.nn.functional.pad(sp, (0, 0, 0, TILE - kt)).reshape(
+                E, tp * TILE, st.down_width
+            )[None]
 
-        sd_dev = loader.put(f"L{args.layer}.exp_down_q4s_p{st.down_width}", down_steps, ttnn.bfloat16, shard_dim=-2)
+        sd_dev = loader.put(
+            f"L{args.layer}.exp_down_q4s_p{st.down_width}",
+            down_steps,
+            ttnn.bfloat16,
+            shard_dim=-2,
+        )
         dn64 = dn.to(torch.float64)
         scale = ckpt.get(p + "router.per_expert_scale").double()
 
@@ -81,14 +124,25 @@ def main():
             return torch.stack(out)  # [slots, I]
 
         def act_dev(act):  # per chip [32, slots * pairs * 32] row 0 -> [slots, I]
-            parts = [ttnn.to_torch(t).double()[0, 0, 0].reshape(ff.top_k, -1)[:, :n] for t in ttnn.get_device_tensors(act)]
+            parts = [
+                ttnn.to_torch(t).double()[0, 0, 0].reshape(ff.top_k, -1)[:, :n]
+                for t in ttnn.get_device_tensors(act)
+            ]
             return torch.cat(parts, -1)
 
         def down_host(act_chips, ids, w):  # act per chip [slots, n] -> per chip [H]
-            return [sum(a[j] @ w[e, c * n : (c + 1) * n] for j, e in enumerate(ids.tolist())) for c, a in enumerate(act_chips)]
+            return [
+                sum(
+                    a[j] @ w[e, c * n : (c + 1) * n] for j, e in enumerate(ids.tolist())
+                )
+                for c, a in enumerate(act_chips)
+            ]
 
         def down_dev(out):
-            return [ttnn.to_torch(t).double()[0, 0, 0, :H] for t in ttnn.get_device_tensors(out)]
+            return [
+                ttnn.to_torch(t).double()[0, 0, 0, :H]
+                for t in ttnn.get_device_tensors(out)
+            ]
 
         def snr(a, ref):
             return (10 * torch.log10(ref.pow(2).sum() / (a - ref).pow(2).sum())).item()
@@ -107,7 +161,9 @@ def main():
             ids, weights = ff._route(normed, 1)
             xh = ttnn.to_torch(ttnn.get_device_tensors(x)[0]).double()[0, 0, 0]
             idh = ttnn.to_torch(ttnn.get_device_tensors(ids)[0])[0, : ff.top_k].long()
-            wh = ttnn.to_torch(ttnn.get_device_tensors(weights)[0]).double()[0, : ff.top_k]
+            wh = ttnn.to_torch(ttnn.get_device_tensors(weights)[0]).double()[
+                0, : ff.top_k
+            ]
             ref = act_host(xh, idh, wh, gu64)
             ref_q4 = act_host(xh, idh, wh, w_exact)
 
@@ -137,7 +193,10 @@ def main():
 
             a4, aq = act_dev(bfp4()), act_dev(q4())
             act_q = q4()
-            act_chips = [ttnn.to_torch(t).double()[0, 0, 0].reshape(ff.top_k, -1)[:, :n] for t in ttnn.get_device_tensors(act_q)]
+            act_chips = [
+                ttnn.to_torch(t).double()[0, 0, 0].reshape(ff.top_k, -1)[:, :n]
+                for t in ttnn.get_device_tensors(act_q)
+            ]
             ref_d = down_host(act_chips, idh, dn64)
 
             def bfp4_down():
@@ -177,7 +236,12 @@ def main():
             )
         runs = {"bfp4": [], "q4": [], "bfp4 down": [], "q4 down": []}
         for _ in range(5):  # alternate, so drifts hit both alike; report the median
-            for name, fn in (("bfp4", bfp4), ("q4", q4), ("bfp4 down", bfp4_down), ("q4 down", q4_down)):
+            for name, fn in (
+                ("bfp4", bfp4),
+                ("q4", q4),
+                ("bfp4 down", bfp4_down),
+                ("q4 down", q4_down),
+            ):
                 runs[name].append(device_time_us(mesh, fn, iters=20))
         for name, v in runs.items():
             print(f"{name} gate_up us median {sorted(v)[2]} (runs {v})", flush=True)

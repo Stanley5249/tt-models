@@ -7,7 +7,9 @@ L1 = ttnn.L1_MEMORY_CONFIG
 TILE = 32
 
 
-def compute_config(fidelity=ttnn.MathFidelity.HiFi2, fp32_acc=True, packer_l1_acc=True, approx=False):
+def compute_config(
+    fidelity=ttnn.MathFidelity.HiFi2, fp32_acc=True, packer_l1_acc=True, approx=False
+):
     return ttnn.WormholeComputeKernelConfig(
         math_fidelity=fidelity,
         math_approx_mode=approx,
@@ -25,9 +27,13 @@ def dram_sharded(mesh: ttnn.MeshDevice, k: int, n: int) -> ttnn.MemoryConfig:
     """Width-sharded DRAM config for a [k, n] decode weight, one shard per DRAM bank."""
     banks = mesh.dram_grid_size().x
     padded = -(-n // (TILE * banks)) * TILE * banks
-    grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(banks - 1, 0))})
+    grid = ttnn.CoreRangeSet(
+        {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(banks - 1, 0))}
+    )
     spec = ttnn.ShardSpec(grid, (k, padded // banks), ttnn.ShardOrientation.ROW_MAJOR)
-    return ttnn.MemoryConfig(ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.DRAM, spec)
+    return ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.DRAM, spec
+    )
 
 
 def width_sharded_l1(width: int, cores: int = 8) -> ttnn.MemoryConfig:

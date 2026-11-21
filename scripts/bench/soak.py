@@ -39,14 +39,22 @@ def main():
             if s == 10:
                 start = used(mesh)
         b1 = used(mesh)
-        print(f"b1: {args.steps} steps in {time.time() - t0:.0f} s, DRAM {start:.3f} -> {b1:.3f} GiB/chip", flush=True)
+        print(
+            f"b1: {args.steps} steps in {time.time() - t0:.0f} s, DRAM {start:.3f} -> {b1:.3f} GiB/chip",
+            flush=True,
+        )
         tok4 = torch.full((4,), 5)
         for s in range(args.batch4_steps):
-            lg = m.decode(tok4, torch.full((4,), 128 + s), pts, trace=True)  # rewrites positions the b1 run used
+            lg = m.decode(
+                tok4, torch.full((4,), 128 + s), pts, trace=True
+            )  # rewrites positions the b1 run used
             tok4 = lg.argmax(-1)
             if s == 10:
                 start4 = used(mesh)
-        print(f"b4: {args.batch4_steps} steps, DRAM {start4:.3f} -> {used(mesh):.3f} GiB/chip", flush=True)
+        print(
+            f"b4: {args.batch4_steps} steps, DRAM {start4:.3f} -> {used(mesh):.3f} GiB/chip",
+            flush=True,
+        )
         m.release_traces()
 
 

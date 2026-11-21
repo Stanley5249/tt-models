@@ -16,7 +16,13 @@ def rms_norm(x: ttnn.Tensor, weight, eps: float) -> ttnn.Tensor:
     """
     rows, width = x.shape[2], x.shape[3]
     if rows > TILE or (width // TILE) % 8:
-        return ttnn.rms_norm(x, weight=weight, epsilon=eps, memory_config=DRAM, compute_kernel_config=HIFI4)
+        return ttnn.rms_norm(
+            x,
+            weight=weight,
+            epsilon=eps,
+            memory_config=DRAM,
+            compute_kernel_config=HIFI4,
+        )
     if width not in _NORM_SHARD:
         per = width // TILE // 8
         shard = ttnn.create_sharded_memory_config(
@@ -35,7 +41,14 @@ def rms_norm(x: ttnn.Tensor, weight, eps: float) -> ttnn.Tensor:
         _NORM_SHARD[width] = (shard, cfg)
     shard, cfg = _NORM_SHARD[width]
     xs = ttnn.to_memory_config(x, shard)
-    y = ttnn.rms_norm(xs, weight=weight, epsilon=eps, program_config=cfg, memory_config=shard, compute_kernel_config=HIFI4)
+    y = ttnn.rms_norm(
+        xs,
+        weight=weight,
+        epsilon=eps,
+        program_config=cfg,
+        memory_config=shard,
+        compute_kernel_config=HIFI4,
+    )
     xs.deallocate(True)
     out = ttnn.to_memory_config(y, DRAM)
     y.deallocate(True)

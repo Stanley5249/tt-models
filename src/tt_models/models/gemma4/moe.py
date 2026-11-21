@@ -33,14 +33,23 @@ def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:
     """One ExpertStream (core placement) per mesh and token count, shared by the layers."""
     key = ("experts", id(mesh), rows)
     if key not in _STREAMS:
-        _STREAMS[key] = ExpertStream(mesh, cfg.hidden_size, expert_local, cfg.top_k_experts, cfg.num_experts, rows=rows)
+        _STREAMS[key] = ExpertStream(
+            mesh,
+            cfg.hidden_size,
+            expert_local,
+            cfg.top_k_experts,
+            cfg.num_experts,
+            rows=rows,
+        )
     return _STREAMS[key]
 
 
 def router_op(mesh, cfg, rows: int = 1) -> Router:
     key = ("router", id(mesh), rows)
     if key not in _STREAMS:
-        _STREAMS[key] = Router(mesh, cfg.hidden_size, cfg.num_experts, cfg.top_k_experts, rows=rows)
+        _STREAMS[key] = Router(
+            mesh, cfg.hidden_size, cfg.num_experts, cfg.top_k_experts, rows=rows
+        )
     return _STREAMS[key]
 
 
@@ -48,7 +57,9 @@ def mlp_stream(mesh, cfg, mlp_pad: int) -> MlpStream:
     key = ("mlp", id(mesh))
     if key not in _STREAMS:
         # leaves the router's cores free: router and MLP gate|up run as one merged op
-        _STREAMS[key] = MlpStream(mesh, cfg.hidden_size, mlp_pad, exclude=router_op(mesh, cfg).cores)
+        _STREAMS[key] = MlpStream(
+            mesh, cfg.hidden_size, mlp_pad, exclude=router_op(mesh, cfg).cores
+        )
     return _STREAMS[key]
 
 
@@ -71,7 +82,9 @@ class FeedForward:
     ):
         tp = loader.tp
         self.tp = tp
-        self.expert_compute = compute_config(getattr(ttnn.MathFidelity, expert_fidelity))
+        self.expert_compute = compute_config(
+            getattr(ttnn.MathFidelity, expert_fidelity)
+        )
         self.cfg = cfg
         self.hidden = H = cfg.hidden_size
         self.n_experts = E = cfg.num_experts
@@ -93,12 +106,19 @@ class FeedForward:
         rm = ttnn.ROW_MAJOR_LAYOUT
 
         def norm(name):
-            return put(f"L{layer_idx}.{name}", lambda: norm_weight(ckpt.get(p + name + ".weight")), layout=rm)
+            return put(
+                f"L{layer_idx}.{name}",
+                lambda: norm_weight(ckpt.get(p + name + ".weight")),
+                layout=rm,
+            )
 
         # The router norm, pre_ff and pre_ff2 all normalize the same residual, so
         # one weightless RMSNorm feeds three weight multiplies (TILE row vectors).
         def row(name):
-            return put(f"L{layer_idx}.{name}.row", lambda: ckpt.get(p + name + ".weight").float().reshape(1, 1, 1, H))
+            return put(
+                f"L{layer_idx}.{name}.row",
+                lambda: ckpt.get(p + name + ".weight").float().reshape(1, 1, 1, H),
+            )
 
         self.pre_ff = row("pre_feedforward_layernorm")
         self.pre_ff2 = row("pre_feedforward_layernorm_2")
@@ -112,17 +132,42 @@ class FeedForward:
             g = ckpt.get(p + "mlp.gate_proj.weight").T  # [H, I]
             u = ckpt.get(p + "mlp.up_proj.weight").T
             n, zeros = self.mlp_local, g.new_zeros(H, self.mlp_pad - self.mlp_local)
-            parts = [torch.cat([g[:, c * n : (c + 1) * n], zeros, u[:, c * n : (c + 1) * n], zeros], -1) for c in range(tp)]
+            parts = [
+                torch.cat(
+                    [
+                        g[:, c * n : (c + 1) * n],
+                        zeros,
+                        u[:, c * n : (c + 1) * n],
+                        zeros,
+                    ],
+                    -1,
+                )
+                for c in range(tp)
+            ]
             return torch.cat(parts, -1)[None, None]
 
         def mlp_down():
             d = ckpt.get(p + "mlp.down_proj.weight").T  # [I, H]
             n, zeros = self.mlp_local, d.new_zeros(self.mlp_pad - self.mlp_local, H)
-            d = torch.cat([torch.cat([d[c * n : (c + 1) * n], zeros]) for c in range(tp)])
-            return pad_down(d, self.mlp_stream.down_width).contiguous()[None, None]  # hidden padded for the stream
+            d = torch.cat(
+                [torch.cat([d[c * n : (c + 1) * n], zeros]) for c in range(tp)]
+            )
+            return pad_down(d, self.mlp_stream.down_width).contiguous()[
+                None, None
+            ]  # hidden padded for the stream
 
-        self.mlp_gate_up = put(f"L{layer_idx}.mlp_gate_up_p{self.mlp_pad}", mlp_gate_up, mlp_dtype, shard_dim=-1)
-        self.mlp_down = put(f"L{layer_idx}.mlp_down_p{self.mlp_pad}_w{self.mlp_stream.down_width}", mlp_down, mlp_dtype, shard_dim=-2)
+        self.mlp_gate_up = put(
+            f"L{layer_idx}.mlp_gate_up_p{self.mlp_pad}",
+            mlp_gate_up,
+            mlp_dtype,
+            shard_dim=-1,
+        )
+        self.mlp_down = put(
+            f"L{layer_idx}.mlp_down_p{self.mlp_pad}_w{self.mlp_stream.down_width}",
+            mlp_down,
+            mlp_dtype,
+            shard_dim=-2,
+        )
 
         def router():
             # HF: softmax((rmsnorm(x) * scale * H^-0.5) @ proj.T); fold scale and H^-0.5 into proj.
@@ -139,29 +184,61 @@ class FeedForward:
             n, pad = self.expert_local, self.expert_pad - self.expert_local
             zeros = g.new_zeros(*g.shape[:-1], pad)
             return torch.cat(
-                [torch.cat([g[..., c * n : (c + 1) * n], zeros, u[..., c * n : (c + 1) * n], zeros], -1) for c in range(tp)], -1
+                [
+                    torch.cat(
+                        [
+                            g[..., c * n : (c + 1) * n],
+                            zeros,
+                            u[..., c * n : (c + 1) * n],
+                            zeros,
+                        ],
+                        -1,
+                    )
+                    for c in range(tp)
+                ],
+                -1,
             )
 
         def experts_gate_up():
-            return assemble_gate_up(ckpt.get(p + "experts.gate_up_proj").transpose(1, 2))[None]  # [E, 2I, H] -> [1, E, H, 2I]
+            return assemble_gate_up(
+                ckpt.get(p + "experts.gate_up_proj").transpose(1, 2)
+            )[None]  # [E, 2I, H] -> [1, E, H, 2I]
 
         self.stream = expert_stream(loader.mesh, cfg, self.expert_local)
         self.pack_cores = [ttnn.CoreCoord(x, 7) for x in range(8)]
         self.down_width = self.stream.down_width
 
         def experts_down():
-            down = ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous()  # [E, I, H]
+            down = (
+                ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous()
+            )  # [E, I, H]
             return pad_down(down, self.down_width)[None]  # [1, E, I, 3072]
 
         # Experimental (expert_q4.py): the checkpoint's Q4_0 integers and steps, for batch-1 decode.
         # The prefill sparse matmuls cannot apply the steps and two copies of the experts do not fit,
         # so prefill then runs the batch-1 streams token by token (slow; for accuracy runs only).
-        self.q4 = Q4Experts(loader, ckpt, layer_idx, self.stream, assemble_gate_up, self.expert_pad) if expert_q4 else None
+        self.q4 = (
+            Q4Experts(
+                loader, ckpt, layer_idx, self.stream, assemble_gate_up, self.expert_pad
+            )
+            if expert_q4
+            else None
+        )
         if self.q4 is None:
-            self.exp_gate_up = put(f"L{layer_idx}.exp_gate_up_p{self.expert_pad}", experts_gate_up, expert_dtype, shard_dim=-1)
+            self.exp_gate_up = put(
+                f"L{layer_idx}.exp_gate_up_p{self.expert_pad}",
+                experts_gate_up,
+                expert_dtype,
+                shard_dim=-1,
+            )
             # per_expert_scale is applied to the routing weights: folding it into the BFP4
             # down weights changes their block rounding and measurably hurt accuracy.
-            self.exp_down = put(f"L{layer_idx}.exp_down_p{self.down_width}", experts_down, expert_dtype, shard_dim=-2)
+            self.exp_down = put(
+                f"L{layer_idx}.exp_down_p{self.down_width}",
+                experts_down,
+                expert_dtype,
+                shard_dim=-2,
+            )
         # Row-major per_expert_scale for the stream's gate_up writer.
         self.scale_row = ttnn.from_torch(
             ckpt.get(p + "router.per_expert_scale").float().reshape(1, -1),
@@ -171,7 +248,8 @@ class FeedForward:
             mesh_mapper=ttnn.ReplicateTensorToMesh(loader.mesh),
         )
         self.per_expert_scale = put(
-            f"L{layer_idx}.per_expert_scale", lambda: ckpt.get(p + "router.per_expert_scale").float().reshape(1, 1, 1, E)
+            f"L{layer_idx}.per_expert_scale",
+            lambda: ckpt.get(p + "router.per_expert_scale").float().reshape(1, 1, 1, E),
         )
         self.all_experts = ttnn.from_torch(
             torch.ones(1, 1, 1, E),
@@ -195,13 +273,17 @@ class FeedForward:
 
         Returns renormalized weights [1, 1, T, k] and expert ids [1, 1, T, k] (uint16).
         """
-        logits = ttnn.linear(normed, self.router, compute_kernel_config=HIFI4, memory_config=DRAM)
+        logits = ttnn.linear(
+            normed, self.router, compute_kernel_config=HIFI4, memory_config=DRAM
+        )
         probs = ttnn.softmax(logits, dim=-1, compute_kernel_config=HIFI4)
         logits.deallocate(True)
         top_v, top_i = ttnn.topk(probs, k=self.top_k, dim=-1)
         scaled = ttnn.mul(probs, self.per_expert_scale)
         probs.deallocate(True)
-        scaled_v = ttnn.gather(scaled, dim=-1, index=top_i)  # p[e] * per_expert_scale[e] for the chosen e
+        scaled_v = ttnn.gather(
+            scaled, dim=-1, index=top_i
+        )  # p[e] * per_expert_scale[e] for the chosen e
         scaled.deallocate(True)
         top_sum = ttnn.sum(top_v, dim=-1, keepdim=True)
         weights = ttnn.div(scaled_v, top_sum)
@@ -234,7 +316,9 @@ class FeedForward:
             num_experts=self.n_experts,
         )
 
-    def _experts_q4_rows(self, x: ttnn.Tensor, normed: ttnn.Tensor, group: int = 256) -> ttnn.Tensor:
+    def _experts_q4_rows(
+        self, x: ttnn.Tensor, normed: ttnn.Tensor, group: int = 256
+    ) -> ttnn.Tensor:
         """Q4_0 experts for every row of x [1, 1, T, H], one batch-1 stream pair per row (slow).
 
         Rows are concatenated in groups: one ttnn.concat takes at most about 2,000 inputs (two
@@ -243,8 +327,12 @@ class FeedForward:
         for g0 in range(0, x.shape[2], group):
             outs = []
             for t in range(g0, min(g0 + group, x.shape[2])):
-                xr = ttnn.slice(x, [0, 0, t, 0], [1, 1, t + 1, self.hidden], memory_config=L1)
-                nr = ttnn.slice(normed, [0, 0, t, 0], [1, 1, t + 1, self.hidden], memory_config=L1)
+                xr = ttnn.slice(
+                    x, [0, 0, t, 0], [1, 1, t + 1, self.hidden], memory_config=L1
+                )
+                nr = ttnn.slice(
+                    normed, [0, 0, t, 0], [1, 1, t + 1, self.hidden], memory_config=L1
+                )
                 ids, weights = self._route(nr, 1)
                 act = self.stream.act_tensor()
                 self.q4.gate_up_op(xr, ids, weights, self.scale_row, act)
@@ -272,8 +360,12 @@ class FeedForward:
         return out
 
     def _mlp(self, x, dtype=None):
-        gu = ttnn.linear(x, self.mlp_gate_up, compute_kernel_config=HIFI2, memory_config=DRAM)
-        n = self.mlp_pad  # padding columns are zero in gate and up, so h carries zeros there
+        gu = ttnn.linear(
+            x, self.mlp_gate_up, compute_kernel_config=HIFI2, memory_config=DRAM
+        )
+        n = (
+            self.mlp_pad
+        )  # padding columns are zero in gate and up, so h carries zeros there
         t = gu.shape[2]
         gate = ttnn.slice(gu, [0, 0, 0, 0], [1, 1, t, n])
         up = ttnn.slice(gu, [0, 0, 0, n], [1, 1, t, 2 * n])
@@ -281,7 +373,13 @@ class FeedForward:
         h = ttnn.mul(gate, up, input_tensor_a_activations=[GELU_TANH])
         gate.deallocate(True)
         up.deallocate(True)
-        out = ttnn.linear(h, self.mlp_down, compute_kernel_config=HIFI2, memory_config=DRAM, dtype=dtype)
+        out = ttnn.linear(
+            h,
+            self.mlp_down,
+            compute_kernel_config=HIFI2,
+            memory_config=DRAM,
+            dtype=dtype,
+        )
         h.deallocate(True)
         return self._unpad(out)
 
@@ -296,12 +394,21 @@ class FeedForward:
         router = router_op(self.mesh, self.cfg, rows)
         ids, weights = router.outputs()
         # The router is latency-bound and the MLP gate|up DRAM-bound: one merged op on disjoint cores.
-        run([router(normed, self.router, ids, weights, build=True), ms.gate_up(mlp_in, self.mlp_gate_up, h, rows=rows, build=True)])
+        run(
+            [
+                router(normed, self.router, ids, weights, build=True),
+                ms.gate_up(mlp_in, self.mlp_gate_up, h, rows=rows, build=True),
+            ]
+        )
         ms.down(h, self.mlp_down, out, compact_chunk0=0, rows=rows)
         h.deallocate(True)
         # At 2-4 rows the router op replaced topk_router_gpt and the reshape and typecast ops that
         # flattened its [T, k] output: a batch-4 step went from 34.8 to 33.8 ms.
-        st = self.stream if rows == 1 else expert_stream(self.mesh, self.cfg, self.expert_local, rows)
+        st = (
+            self.stream
+            if rows == 1
+            else expert_stream(self.mesh, self.cfg, self.expert_local, rows)
+        )
         act = st.act_tensor()
         expert_chunk0 = rows * boundary.V * 64
         if self.q4 is not None:
@@ -324,7 +431,12 @@ class FeedForward:
             # Few K blocks: with packer L1 accumulation every block boundary rounds the
             # partial sum to the BF16 output (in0_block_w=8 raised prefill KL 0.32 -> 0.36).
             self._chunk_cfgs[rows] = (
-                matmul_1d_config(m, 2 * self.expert_pad, self.hidden, in0_block_w=44 if m <= 2 else 22),
+                matmul_1d_config(
+                    m,
+                    2 * self.expert_pad,
+                    self.hidden,
+                    in0_block_w=44 if m <= 2 else 22,
+                ),
                 matmul_1d_config(m, self.down_width, self.expert_local),
             )
         return self._chunk_cfgs[rows]
@@ -349,30 +461,56 @@ class FeedForward:
         tokens = x.shape[2]
         k, n, p = self.top_k, self.expert_local, self.expert_pad
         weights, ids = self.topk_route(normed)
-        w_host = ttnn.to_torch(ttnn.get_device_tensors(weights)[0]).reshape(-1, k)[:tokens]
-        id_host = ttnn.to_torch(ttnn.get_device_tensors(ids)[0]).reshape(-1, k)[:tokens].long()
+        w_host = ttnn.to_torch(ttnn.get_device_tensors(weights)[0]).reshape(-1, k)[
+            :tokens
+        ]
+        id_host = (
+            ttnn.to_torch(ttnn.get_device_tensors(ids)[0])
+            .reshape(-1, k)[:tokens]
+            .long()
+        )
         weights.deallocate(True)
         ids.deallocate(True)
         rows = self.chunk_rows(tokens)
-        gather, row_w, chunk_expert, back = plan_chunks(id_host, w_host, rows, self.n_experts)
+        gather, row_w, chunk_expert, back = plan_chunks(
+            id_host, w_host, rows, self.n_experts
+        )
         n_chunks = chunk_expert.numel()
 
         rep = ttnn.ReplicateTensorToMesh(self.mesh)
 
         def up(t, dtype, layout=ttnn.ROW_MAJOR_LAYOUT):
-            return ttnn.from_torch(t, dtype=dtype, layout=layout, device=self.mesh, mesh_mapper=rep, memory_config=DRAM)
+            return ttnn.from_torch(
+                t,
+                dtype=dtype,
+                layout=layout,
+                device=self.mesh,
+                mesh_mapper=rep,
+                memory_config=DRAM,
+            )
 
-        table = ttnn.to_layout(ttnn.reshape(x, (tokens, self.hidden)), ttnn.ROW_MAJOR_LAYOUT)
+        table = ttnn.to_layout(
+            ttnn.reshape(x, (tokens, self.hidden)), ttnn.ROW_MAJOR_LAYOUT
+        )
         gate_up_cfg, down_cfg = self._chunk_config(rows)
 
         outs = []
-        for c0 in range(0, n_chunks, self.n_experts):  # indexed mode takes at most E slots per call
+        for c0 in range(
+            0, n_chunks, self.n_experts
+        ):  # indexed mode takes at most E slots per call
             c1 = min(c0 + self.n_experts, n_chunks)
             # Gathering each call's rows separately saves slicing one big gather.
             g = up(gather[c0 * rows : c1 * rows][None], ttnn.uint32)
-            xc = ttnn.reshape(ttnn.embedding(g, table, layout=ttnn.TILE_LAYOUT), (1, c1 - c0, rows, self.hidden))
+            xc = ttnn.reshape(
+                ttnn.embedding(g, table, layout=ttnn.TILE_LAYOUT),
+                (1, c1 - c0, rows, self.hidden),
+            )
             g.deallocate(True)
-            wc = up(row_w[c0 * rows : c1 * rows].reshape(1, c1 - c0, rows, 1), ttnn.bfloat16, ttnn.TILE_LAYOUT)
+            wc = up(
+                row_w[c0 * rows : c1 * rows].reshape(1, c1 - c0, rows, 1),
+                ttnn.bfloat16,
+                ttnn.TILE_LAYOUT,
+            )
             idx = up(chunk_expert[c0:c1][None].int(), ttnn.uint16)
             gu = ttnn.sparse_matmul(
                 xc,
@@ -417,14 +555,22 @@ class FeedForward:
         if len(outs) > 1:
             for o in outs:
                 o.deallocate(True)
-        flat = ttnn.to_layout(ttnn.reshape(down, (n_chunks * rows, self.down_width)), ttnn.ROW_MAJOR_LAYOUT)
+        flat = ttnn.to_layout(
+            ttnn.reshape(down, (n_chunks * rows, self.down_width)),
+            ttnn.ROW_MAJOR_LAYOUT,
+        )
         down.deallocate(True)
         b = up(back[None], ttnn.uint32)
-        pairs = ttnn.embedding(b, flat, layout=ttnn.TILE_LAYOUT)  # [1, k * T, 3072], slot-major
+        pairs = ttnn.embedding(
+            b, flat, layout=ttnn.TILE_LAYOUT
+        )  # [1, k * T, 3072], slot-major
         b.deallocate(True)
         flat.deallocate(True)
         out = ttnn.experimental.fast_reduce_nc(
-            ttnn.reshape(pairs, (1, k, tokens, self.down_width)), dims=[1], compute_kernel_config=HIFI4, memory_config=DRAM
+            ttnn.reshape(pairs, (1, k, tokens, self.down_width)),
+            dims=[1],
+            compute_kernel_config=HIFI4,
+            memory_config=DRAM,
         )
         pairs.deallocate(True)
         return self._unpad(out)
@@ -457,7 +603,11 @@ class FeedForward:
         mlp_in.deallocate(True)
 
         exp_in = ttnn.mul(normed, self.pre_ff2, memory_config=DRAM)
-        experts = self._experts_q4_rows(exp_in, normed) if self.q4 is not None else self._experts(exp_in, normed)
+        experts = (
+            self._experts_q4_rows(exp_in, normed)
+            if self.q4 is not None
+            else self._experts(exp_in, normed)
+        )
         exp_in.deallocate(True)
         normed.deallocate(True)
         if experts.shape[2] != t:

@@ -25,7 +25,12 @@ def main():
     ckpt = Checkpoint()
     cfg = ckpt.config
     with open_n300(trace_region_size=50_000_000) as mesh:
-        ff = FeedForward(WeightLoader(mesh, Path("cache/gemma4-26b-qat-tp2-bfp8-bfp8-bfp4-bfp8")), ckpt, cfg, args.layer)
+        ff = FeedForward(
+            WeightLoader(mesh, Path("cache/gemma4-26b-qat-tp2-bfp8-bfp8-bfp4-bfp8")),
+            ckpt,
+            cfg,
+            args.layer,
+        )
         b = Boundary(mesh, cfg.hidden_size, cfg.rms_norm_eps)
         ms = ff.mlp_stream
         torch.manual_seed(0)
@@ -44,10 +49,19 @@ def main():
         ms.down(h, ff.mlp_down, out, compact_chunk0=0)
         for c in range(2):
             r = ttnn.to_torch(ttnn.get_device_tensors(ref)[c]).float()[0, 0, 0]
-            o = from_compact(ttnn.to_torch(ttnn.get_device_tensors(out)[c]).float()[0, 0], 2, cfg.hidden_size)[0]
+            o = from_compact(
+                ttnn.to_torch(ttnn.get_device_tensors(out)[c]).float()[0, 0],
+                2,
+                cfg.hidden_size,
+            )[0]
             pcc = torch.corrcoef(torch.stack([o, r]))[0, 1].item()
-            print(f"chip {c}: pcc {pcc:.6f}, max diff {(o - r).abs().max():.4f}, ref max {r.abs().max():.3f}", flush=True)
-        print("ttnn mlp us", device_time_us(mesh, lambda: ff._mlp(x, dtype=ttnn.float32)))
+            print(
+                f"chip {c}: pcc {pcc:.6f}, max diff {(o - r).abs().max():.4f}, ref max {r.abs().max():.3f}",
+                flush=True,
+            )
+        print(
+            "ttnn mlp us", device_time_us(mesh, lambda: ff._mlp(x, dtype=ttnn.float32))
+        )
 
         def stream():
             hh = ms.h_tensor()
@@ -58,7 +72,10 @@ def main():
             return o
 
         print("stream mlp us", device_time_us(mesh, stream))
-        print("gate_up us", device_time_us(mesh, lambda: ms.gate_up(x, ff.mlp_gate_up, ms.h_tensor())))
+        print(
+            "gate_up us",
+            device_time_us(mesh, lambda: ms.gate_up(x, ff.mlp_gate_up, ms.h_tensor())),
+        )
 
 
 if __name__ == "__main__":

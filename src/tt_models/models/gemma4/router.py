@@ -3,7 +3,13 @@
 import ttnn
 
 from tt_models.common.config import L1, TILE
-from tt_models.models.gemma4.generic_op import FP32_TILE, KERNELS, accessor, cb, core_range_set
+from tt_models.models.gemma4.generic_op import (
+    FP32_TILE,
+    KERNELS,
+    accessor,
+    cb,
+    core_range_set,
+)
 
 
 class Router:
@@ -16,7 +22,16 @@ class Router:
     Its weights are closer to an fp32 reference (max error 0.0007 against topk_router_gpt's 0.11).
     Outputs: row-major uint16 ids and BF16 weights, token-major (entry t * k + j)."""
 
-    def __init__(self, mesh, hidden: int, n_experts: int, top_k: int, parts: int = 11, core_row: int = 5, rows: int = 1):
+    def __init__(
+        self,
+        mesh,
+        hidden: int,
+        n_experts: int,
+        top_k: int,
+        parts: int = 11,
+        core_row: int = 5,
+        rows: int = 1,
+    ):
         """rows: decode tokens (1 .. 4). The reducer stacks every core's partial rows in one tile, so
         parts * rows must fit 32: 3-4 tokens use 8 parts of 11 K tiles (the first 8 of the 11 cores)."""
         self.mesh, self.top_k, self.rows = mesh, top_k, rows
@@ -36,7 +51,9 @@ class Router:
 
         def row(dtype):
             n = max(16, self.rows * self.top_k)
-            return ttnn.allocate_tensor_on_device(ttnn.Shape([1, n]), dtype, ttnn.ROW_MAJOR_LAYOUT, self.mesh, L1)
+            return ttnn.allocate_tensor_on_device(
+                ttnn.Shape([1, n]), dtype, ttnn.ROW_MAJOR_LAYOUT, self.mesh, L1
+            )
 
         return row(ttnn.uint16), row(ttnn.bfloat16)
 
@@ -56,11 +73,27 @@ class Router:
             cb(crs, cb_e, f32, FP32_TILE, n),
             cb(crs, cb_out, bf16, 128, 1),
         ]
-        reader_rt, writer_rt, compute_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
+        reader_rt, writer_rt, compute_rt = (
+            ttnn.RuntimeArgs(),
+            ttnn.RuntimeArgs(),
+            ttnn.RuntimeArgs(),
+        )
         for i, c in enumerate(self.cores):
             red = int(i == 0)
-            reader_rt[c.x][c.y] = [x.buffer_address(), w.buffer_address(), i * self.kt, red]
-            writer_rt[c.x][c.y] = [i, self.red.x, self.red.y, red, ids.buffer_address(), wts.buffer_address()]
+            reader_rt[c.x][c.y] = [
+                x.buffer_address(),
+                w.buffer_address(),
+                i * self.kt,
+                red,
+            ]
+            writer_rt[c.x][c.y] = [
+                i,
+                self.red.x,
+                self.red.y,
+                red,
+                ids.buffer_address(),
+                wts.buffer_address(),
+            ]
             compute_rt[c.x][c.y] = [red]
         sem_id = 0
         dm = ttnn.DataMovementConfigDescriptor
@@ -68,9 +101,13 @@ class Router:
             ttnn.KernelDescriptor(
                 kernel_source=str(KERNELS / "router_reader.cpp"),
                 core_ranges=crs,
-                compile_time_args=[cb_x, cb_w, cb_j, self.kt, n, self.rows] + accessor(x) + accessor(w),
+                compile_time_args=[cb_x, cb_w, cb_j, self.kt, n, self.rows]
+                + accessor(x)
+                + accessor(w),
                 runtime_args=reader_rt,
-                config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
+                config=dm(
+                    processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0
+                ),
             ),
             ttnn.KernelDescriptor(
                 kernel_source=str(KERNELS / "router_writer.cpp"),
@@ -90,16 +127,35 @@ class Router:
                 + accessor(ids)
                 + accessor(wts),
                 runtime_args=writer_rt,
-                config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
+                config=dm(
+                    processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1
+                ),
             ),
             ttnn.KernelDescriptor(
                 kernel_source=str(KERNELS / "router_compute.cpp"),
                 core_ranges=crs,
-                compile_time_args=[cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, self.kt, n],
+                compile_time_args=[
+                    cb_x,
+                    cb_w,
+                    cb_j,
+                    cb_partial,
+                    cb_part,
+                    cb_e,
+                    self.kt,
+                    n,
+                ],
                 runtime_args=compute_rt,
-                config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True, math_approx_mode=False),
+                config=ttnn.ComputeConfigDescriptor(
+                    math_fidelity=ttnn.MathFidelity.HiFi4,
+                    fp32_dest_acc_en=True,
+                    math_approx_mode=False,
+                ),
             ),
         ]
         sems = [ttnn.SemaphoreDescriptor(id=sem_id, core_ranges=crs, initial_value=0)]
         program = ttnn.ProgramDescriptor(kernels=kernels, semaphores=sems, cbs=cbs)
-        return (program, [x, w, ids, wts]) if build else ttnn.generic_op([x, w, ids, wts], program)
+        return (
+            (program, [x, w, ids, wts])
+            if build
+            else ttnn.generic_op([x, w, ids, wts], program)
+        )

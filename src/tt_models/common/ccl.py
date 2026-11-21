@@ -11,8 +11,17 @@ class _Semaphores:
 
     def __init__(self, mesh: ttnn.MeshDevice):
         grid = mesh.compute_with_storage_grid_size()
-        cores = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(grid.x - 1, grid.y - 1))})
-        self.gather = [[ttnn.create_global_semaphore(mesh, cores, 0) for _ in range(2)] for _ in range(2)]
+        cores = ttnn.CoreRangeSet(
+            {
+                ttnn.CoreRange(
+                    ttnn.CoreCoord(0, 0), ttnn.CoreCoord(grid.x - 1, grid.y - 1)
+                )
+            }
+        )
+        self.gather = [
+            [ttnn.create_global_semaphore(mesh, cores, 0) for _ in range(2)]
+            for _ in range(2)
+        ]
         self.barrier = [ttnn.create_global_semaphore(mesh, cores, 0) for _ in range(2)]
         self.turn = 0
 
@@ -59,9 +68,13 @@ def all_reduce(x: ttnn.Tensor) -> ttnn.Tensor:
     )
     x.deallocate(True)
     # Gather on dim 1: fast_reduce_nc over dim 0 summed only the first row of a [2, 1, 32, W] tile correctly.
-    out = ttnn.experimental.fast_reduce_nc(g, dims=[1], compute_kernel_config=HIFI4, memory_config=mem)
+    out = ttnn.experimental.fast_reduce_nc(
+        g, dims=[1], compute_kernel_config=HIFI4, memory_config=mem
+    )
     g.deallocate(True)
-    if out.shape != shape:  # the gather drops the logical row count; restoring it is metadata only
+    if (
+        out.shape != shape
+    ):  # the gather drops the logical row count; restoring it is metadata only
         out = ttnn.reshape(out, shape, out.padded_shape)
     return out
 

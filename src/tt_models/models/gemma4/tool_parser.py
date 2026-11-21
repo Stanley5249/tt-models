@@ -32,15 +32,21 @@ def _object_arguments(tool):
     """A non-strict tool as a strict one whose arguments are any object."""
     if tool.function.strict is not False:
         return tool
-    function = tool.function.model_copy(update={"strict": True, "parameters": {"type": "object"}})
+    function = tool.function.model_copy(
+        update={"strict": True, "parameters": {"type": "object"}}
+    )
     return tool.model_copy(update={"function": function})
 
 
 @register_vllm_structural_tag(TAG_MODEL)
-def gemma4_structural_tag(function_tools, builtin_tools, tool_choice, reasoning, token_suffix):
+def gemma4_structural_tag(
+    function_tools, builtin_tools, tool_choice, reasoning, token_suffix
+):
     """vLLM's builder signature over xgrammar's Gemma 4 tag (no token suffix in this format)."""
     if token_suffix:
-        raise ValueError(f"the Gemma 4 structural tag takes no token suffix, got {token_suffix!r}")
+        raise ValueError(
+            f"the Gemma 4 structural tag takes no token suffix, got {token_suffix!r}"
+        )
     return get_gemma_4_structural_tag(
         tools=[_object_arguments(t) for t in function_tools],
         builtin_tools=builtin_tools,

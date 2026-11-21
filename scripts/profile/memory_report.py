@@ -33,11 +33,18 @@ def main():
     args = ap.parse_args()
     with open_n300(trace_region_size=100_000_000) as mesh:
         report(mesh, "mesh open")
-        model = Gemma4TT(mesh, Checkpoint(), max_batch=args.users, max_seq_len=args.context)
+        model = Gemma4TT(
+            mesh, Checkpoint(), max_batch=args.users, max_seq_len=args.context
+        )
         report(mesh, "weights")
         tables = model.allocate_kv_cache(args.users, args.context)
         report(mesh, f"kv {model.kv.num_blocks} blocks")
-        model.decode(torch.zeros(args.users, dtype=torch.long), torch.zeros(args.users, dtype=torch.long), tables, trace=True)
+        model.decode(
+            torch.zeros(args.users, dtype=torch.long),
+            torch.zeros(args.users, dtype=torch.long),
+            tables,
+            trace=True,
+        )
         report(mesh, f"decode trace B={args.users}")
         model.prefill(torch.randint(100, 1000, (args.prefill,)), 0, tables[:, 0])
         report(mesh, f"after prefill {args.prefill}")

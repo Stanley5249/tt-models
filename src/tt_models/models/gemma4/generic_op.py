@@ -13,7 +13,12 @@ FP32_TILE = 4096
 
 
 def tile_bytes(dtype) -> int:
-    return {ttnn.bfloat4_b: BFP4_TILE, ttnn.bfloat8_b: BFP8_TILE, ttnn.bfloat16: BF16_TILE, ttnn.float32: FP32_TILE}[dtype]
+    return {
+        ttnn.bfloat4_b: BFP4_TILE,
+        ttnn.bfloat8_b: BFP8_TILE,
+        ttnn.bfloat16: BF16_TILE,
+        ttnn.float32: FP32_TILE,
+    }[dtype]
 
 
 def cb(cores, index, dtype, page, pages):
@@ -21,7 +26,11 @@ def cb(cores, index, dtype, page, pages):
     return ttnn.CBDescriptor(
         total_size=page * pages,
         core_ranges=cores,
-        format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=index, data_format=dtype, page_size=page)],
+        format_descriptors=[
+            ttnn.CBFormatDescriptor(
+                buffer_index=index, data_format=dtype, page_size=page
+            )
+        ],
     )
 
 

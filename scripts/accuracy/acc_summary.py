@@ -7,8 +7,12 @@ import json
 import sys
 
 for path in sys.argv[1:]:
-    rows = [r for r in json.load(open(path))["rows"] if "sec" in r]  # decode rows only (prefill rows lack "sec")
+    rows = [
+        r for r in json.load(open(path))["rows"] if "sec" in r
+    ]  # decode rows only (prefill rows lack "sec")
     top1 = sum(r["top1"] for r in rows) / len(rows)
     kl = sum(r["kl"] for r in rows) / len(rows)
     top5 = sum(r["top5_overlap"] for r in rows) / len(rows)
-    print(f"{path}: rows={len(rows)} top1={top1:.3f} top5_overlap={top5:.2f} kl={kl:.4f}")
+    print(
+        f"{path}: rows={len(rows)} top1={top1:.3f} top5_overlap={top5:.2f} kl={kl:.4f}"
+    )

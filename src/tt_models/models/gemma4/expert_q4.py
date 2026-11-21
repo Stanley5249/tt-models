@@ -21,19 +21,29 @@ import ttnn
 
 from tt_models.common.config import TILE
 from tt_models.models.gemma4.expert_stream import _id_bytes, pad_down
-from tt_models.models.gemma4.generic_op import BF16_TILE, KERNELS, accessor, cb, tile_bytes
+from tt_models.models.gemma4.generic_op import (
+    BF16_TILE,
+    KERNELS,
+    accessor,
+    cb,
+    tile_bytes,
+)
 from tt_models.models.gemma4.q4 import BLOCK, factor_blocks
 
 KERNELS_Q4 = "expert_q4_gate_up"
 
 
-def q4_factor(w: torch.Tensor, dim: int = -2, chunk: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
+def q4_factor(
+    w: torch.Tensor, dim: int = -2, chunk: int = 8
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Factor w into integers q (clamped to -7..7) and steps s along 32-blocks of `dim`.
 
     Returns (q as float with w's shape, s with dim shrunk 32x); see q4.factor_blocks. Works on
     `chunk` slices of dim 0 at a time to bound host memory."""
     if w.dim() > 2 and w.shape[0] > chunk:
-        parts = [q4_factor(w[i : i + chunk], dim, chunk) for i in range(0, w.shape[0], chunk)]
+        parts = [
+            q4_factor(w[i : i + chunk], dim, chunk) for i in range(0, w.shape[0], chunk)
+        ]
         return torch.cat([p[0] for p in parts]), torch.cat([p[1] for p in parts])
     w = w.float().movedim(dim, -1)
     q, s = factor_blocks(w.reshape(*w.shape[:-1], -1, BLOCK))
@@ -47,11 +57,38 @@ def step_tiles(s: torch.Tensor, groups: int) -> torch.Tensor:
     return torch.nn.functional.pad(s, (0, 0, 0, groups * TILE - kb))
 
 
-def gate_up_q4_op(assign, cores, x, ids, weights, scale, w, steps, act, *, kx, slots_per_core, pairs, n_scale, rows=1, slots_per_row=8):
+def gate_up_q4_op(
+    assign,
+    cores,
+    x,
+    ids,
+    weights,
+    scale,
+    w,
+    steps,
+    act,
+    *,
+    kx,
+    slots_per_core,
+    pairs,
+    n_scale,
+    rows=1,
+    slots_per_row=8,
+):
     """gate|up from Q4_0 tiles (kernels/expert_q4_gate_up_*): as expert_stream.gate_up_op, with the step
     tensor steps ([1, E, groups * 32, N] BF16, interleaved). Each core's slots must belong to one token
     (slot s to token s // slots_per_row)."""
-    cb_x, cb_w, cb_sc, cb_rs, cb_ws, cb_m, cb_r, cb_one, cb_act = 0, 1, 2, 3, 4, 5, 6, 7, 16
+    cb_x, cb_w, cb_sc, cb_rs, cb_ws, cb_m, cb_r, cb_one, cb_act = (
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        16,
+    )
     block_k = 11  # the stock reader's blocks (expert_gate_up_reader.cpp)
     assert kx % block_k == 0, f"{kx} K tiles do not split into blocks of {block_k}"
     blocks = kx // block_k
@@ -71,8 +108,17 @@ def gate_up_q4_op(assign, cores, x, ids, weights, scale, w, steps, act, *, kx, s
     reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
     for core, bank, _, vc, slot0, pair_j, act_pair in assign:
         row = slot0 // slots_per_row
-        assert (slot0 + slots_per_core - 1) // slots_per_row == row, "a core's slots must belong to one token"
-        reader_rt[core.x][core.y] = [w.buffer_address(), ids.buffer_address(), bank, vc, slot0, pair_j]
+        assert (slot0 + slots_per_core - 1) // slots_per_row == row, (
+            "a core's slots must belong to one token"
+        )
+        reader_rt[core.x][core.y] = [
+            w.buffer_address(),
+            ids.buffer_address(),
+            bank,
+            vc,
+            slot0,
+            pair_j,
+        ]
         writer_rt[core.x][core.y] = [
             x.buffer_address(),
             act.buffer_address(),
@@ -86,11 +132,48 @@ def gate_up_q4_op(assign, cores, x, ids, weights, scale, w, steps, act, *, kx, s
             row,
         ]
     id_bytes = _id_bytes(max(a[4] for a in assign) + slots_per_core)
-    reader_ct = [cb_w, cb_rs, slots_per_core, blocks, 2 * block_k, 2, tb, kx * 2 * tb, 0, 0, 0, id_bytes] + accessor(ids)
-    writer_ct = [cb_x, cb_sc, cb_act, cb_ws, kx, slots_per_core, pairs, n_scale, id_bytes, cb_m, cb_one, rows]
+    reader_ct = [
+        cb_w,
+        cb_rs,
+        slots_per_core,
+        blocks,
+        2 * block_k,
+        2,
+        tb,
+        kx * 2 * tb,
+        0,
+        0,
+        0,
+        id_bytes,
+    ] + accessor(ids)
+    writer_ct = [
+        cb_x,
+        cb_sc,
+        cb_act,
+        cb_ws,
+        kx,
+        slots_per_core,
+        pairs,
+        n_scale,
+        id_bytes,
+        cb_m,
+        cb_one,
+        rows,
+    ]
     for t in (x, act, ids, weights, scale):
         writer_ct += accessor(t)
-    compute_ct = [cb_x, cb_w, cb_sc, cb_act, slots_per_core, blocks, block_k, cb_m, cb_r, cb_one]
+    compute_ct = [
+        cb_x,
+        cb_w,
+        cb_sc,
+        cb_act,
+        slots_per_core,
+        blocks,
+        block_k,
+        cb_m,
+        cb_r,
+        cb_one,
+    ]
     dm = ttnn.DataMovementConfigDescriptor
     kernels = [
         ttnn.KernelDescriptor(
@@ -112,17 +195,47 @@ def gate_up_q4_op(assign, cores, x, ids, weights, scale, w, steps, act, *, kx, s
             core_ranges=cores,
             compile_time_args=compute_ct,
             runtime_args=[],
-            config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi3, fp32_dest_acc_en=True, math_approx_mode=False),
+            config=ttnn.ComputeConfigDescriptor(
+                math_fidelity=ttnn.MathFidelity.HiFi3,
+                fp32_dest_acc_en=True,
+                math_approx_mode=False,
+            ),
         ),
     ]
     program = ttnn.ProgramDescriptor(kernels=kernels, semaphores=[], cbs=cbs)
     return ttnn.generic_op([w, x, ids, weights, scale, steps, act], program)
 
 
-def down_q4_op(assign, cores, act, ids, w, steps, out, *, slots, kt, cols, banks, bank_cols, n_tiles, compact_chunk0=None):
+def down_q4_op(
+    assign,
+    cores,
+    act,
+    ids,
+    w,
+    steps,
+    out,
+    *,
+    slots,
+    kt,
+    cols,
+    banks,
+    bank_cols,
+    n_tiles,
+    compact_chunk0=None,
+):
     """Batch-1 down from Q4_0 tiles (kernels/expert_q4_down_*): as expert_stream.down_op with rows=1, plus
     the step tensor steps ([1, E, 32, banks * bank_cols * 32] BF16, interleaved, rows 0 .. kt - 1 used)."""
-    cb_in0, cb_w, cb_rs, cb_zero, cb_scr, cb_m, cb_racc, cb_one, cb_out = 0, 1, 3, 4, 5, 6, 7, 8, 16
+    cb_in0, cb_w, cb_rs, cb_zero, cb_scr, cb_m, cb_racc, cb_one, cb_out = (
+        0,
+        1,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        16,
+    )
     tb = tile_bytes(w.dtype)
     compact = compact_chunk0 is not None
     out_dtype = ttnn.float32 if compact else ttnn.bfloat16
@@ -142,7 +255,13 @@ def down_q4_op(assign, cores, act, ids, w, steps, out, *, slots, kt, cols, banks
     reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
     for i, (core, bank, r, vc) in enumerate(assign):
         j0 = r * cols
-        reader_rt[core.x][core.y] = [w.buffer_address(), ids.buffer_address(), bank, vc, j0]
+        reader_rt[core.x][core.y] = [
+            w.buffer_address(),
+            ids.buffer_address(),
+            bank,
+            vc,
+            j0,
+        ]
         zero = pad if compact and i == 0 else 0
         writer_rt[core.x][core.y] = [
             act.buffer_address(),
@@ -197,7 +316,11 @@ def down_q4_op(assign, cores, act, ids, w, steps, out, *, slots, kt, cols, banks
             core_ranges=cores,
             compile_time_args=compute_ct,
             runtime_args=[],
-            config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi3, fp32_dest_acc_en=True, math_approx_mode=False),
+            config=ttnn.ComputeConfigDescriptor(
+                math_fidelity=ttnn.MathFidelity.HiFi3,
+                fp32_dest_acc_en=True,
+                math_approx_mode=False,
+            ),
         ),
     ]
     program = ttnn.ProgramDescriptor(kernels=kernels, semaphores=[], cbs=cbs)
@@ -210,7 +333,9 @@ class Q4Experts:
     gate_up and down hold the integers in the layouts of the BFP4 weights (expert_stream.py), so the
     weight readers are unchanged; the step tensors follow the writers' layouts."""
 
-    def __init__(self, loader, ckpt, layer_idx: int, stream, assemble_gate_up, expert_pad: int):
+    def __init__(
+        self, loader, ckpt, layer_idx: int, stream, assemble_gate_up, expert_pad: int
+    ):
         p = f"layers.{layer_idx}."
         tp = loader.tp
         memo = {}
@@ -218,9 +343,14 @@ class Q4Experts:
         def factored(name):
             if name not in memo:
                 if name == "gate_up":  # [E, 2I, H] -> [E, H, 2I], blocks along H
-                    memo[name] = q4_factor(ckpt.get(p + "experts.gate_up_proj").transpose(1, 2), dim=-2)
+                    memo[name] = q4_factor(
+                        ckpt.get(p + "experts.gate_up_proj").transpose(1, 2), dim=-2
+                    )
                 else:  # [E, H, I] -> [E, I, H], blocks along I
-                    memo[name] = q4_factor(ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous(), dim=-2)
+                    memo[name] = q4_factor(
+                        ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous(),
+                        dim=-2,
+                    )
             return memo[name]
 
         groups = -(-stream.kx // TILE)
@@ -238,16 +368,26 @@ class Q4Experts:
             shard_dim=-1,
         )
         self.down = loader.put(
-            f"L{layer_idx}.exp_down_q4_p{width}", lambda: pad_down(factored("down")[0], width)[None], ttnn.bfloat4_b, shard_dim=-2
+            f"L{layer_idx}.exp_down_q4_p{width}",
+            lambda: pad_down(factored("down")[0], width)[None],
+            ttnn.bfloat4_b,
+            shard_dim=-2,
         )
 
         def down_steps():  # [E, I / 32, W] -> per chip [E, 32, W], rows 0 .. kt - 1
             s = pad_down(factored("down")[1], width)
             e = s.shape[0]
             s = s.reshape(e, tp, kt, width)
-            return torch.nn.functional.pad(s, (0, 0, 0, TILE - kt)).reshape(e, tp * TILE, width)[None]
+            return torch.nn.functional.pad(s, (0, 0, 0, TILE - kt)).reshape(
+                e, tp * TILE, width
+            )[None]
 
-        self.down_steps = loader.put(f"L{layer_idx}.exp_down_q4s_p{width}", down_steps, ttnn.bfloat16, shard_dim=-2)
+        self.down_steps = loader.put(
+            f"L{layer_idx}.exp_down_q4s_p{width}",
+            down_steps,
+            ttnn.bfloat16,
+            shard_dim=-2,
+        )
         memo.clear()
         self.stream = stream
 

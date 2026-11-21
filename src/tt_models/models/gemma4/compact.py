@@ -25,7 +25,9 @@ def to_compact(v: torch.Tensor) -> torch.Tensor:
     chunks = torch.zeros(n, tiles * CHUNKS_PER_TILE, CHUNK)
     chunks[:, : h // CHUNK] = v.float().reshape(n, -1, CHUNK)
     # chunk q of a tile = face q // 16, face row q % 16 -> tile row (face // 2) * 16 + r, cols (face % 2) * 16 + j
-    c = chunks.reshape(n, tiles, 2, 2, 16, CHUNK)  # [n, tile, face_row_half, face_col_half, r, j]
+    c = chunks.reshape(
+        n, tiles, 2, 2, 16, CHUNK
+    )  # [n, tile, face_row_half, face_col_half, r, j]
     out = c.permute(2, 4, 0, 1, 3, 5).reshape(TILE, n * tiles * TILE)
     return out
 
@@ -37,7 +39,9 @@ def from_compact(t: torch.Tensor, n: int, h: int) -> torch.Tensor:
     return c.reshape(n, tiles * CHUNKS_PER_TILE * CHUNK)[:, :h]
 
 
-def compact_tensor(mesh, v: torch.Tensor, memory_config=ttnn.DRAM_MEMORY_CONFIG) -> ttnn.Tensor:
+def compact_tensor(
+    mesh, v: torch.Tensor, memory_config=ttnn.DRAM_MEMORY_CONFIG
+) -> ttnn.Tensor:
     """Host vectors [n, H] -> device compact FP32 [1, 1, 32, n * V * 32], replicated."""
     return ttnn.from_torch(
         to_compact(v)[None, None],

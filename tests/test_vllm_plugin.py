@@ -46,4 +46,7 @@ def test_explicit_override_wins(monkeypatch, name):
     monkeypatch.setenv("TT_MODEL_CLASS_OVERRIDES", f"{name}={OTHER}")
     seed(ARCH, OTHER)  # what vllm-tt-plugin registers for the override
     register()
-    assert (registered(ARCH).module_name, registered(ARCH).class_name) == ("some.module", "OtherClass")
+    assert (registered(ARCH).module_name, registered(ARCH).class_name) == (
+        "some.module",
+        "OtherClass",
+    )

@@ -36,26 +36,43 @@ import torch
 import ttnn
 
 from tt_models.common.config import TILE
-from tt_models.models.gemma4.generic_op import BF16_TILE, KERNELS, accessor, cb, tile_bytes
+from tt_models.models.gemma4.generic_op import (
+    BF16_TILE,
+    KERNELS,
+    accessor,
+    cb,
+    tile_bytes,
+)
 
 
 def _bankline_cores(mesh, banks, per_bank, exclude=()):
     """per_bank logical cores per DRAM bank, nearest (Manhattan) to the bank's optimal NOC0 reader."""
-    opt = mesh.get_optimal_dram_bank_to_logical_worker_assignment(ttnn.NOC.NOC_0, ttnn.MeshCoordinate(0, 0))
+    opt = mesh.get_optimal_dram_bank_to_logical_worker_assignment(
+        ttnn.NOC.NOC_0, ttnn.MeshCoordinate(0, 0)
+    )
     grid = mesh.compute_with_storage_grid_size()
-    free = {(x, y) for x in range(grid.x) for y in range(grid.y)} - {(c.x, c.y) for c in exclude}
+    free = {(x, y) for x in range(grid.x) for y in range(grid.y)} - {
+        (c.x, c.y) for c in exclude
+    }
     out = {b: [] for b in banks}
-    for _ in range(per_bank):  # one core per bank per round, so no bank takes all the near cores
+    for _ in range(
+        per_bank
+    ):  # one core per bank per round, so no bank takes all the near cores
         for b in banks:
             w = opt[b]
-            x, y = min(free, key=lambda c: (abs(c[0] - w.x) + abs(c[1] - w.y), abs(c[1] - w.y), c))
+            x, y = min(
+                free,
+                key=lambda c: (abs(c[0] - w.x) + abs(c[1] - w.y), abs(c[1] - w.y), c),
+            )
             free.discard((x, y))
             out[b].append(ttnn.CoreCoord(x, y))
     placed = [(c, b, r) for b in banks for r, c in enumerate(out[b])]
     vcs = []
     for i, (core, bank, r) in enumerate(placed):
         vc = (bank + r) & 3
-        for j in range(i):  # as the DeepSeek / gpt-oss streamers: distinct VCs along a row
+        for j in range(
+            i
+        ):  # as the DeepSeek / gpt-oss streamers: distinct VCs along a row
             if placed[j][0].y == core.y and vcs[j] == vc:
                 vc = (vc + 1) & 3
         vcs.append(vc)
@@ -86,7 +103,9 @@ def _kernels(cores, name, reader, writer, compute, fidelity=ttnn.MathFidelity.Lo
             core_ranges=cores,
             compile_time_args=compute,
             runtime_args=[],
-            config=ttnn.ComputeConfigDescriptor(math_fidelity=fidelity, fp32_dest_acc_en=True, math_approx_mode=False),
+            config=ttnn.ComputeConfigDescriptor(
+                math_fidelity=fidelity, fp32_dest_acc_en=True, math_approx_mode=False
+            ),
         ),
     ]
 
@@ -94,7 +113,9 @@ def _kernels(cores, name, reader, writer, compute, fidelity=ttnn.MathFidelity.Lo
 def _const_row(mesh, values, dtype):
     """Row-major replicated [1, n] constant (the dense MLP's fixed ids, weights and scales)."""
     return ttnn.from_torch(
-        torch.tensor([values], dtype=torch.float32 if dtype != ttnn.uint16 else torch.int32),
+        torch.tensor(
+            [values], dtype=torch.float32 if dtype != ttnn.uint16 else torch.int32
+        ),
         dtype=dtype,
         layout=ttnn.ROW_MAJOR_LAYOUT,
         device=mesh,
@@ -112,7 +133,9 @@ def run(parts):
             if id(t) not in seen:
                 seen.add(id(t))
                 tensors.append(t)
-    return ttnn.generic_op(tensors, ttnn.merge_program_descriptors([p for p, _ in parts]))
+    return ttnn.generic_op(
+        tensors, ttnn.merge_program_descriptors([p for p, _ in parts])
+    )
 
 
 def _id_bytes(slots: int) -> int:
@@ -162,7 +185,14 @@ def gate_up_op(
     ]
     reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
     for core, bank, _, vc, slot0, pair_j, act_pair in assign:
-        reader_rt[core.x][core.y] = [w.buffer_address(), ids.buffer_address(), bank, vc, slot0, pair_j]
+        reader_rt[core.x][core.y] = [
+            w.buffer_address(),
+            ids.buffer_address(),
+            bank,
+            vc,
+            slot0,
+            pair_j,
+        ]
         writer_rt[core.x][core.y] = [
             x.buffer_address(),
             act.buffer_address(),
@@ -190,12 +220,33 @@ def gate_up_op(
         id_bytes,
     ]
     reader_ct += accessor(ids)
-    writer_ct = [cb_x, cb_sc, cb_act, cb_ws, kx, slots_per_core, pairs, n_scale, rows, slots_per_row, id_bytes]
+    writer_ct = [
+        cb_x,
+        cb_sc,
+        cb_act,
+        cb_ws,
+        kx,
+        slots_per_core,
+        pairs,
+        n_scale,
+        rows,
+        slots_per_row,
+        id_bytes,
+    ]
     for t in (x, act, ids, weights, scale):
         writer_ct += accessor(t)
     compute_ct = [cb_x, cb_w, cb_sc, cb_act, slots_per_core, blocks, block_k]
     program = ttnn.ProgramDescriptor(
-        kernels=_kernels(cores, "gate_up", (reader_ct, reader_rt), (writer_ct, writer_rt), compute_ct, fidelity), semaphores=[], cbs=cbs
+        kernels=_kernels(
+            cores,
+            "gate_up",
+            (reader_ct, reader_rt),
+            (writer_ct, writer_rt),
+            compute_ct,
+            fidelity,
+        ),
+        semaphores=[],
+        cbs=cbs,
     )
     ios = [w, x, ids, weights, scale, act]
     return (program, ios) if build else ttnn.generic_op(ios, program)
@@ -229,7 +280,9 @@ def down_op(
     compact = compact_chunk0 is not None
     out_dtype = ttnn.float32 if compact else ttnn.bfloat16
     cbs = [
-        cb(cores, cb_in0, ttnn.bfloat16, BF16_TILE, 2 * kt),  # streamed one slot at a time
+        cb(
+            cores, cb_in0, ttnn.bfloat16, BF16_TILE, 2 * kt
+        ),  # streamed one slot at a time
         cb(cores, cb_w, w.dtype, tb, 3 * kt * cols),
         cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
         cb(cores, cb_zero, ttnn.bfloat16, 64, 1),
@@ -240,15 +293,59 @@ def down_op(
     reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
     for i, (core, bank, r, vc) in enumerate(assign):
         j0 = r * cols
-        reader_rt[core.x][core.y] = [w.buffer_address(), ids.buffer_address(), bank, vc, j0]
+        reader_rt[core.x][core.y] = [
+            w.buffer_address(),
+            ids.buffer_address(),
+            bank,
+            vc,
+            j0,
+        ]
         zero = pad if compact and i == 0 else 0
-        writer_rt[core.x][core.y] = [act.buffer_address(), out.buffer_address(), bank, j0, (compact_chunk0 or 0) + chunks, zero]
-    reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, _id_bytes(slots)] + accessor(ids)
-    writer_ct = [cb_in0, cb_out, slots, cols, banks, n_tiles, int(compact), compact_chunk0 or 0, cb_zero, kt, rows, chunks + pad]
+        writer_rt[core.x][core.y] = [
+            act.buffer_address(),
+            out.buffer_address(),
+            bank,
+            j0,
+            (compact_chunk0 or 0) + chunks,
+            zero,
+        ]
+    reader_ct = [
+        cb_w,
+        cb_rs,
+        slots,
+        kt,
+        cols,
+        bank_cols,
+        tb,
+        _id_bytes(slots),
+    ] + accessor(ids)
+    writer_ct = [
+        cb_in0,
+        cb_out,
+        slots,
+        cols,
+        banks,
+        n_tiles,
+        int(compact),
+        compact_chunk0 or 0,
+        cb_zero,
+        kt,
+        rows,
+        chunks + pad,
+    ]
     writer_ct += accessor(act) + accessor(out)
     compute_ct = [cb_in0, cb_w, cb_out, slots, kt, cols]
     program = ttnn.ProgramDescriptor(
-        kernels=_kernels(cores, "down", (reader_ct, reader_rt), (writer_ct, writer_rt), compute_ct, fidelity), semaphores=[], cbs=cbs
+        kernels=_kernels(
+            cores,
+            "down",
+            (reader_ct, reader_rt),
+            (writer_ct, writer_rt),
+            compute_ct,
+            fidelity,
+        ),
+        semaphores=[],
+        cbs=cbs,
     )
     return ttnn.generic_op([w, act, ids, out], program)
 
@@ -257,11 +354,25 @@ class ExpertStream:
     """Routed experts of one layer for `rows` decode tokens (one op pair for all of them)."""
 
     def __init__(
-        self, mesh, hidden: int, expert_local: int, top_k: int, n_experts: int, gate_up_readers=4, down_readers=2, *, rows: int = 1
+        self,
+        mesh,
+        hidden: int,
+        expert_local: int,
+        top_k: int,
+        n_experts: int,
+        gate_up_readers=4,
+        down_readers=2,
+        *,
+        rows: int = 1,
     ):
         self.mesh = mesh
         self.banks = mesh.dram_grid_size().x
-        self.hidden, self.top_k, self.n_experts, self.rows = hidden, top_k, n_experts, rows
+        self.hidden, self.top_k, self.n_experts, self.rows = (
+            hidden,
+            top_k,
+            n_experts,
+            rows,
+        )
         self.slots = top_k * rows
         self.kx = hidden // TILE  # 88
         self.pairs = expert_local // TILE  # 11 real (gate, up) column pairs per chip
@@ -273,20 +384,32 @@ class ExpertStream:
         self.gu_slots = self.slots // gate_up_readers
         self.down_cols = self.bank_cols // down_readers
         assert self.down_cols <= 4, "fp32 dest holds 4 tiles"
-        gu, self.gu_cores = _bankline_cores(mesh, list(range(self.pairs)), gate_up_readers)
+        gu, self.gu_cores = _bankline_cores(
+            mesh, list(range(self.pairs)), gate_up_readers
+        )
         self.gu_assign = [(c, b, r, v, r * self.gu_slots, 0, b) for c, b, r, v in gu]
-        self.down_assign, self.down_cores = _bankline_cores(mesh, list(range(self.banks)), down_readers)
+        self.down_assign, self.down_cores = _bankline_cores(
+            mesh, list(range(self.banks)), down_readers
+        )
         self.act_mem = ttnn.L1_MEMORY_CONFIG
 
     def act_tensor(self):
         return ttnn.allocate_tensor_on_device(
-            ttnn.Shape([1, 1, TILE, self.slots * self.pairs * TILE]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, self.act_mem
+            ttnn.Shape([1, 1, TILE, self.slots * self.pairs * TILE]),
+            ttnn.bfloat16,
+            ttnn.TILE_LAYOUT,
+            self.mesh,
+            self.act_mem,
         )
 
     def out_tensor(self, memory_config):
         """[1, 1, rows, H]: the kernels write the token rows of every tile; padding rows stay unwritten."""
         return ttnn.allocate_tensor_on_device(
-            ttnn.Shape([1, 1, self.rows, self.hidden]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, memory_config
+            ttnn.Shape([1, 1, self.rows, self.hidden]),
+            ttnn.bfloat16,
+            ttnn.TILE_LAYOUT,
+            self.mesh,
+            memory_config,
         )
 
     def gate_up(self, x, ids, weights, scale, w_gate_up, act):
@@ -335,41 +458,71 @@ class ExpertStream:
 class MlpStream:
     """The shared dense MLP of one layer for up to 4 decode tokens, through the expert stream kernels."""
 
-    def __init__(self, mesh, hidden: int, mlp_pad: int, down_readers=2, down_slots=4, fidelity=ttnn.MathFidelity.HiFi2, exclude=()):
+    def __init__(
+        self,
+        mesh,
+        hidden: int,
+        mlp_pad: int,
+        down_readers=2,
+        down_slots=4,
+        fidelity=ttnn.MathFidelity.HiFi2,
+        exclude=(),
+    ):
         """exclude: cores left free for an op that runs merged with gate_up (the router)."""
         self.mesh = mesh
-        self.fidelity = fidelity  # BFP8 weights; the ttnn MLP used HiFi2 (LoFi: PCC 0.99985 vs it)
+        self.fidelity = (
+            fidelity  # BFP8 weights; the ttnn MLP used HiFi2 (LoFi: PCC 0.99985 vs it)
+        )
         self.banks = banks = mesh.dram_grid_size().x
         self.hidden = hidden
         self.kx = hidden // TILE  # 88
         half = mlp_pad // TILE  # 36 gate (and 36 up) column tiles per chip
-        assert half % banks == 0, "gate|up column pairs must split evenly over the DRAM banks"
+        assert half % banks == 0, (
+            "gate|up column pairs must split evenly over the DRAM banks"
+        )
         self.per_bank = half // banks  # 3 pairs per bank
         self.row_tiles = 2 * self.per_bank  # 6 tiles per bank per K row
         self.h_tiles = half
-        gu, self.gu_cores = _bankline_cores(mesh, list(range(banks)), self.per_bank, exclude=exclude)
+        gu, self.gu_cores = _bankline_cores(
+            mesh, list(range(banks)), self.per_bank, exclude=exclude
+        )
         # pair j of bank b: gate column b + 12 j -> h tile b + 12 j
         self.gu_assign = [(c, b, j, v, 0, j, b + banks * j) for c, b, j, v in gu]
         self.n_tiles = hidden // TILE
         self.bank_cols = -(-self.n_tiles // banks)
         self.down_width = self.bank_cols * banks * TILE
         assert half % down_slots == 0
-        self.down_slots, self.down_kt = down_slots, half // down_slots  # 4 slots of 9 K tiles
+        self.down_slots, self.down_kt = (
+            down_slots,
+            half // down_slots,
+        )  # 4 slots of 9 K tiles
         self.down_cols = self.bank_cols // down_readers
-        self.down_assign, self.down_cores = _bankline_cores(mesh, list(range(banks)), down_readers)
+        self.down_assign, self.down_cores = _bankline_cores(
+            mesh, list(range(banks)), down_readers
+        )
         self.ids0 = _const_row(mesh, [0] * 16, ttnn.uint16)
-        self.ids_down = _const_row(mesh, list(range(down_slots)) + [0] * (16 - down_slots), ttnn.uint16)
+        self.ids_down = _const_row(
+            mesh, list(range(down_slots)) + [0] * (16 - down_slots), ttnn.uint16
+        )
         self.ones = _const_row(mesh, [1.0] * 16, ttnn.bfloat16)
 
     def h_tensor(self, rows: int = 1):
         return ttnn.allocate_tensor_on_device(
-            ttnn.Shape([1, 1, rows, self.h_tiles * TILE]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG
+            ttnn.Shape([1, 1, rows, self.h_tiles * TILE]),
+            ttnn.bfloat16,
+            ttnn.TILE_LAYOUT,
+            self.mesh,
+            ttnn.L1_MEMORY_CONFIG,
         )
 
     def out_tensor(self, rows: int):
         """[1, 1, rows, H] row form, for down without compact_chunk0."""
         return ttnn.allocate_tensor_on_device(
-            ttnn.Shape([1, 1, rows, self.hidden]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG
+            ttnn.Shape([1, 1, rows, self.hidden]),
+            ttnn.bfloat16,
+            ttnn.TILE_LAYOUT,
+            self.mesh,
+            ttnn.L1_MEMORY_CONFIG,
         )
 
     def gate_up(self, x, w_gate_up, h, rows: int = 1, build=False):

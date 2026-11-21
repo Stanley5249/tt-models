@@ -26,10 +26,14 @@ def factor_blocks(b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     done = zero.clone()
     for k in range(1, 9):
         r = b / (s0 / k)
-        ok = ((r - r.round()).abs().amax(-1, keepdim=True) < STEP_TOL) & (r.round().abs().amax(-1, keepdim=True) <= 8)
+        ok = ((r - r.round()).abs().amax(-1, keepdim=True) < STEP_TOL) & (
+            r.round().abs().amax(-1, keepdim=True) <= 8
+        )
         s = torch.where(ok & ~done, s0 / k, s)
         done |= ok
     if not bool(done.all()):
-        raise ValueError(f"{int((~done).sum())} blocks are not integer multiples of one step within -8..8")
+        raise ValueError(
+            f"{int((~done).sum())} blocks are not integer multiples of one step within -8..8"
+        )
     q = (b / s).round()
     return q, torch.where(zero, torch.zeros_like(s), s)

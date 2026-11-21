@@ -32,7 +32,9 @@ def main():
     cfg = ckpt.config
     k = cfg.top_k_experts
     with open_n300(trace_region_size=50_000_000) as mesh:
-        loader = WeightLoader(mesh, Path("cache/gemma4-26b-qat-tp2-bfp8-bfp8-bfp4-bfp8"))
+        loader = WeightLoader(
+            mesh, Path("cache/gemma4-26b-qat-tp2-bfp8-bfp8-bfp4-bfp8")
+        )
         for rows in args.rows:
             router = Router(mesh, cfg.hidden_size, cfg.num_experts, k, rows=rows)
             for layer in args.layers:
@@ -56,21 +58,36 @@ def main():
                     nh = host(n).float()[0, 0, :rows]
                     wh = host(ff.router).float()[0, 0]
                     for c in range(2):
-                        got_i = host(ids, c).long().flatten()[: rows * k].reshape(rows, k)
-                        got_w = host(wts, c).float().flatten()[: rows * k].reshape(rows, k)
+                        got_i = (
+                            host(ids, c).long().flatten()[: rows * k].reshape(rows, k)
+                        )
+                        got_w = (
+                            host(wts, c).float().flatten()[: rows * k].reshape(rows, k)
+                        )
                         ref_i = host(ids_ref, c).long().reshape(-1, k)[:rows]
                         ref_w = host(w_ref, c).float().reshape(-1, k)[:rows]
                         for b in range(rows):
                             a, bb = got_i[b].tolist(), ref_i[b].tolist()
-                            wa, wb = dict(zip(a, got_w[b].tolist())), dict(zip(bb, ref_w[b].tolist()))
+                            wa, wb = (
+                                dict(zip(a, got_w[b].tolist())),
+                                dict(zip(bb, ref_w[b].tolist())),
+                            )
                             same += set(a) == set(bb)
                             total += 1
-                            wdiff = max(wdiff, max(abs(wa[e] - wb[e]) for e in set(a) & set(bb)))
+                            wdiff = max(
+                                wdiff, max(abs(wa[e] - wb[e]) for e in set(a) & set(bb))
+                            )
                             if c == 0:  # FP32 reference on the device's BF16 inputs
                                 v, i = (nh[b] @ wh).topk(k)
-                                ref = dict(zip(i.tolist(), torch.softmax(v, 0).tolist()))
-                                err_mine.append(max(abs(wa[e] - ref.get(e, 0)) for e in a))
-                                err_gpt.append(max(abs(wb[e] - ref.get(e, 0)) for e in bb))
+                                ref = dict(
+                                    zip(i.tolist(), torch.softmax(v, 0).tolist())
+                                )
+                                err_mine.append(
+                                    max(abs(wa[e] - ref.get(e, 0)) for e in a)
+                                )
+                                err_gpt.append(
+                                    max(abs(wb[e] - ref.get(e, 0)) for e in bb)
+                                )
                 print(
                     f"rows {rows} layer {layer}: same id sets {same}/{total}, max weight diff {wdiff:.4f}; "
                     f"max |w - fp32 ref| router op {max(err_mine):.4f}, topk_router_gpt {max(err_gpt):.4f}",

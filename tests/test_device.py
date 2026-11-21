@@ -22,11 +22,15 @@ PCC = 0.9995
 
 
 def pcc(a, b):
-    return torch.corrcoef(torch.stack([a.float().flatten(), b.float().flatten()]))[0, 1].item()
+    return torch.corrcoef(torch.stack([a.float().flatten(), b.float().flatten()]))[
+        0, 1
+    ].item()
 
 
 def assert_close(got, ref, what):
-    assert pcc(got, ref) > PCC and got.argmax() == ref.argmax(), f"{what}: pcc {pcc(got, ref):.5f}"
+    assert pcc(got, ref) > PCC and got.argmax() == ref.argmax(), (
+        f"{what}: pcc {pcc(got, ref):.5f}"
+    )
 
 
 @pytest.fixture  # one mesh per test: a model keeps its traces and KV until the mesh closes
@@ -36,7 +40,13 @@ def mesh():
 
 
 def model(mesh, max_batch):
-    return Gemma4TT(mesh, FakeCheckpoint(["sliding_attention", "full_attention"]), cache_root=CACHE, max_batch=max_batch, num_layers=2)
+    return Gemma4TT(
+        mesh,
+        FakeCheckpoint(["sliding_attention", "full_attention"]),
+        cache_root=CACHE,
+        max_batch=max_batch,
+        num_layers=2,
+    )
 
 
 @pytest.mark.parametrize(("prompt_len", "batch"), [(64, 1), (64, 4), (1100, 1)])
@@ -56,7 +66,11 @@ def test_decode_matches_prefill(mesh, prompt_len, batch):
         decoded.append(m.decode(toks, torch.tensor([n + i for n in lens]), tables))
     for b in range(batch):
         for i in range(steps):
-            assert_close(decoded[i][b], m.prefill(seqs[b][: lens[b] + i + 1], 0, tables[:, b]), f"user {b} step {i}")
+            assert_close(
+                decoded[i][b],
+                m.prefill(seqs[b][: lens[b] + i + 1], 0, tables[:, b]),
+                f"user {b} step {i}",
+            )
 
 
 def scheduled(m, table: torch.Tensor, start: int, end: int) -> torch.Tensor:
@@ -65,7 +79,9 @@ def scheduled(m, table: torch.Tensor, start: int, end: int) -> torch.Tensor:
     for g, block in enumerate(m.kv.block_sizes):
         t[g, -(-end // block) :] = 0  # not allocated yet
         if m.kv.sliding[g]:
-            t[g, : max(start - m.window + 1, 0) // block] = 0  # freed: wholly outside the window
+            t[g, : max(start - m.window + 1, 0) // block] = (
+                0  # freed: wholly outside the window
+            )
     return t
 
 
@@ -83,8 +99,12 @@ def test_chunked_prefill_and_prefix_hit(mesh):
     t = tables[:, 1]
     for a, b in ((0, 1024), (1024, 2048)):
         m.prefill(seq[:b], a, scheduled(m, t, a, b))
-    assert_close(m.prefill(seq[:L], 2048, scheduled(m, t, 2048, L)), ref, "chunked prefill")
-    step = m.decode(seq[L : L + 1], torch.tensor([L]), scheduled(m, t, L, L + 1)[:, None])[0]
+    assert_close(
+        m.prefill(seq[:L], 2048, scheduled(m, t, 2048, L)), ref, "chunked prefill"
+    )
+    step = m.decode(
+        seq[L : L + 1], torch.tensor([L]), scheduled(m, t, L, L + 1)[:, None]
+    )[0]
     assert_close(step, ref_next, "decode after chunked prefill")
 
     # Row 3 reads row 0's blocks below P, as a prefix-cache hit would.
@@ -94,9 +114,17 @@ def test_chunked_prefill_and_prefix_hit(mesh):
     hit = m.prefill(other[:L], P, scheduled(m, t, P, L))
     assert_close(hit, m.prefill(other[:L], 0, tables[:, 1]), f"prefix hit at {P}")
     # Row 0's decode reads the shared blocks through its global layer.
-    assert_close(m.decode(seq[L : L + 1], torch.tensor([L]), tables[:, :1])[0], ref_next, "row 0 after the hit")
+    assert_close(
+        m.decode(seq[L : L + 1], torch.tensor([L]), tables[:, :1])[0],
+        ref_next,
+        "row 0 after the hit",
+    )
 
-    null = [ttnn.to_torch(ttnn.get_device_tensors(c)[0])[0] for kv in m.kv.layers for c in (kv.k, kv.v)]
+    null = [
+        ttnn.to_torch(ttnn.get_device_tensors(c)[0])[0]
+        for kv in m.kv.layers
+        for c in (kv.k, kv.v)
+    ]
     assert all(c.abs().max() == 0 for c in null), "prefill wrote the null block"
     with pytest.raises(ValueError):
         m.prefill(seq[:L], 1088, tables[:, 2])  # off the block grid
@@ -113,5 +141,9 @@ def test_inactive_rows_leave_live_kv_alone(mesh):
     padded = tables.clone()
     padded[:, 1] = tables[:, 0]
     for i in range(3):
-        got = m.decode(torch.stack([seq[n + i], seq[0]]), torch.tensor([n + i, -1]), padded)[0]
-    assert_close(got, m.prefill(seq[: n + 3], 0, tables[:, 0]), "user 0 after padded steps")
+        got = m.decode(
+            torch.stack([seq[n + i], seq[0]]), torch.tensor([n + i, -1]), padded
+        )[0]
+    assert_close(
+        got, m.prefill(seq[: n + 3], 0, tables[:, 0]), "user 0 after padded steps"
+    )

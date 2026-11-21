@@ -21,10 +21,25 @@ class DecoderLayer:
         self.sliding = cfg.layer_types[idx] == "sliding_attention"
         self.eps = cfg.rms_norm_eps
         self.attn = Attention(loader, ckpt, cfg, idx, precision.attention)
-        self.ff = FeedForward(loader, ckpt, cfg, idx, precision.mlp, precision.experts, precision.expert_fidelity, precision.expert_q4)
-        self.input_ln = loader.put(f"L{idx}.input_ln", lambda: norm_weight(ckpt.get(p + "input_layernorm.weight")), layout=rm)
+        self.ff = FeedForward(
+            loader,
+            ckpt,
+            cfg,
+            idx,
+            precision.mlp,
+            precision.experts,
+            precision.expert_fidelity,
+            precision.expert_q4,
+        )
+        self.input_ln = loader.put(
+            f"L{idx}.input_ln",
+            lambda: norm_weight(ckpt.get(p + "input_layernorm.weight")),
+            layout=rm,
+        )
         self.post_attn_ln = loader.put(
-            f"L{idx}.post_attn_ln", lambda: norm_weight(ckpt.get(p + "post_attention_layernorm.weight")), layout=rm
+            f"L{idx}.post_attn_ln",
+            lambda: norm_weight(ckpt.get(p + "post_attention_layernorm.weight")),
+            layout=rm,
         )
         self.scalar = float(ckpt.get(p + "layer_scalar").float().item())
         self._raw = {
@@ -43,8 +58,21 @@ class DecoderLayer:
     def boundary_weights(self, mesh, next_norm: torch.Tensor):
         """Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's input norm (or the final norm)."""
         r = self._raw
-        attn = torch.stack([r["post_attention_layernorm"], r["pre_feedforward_layernorm"], r["pre_feedforward_layernorm_2"]])
-        ff = torch.stack([r["post_feedforward_layernorm_1"], r["post_feedforward_layernorm_2"], r["post_feedforward_layernorm"], next_norm])
+        attn = torch.stack(
+            [
+                r["post_attention_layernorm"],
+                r["pre_feedforward_layernorm"],
+                r["pre_feedforward_layernorm_2"],
+            ]
+        )
+        ff = torch.stack(
+            [
+                r["post_feedforward_layernorm_1"],
+                r["post_feedforward_layernorm_2"],
+                r["post_feedforward_layernorm"],
+                next_norm,
+            ]
+        )
         self.w_attn_c = compact_tensor(mesh, attn)
         self.w_ff_c = compact_tensor(mesh, ff)
 
@@ -73,7 +101,9 @@ class DecoderLayer:
         h.deallocate(True)
         return self._finish(x, a)
 
-    def decode_compact(self, xc, h, rope, kv, page_table, cur_pos, b: Boundary, x_page0: int = 0):
+    def decode_compact(
+        self, xc, h, rope, kv, page_table, cur_pos, b: Boundary, x_page0: int = 0
+    ):
         """1-4 decode tokens on compact boundaries: xc compact FP32 residuals (one vector per row), h their
         normed row form [1, 1, rows, H]. Returns the next (xc, h); h of the last layer is final-normed."""
         rows = h.shape[2]

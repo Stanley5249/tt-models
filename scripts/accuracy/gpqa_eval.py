@@ -51,10 +51,15 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "summary.json").unlink(missing_ok=True)  # a failed rerun must not leave the old summary
+    (args.out / "summary.json").unlink(
+        missing_ok=True
+    )  # a failed rerun must not leave the old summary
     task, cases = load_gpqa(args.count)
     rows = []
-    with httpx.Client(base_url=args.url, timeout=3600) as client, (args.out / "responses.jsonl").open("w") as log:
+    with (
+        httpx.Client(base_url=args.url, timeout=3600) as client,
+        (args.out / "responses.jsonl").open("w") as log,
+    ):
         for i, doc, prompt in cases:
             payload = {
                 "model": args.model,
@@ -84,7 +89,10 @@ def main():
             rows.append(row)
             log.write(json.dumps(row) + "\n")
             log.flush()
-            print(f"GPQA {i}: correct={correct} tokens={row['completion_tokens']} {row['seconds']} s", flush=True)
+            print(
+                f"GPQA {i}: correct={correct} tokens={row['completion_tokens']} {row['seconds']} s",
+                flush=True,
+            )
     correct = sum(r["correct"] for r in rows)
     summary = {
         "questions": len(rows),

@@ -43,7 +43,11 @@ def main():
         model = Gemma4TT(mesh, ckpt, max_batch=1)
         pt = model.allocate_kv_cache(1, 4096)
         for prompt in PROMPTS:
-            ids = tok.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt")
+            ids = tok.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                add_generation_prompt=True,
+                return_tensors="pt",
+            )
             ids = ids["input_ids"][0] if hasattr(ids, "keys") else ids[0]
             logits = model.prefill(ids, 0, pt[:, 0])
             out = [int(logits.argmax())]
@@ -64,7 +68,9 @@ def main():
             b = ref[i]["ids"]
             b = b[: next((j + 1 for j, t in enumerate(b) if t in eos), len(b))]
             a = r["ids"][: len(b)]
-            same = next((j for j, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+            same = next(
+                (j for j, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b))
+            )
             line = f"match {same}/{len(a)}  " + line
             if same < len(a):
                 line += f"\n    ref: {ref[i]['text'][:100]!r}"

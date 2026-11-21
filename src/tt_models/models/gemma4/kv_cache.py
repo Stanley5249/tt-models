@@ -61,10 +61,16 @@ class LayerKv:
     group: int
     block_size: int
     n_kv: int  # KV heads per chip in this view
-    geometry: ttnn.PagedCacheGeometryOverride | None  # None when the view is the buffer's own shape
+    geometry: (
+        ttnn.PagedCacheGeometryOverride | None
+    )  # None when the view is the buffer's own shape
 
     def update_args(self) -> dict:
-        return {} if self.geometry is None else {"block_size": self.block_size, "num_kv_heads": self.n_kv}
+        return (
+            {}
+            if self.geometry is None
+            else {"block_size": self.block_size, "num_kv_heads": self.n_kv}
+        )
 
     def fill_args(self) -> dict:
         return {} if self.geometry is None else {"block_size": self.block_size}
@@ -97,14 +103,31 @@ class KvCache:
         self.block_sizes = [0] * self.groups
         for shape, buf, group in zip(shapes, buffer_of, group_of):
             if buf not in buffers:
-                pair = [ttnn.zeros(shape, dtype=dtype, layout=ttnn.TILE_LAYOUT, device=mesh, memory_config=DRAM) for _ in range(2)]
+                pair = [
+                    ttnn.zeros(
+                        shape,
+                        dtype=dtype,
+                        layout=ttnn.TILE_LAYOUT,
+                        device=mesh,
+                        memory_config=DRAM,
+                    )
+                    for _ in range(2)
+                ]
                 buffers[buf] = (*pair, shape)
             k, v, own = buffers[buf]
             _, n_kv, block, head_dim = shape
             if n_kv * block * head_dim != own[1] * own[2] * own[3]:
-                raise ValueError(f"layer view {shape} and its shared buffer {own} differ in elements per block")
+                raise ValueError(
+                    f"layer view {shape} and its shared buffer {own} differ in elements per block"
+                )
             same = shape == own
-            geometry = None if same else ttnn.PagedCacheGeometryOverride(block_size=block, num_kv_heads=n_kv)
+            geometry = (
+                None
+                if same
+                else ttnn.PagedCacheGeometryOverride(
+                    block_size=block, num_kv_heads=n_kv
+                )
+            )
             self.layers.append(LayerKv(k, v, group, block, n_kv, geometry))
             self.block_sizes[group] = block
         # vLLM schedules on the lcm of the block sizes: prefix hits and chunk ends fall on it.
@@ -112,7 +135,15 @@ class KvCache:
 
     @classmethod
     def standalone(
-        cls, mesh, layer_types: list[str], attn_shapes, block_size: int, dtype, rows: int, tokens: int, ring_tokens: int
+        cls,
+        mesh,
+        layer_types: list[str],
+        attn_shapes,
+        block_size: int,
+        dtype,
+        rows: int,
+        tokens: int,
+        ring_tokens: int,
     ) -> "KvCache":
         """The layout vLLM builds, sized for `rows` sequences of `tokens` positions,
         for scripts and tests that run without vLLM (see tables()).
@@ -128,8 +159,13 @@ class KvCache:
         block_sizes, sliding = [0] * groups, [False] * groups
         for g, block, kind in zip(group_of, block_of, layer_types):
             block_sizes[g], sliding[g] = block, kind == SLIDING
-        num_blocks = 1 + rows * sum(_own_blocks(b, s, tokens, ring_tokens) for b, s in zip(block_sizes, sliding))
-        shapes = [(num_blocks, s.n_kv, block, s.head_dim) for s, block in zip(attn_shapes, block_of)]
+        num_blocks = 1 + rows * sum(
+            _own_blocks(b, s, tokens, ring_tokens) for b, s in zip(block_sizes, sliding)
+        )
+        shapes = [
+            (num_blocks, s.n_kv, block, s.head_dim)
+            for s, block in zip(attn_shapes, block_of)
+        ]
         position: dict[int, int] = {}
         buffer_of = []
         for g in group_of:  # the i-th layer of every group shares buffer i
@@ -137,7 +173,9 @@ class KvCache:
             position[g] = position.get(g, 0) + 1
         return cls(mesh, layer_types, shapes, buffer_of, group_of, dtype)
 
-    def tables(self, rows: int, tokens: int, width: int, ring_tokens: int) -> torch.Tensor:
+    def tables(
+        self, rows: int, tokens: int, width: int, ring_tokens: int
+    ) -> torch.Tensor:
         """Page tables [groups, rows, width] for scripts and warmup: every row gets
         `tokens` positions in blocks of its own, after the null block 0.
 
@@ -151,7 +189,9 @@ class KvCache:
             own = _own_blocks(block, self.sliding[g], tokens, ring_tokens)
             for r in range(rows):
                 if next_block + own > self.num_blocks or n > width:
-                    raise ValueError(f"{rows} rows of {tokens} tokens do not fit {self.num_blocks} blocks, {width} per row")
+                    raise ValueError(
+                        f"{rows} rows of {tokens} tokens do not fit {self.num_blocks} blocks, {width} per row"
+                    )
                 blocks = torch.arange(next_block, next_block + own, dtype=torch.int32)
                 out[g, r, :n] = blocks[torch.arange(n) % own]
                 next_block += own

@@ -46,18 +46,37 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run", type=Path)
     ap.add_argument("--phase", default=None, help="default: every decode phase")
-    ap.add_argument("--layer-ops", type=int, default=0, help="ops per decoder layer, for the per-position table")
-    ap.add_argument("--head-ops", type=int, default=1, help="ops before the first layer")
-    ap.add_argument("--layers", type=int, default=30, help="decoder layers (the rest is the LM head)")
+    ap.add_argument(
+        "--layer-ops",
+        type=int,
+        default=0,
+        help="ops per decoder layer, for the per-position table",
+    )
+    ap.add_argument(
+        "--head-ops", type=int, default=1, help="ops before the first layer"
+    )
+    ap.add_argument(
+        "--layers",
+        type=int,
+        default=30,
+        help="decoder layers (the rest is the LM head)",
+    )
     ap.add_argument("--freq-mhz", type=float, default=1000.0)
     args = ap.parse_args()
 
     df = load(args.run)
-    phases = [args.phase] if args.phase else sorted(p for p in df["phase"].unique() if p.startswith("decode"))
+    phases = (
+        [args.phase]
+        if args.phase
+        else sorted(p for p in df["phase"].unique() if p.startswith("decode"))
+    )
     for ph in phases:
         for dev, g in df[df["phase"] == ph].groupby("DEVICE ID"):
             g = g.sort_values("DEVICE FW START CYCLE")
-            start, end = g["DEVICE FW START CYCLE"].to_numpy(), g["DEVICE FW END CYCLE"].to_numpy()
+            start, end = (
+                g["DEVICE FW START CYCLE"].to_numpy(),
+                g["DEVICE FW END CYCLE"].to_numpy(),
+            )
             ns = 1e3 / args.freq_mhz
             span = (end.max() - start.min()) * ns / 1e6
             fw = ((end - start) * ns).sum() / 1e6
@@ -70,7 +89,11 @@ def main():
     if not args.layer_ops:
         return
     ph = phases[min(1, len(phases) - 1)]
-    g = df[(df["phase"] == ph) & (df["DEVICE ID"] == df["DEVICE ID"].min())].sort_values("DEVICE FW START CYCLE").reset_index(drop=True)
+    g = (
+        df[(df["phase"] == ph) & (df["DEVICE ID"] == df["DEVICE ID"].min())]
+        .sort_values("DEVICE FW START CYCLE")
+        .reset_index(drop=True)
+    )
     start, end = g["DEVICE FW START CYCLE"], g["DEVICE FW END CYCLE"]
     g["gap_us"] = (start - end.shift(1)).clip(lower=0).fillna(0) / args.freq_mhz
     g["kern_us"] = g[KERN] / 1e3

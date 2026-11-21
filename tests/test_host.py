@@ -19,7 +19,9 @@ def test_prefill_rows():
     assert prefill_rows(1, 0) == 32
     assert prefill_rows(SHORT_PIECE, 0) == SHORT_PIECE
     assert prefill_rows(SHORT_PIECE + 1, 0) == 640
-    assert prefill_rows(33, 128) == PREFILL_BUCKET  # a later piece always pads to the bucket
+    assert (
+        prefill_rows(33, 128) == PREFILL_BUCKET
+    )  # a later piece always pads to the bucket
 
 
 def test_kv_groups_gemma4():
@@ -36,7 +38,9 @@ def test_plan_chunks_places_every_pair():
     tokens, k, rows, experts = 50, 8, 32, 128
     ids = torch.stack([torch.randperm(experts)[:k] for _ in range(tokens)])
     w = torch.rand(tokens, k)
-    gather, row_w, chunk_expert, row_of_pair = plan_chunks(ids, w, rows, experts)  # row_of_pair is slot-major
+    gather, row_w, chunk_expert, row_of_pair = plan_chunks(
+        ids, w, rows, experts
+    )  # row_of_pair is slot-major
     assert chunk_expert.numel() % CHUNK_GRANULE == 0
     assert gather.numel() == row_w.numel() == chunk_expert.numel() * rows
     for pair, row in enumerate(row_of_pair.tolist()):

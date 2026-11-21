@@ -19,7 +19,11 @@ def register() -> None:
 
     import tt_models.models.gemma4.tool_parser  # noqa: F401  registers the gemma4_tt parser
 
-    overridden = {e.split("=", 1)[0].strip() for e in os.getenv("TT_MODEL_CLASS_OVERRIDES", "").split(",") if "=" in e}
+    overridden = {
+        e.split("=", 1)[0].strip()
+        for e in os.getenv("TT_MODEL_CLASS_OVERRIDES", "").split(",")
+        if "=" in e
+    }
     for arch, target in MODELS.items():
         if arch not in overridden and arch.removeprefix("TT") not in overridden:
             ModelRegistry.register_model(arch, target)

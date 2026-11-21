@@ -37,14 +37,21 @@ def roundtrip(w: torch.Tensor, ttnn_dtype) -> torch.Tensor:
 
     shape = w.shape
     w4 = w.reshape(-1, shape[-2], shape[-1]) if w.dim() != 4 else w
-    t = ttnn.from_torch(w4.to(torch.bfloat16), dtype=ttnn_dtype, layout=ttnn.TILE_LAYOUT)
+    t = ttnn.from_torch(
+        w4.to(torch.bfloat16), dtype=ttnn_dtype, layout=ttnn.TILE_LAYOUT
+    )
     return ttnn.to_torch(t).to(w.dtype).reshape(shape)
 
 
 # Device orientation of each quantized weight: blocks of 16 run along the last dim
 # of the uploaded [in, out] matrix, so quantize the transpose and transpose back.
 QUANT_GROUPS = {
-    "attention": ("self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight"),
+    "attention": (
+        "self_attn.q_proj.weight",
+        "self_attn.k_proj.weight",
+        "self_attn.v_proj.weight",
+        "self_attn.o_proj.weight",
+    ),
     "mlp": ("mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight"),
     "experts": ("experts.gate_up_proj", "experts.down_proj"),
     "experts_gate_up": ("experts.gate_up_proj",),
@@ -61,17 +68,29 @@ def quantize_layer(state: dict, quant: dict) -> dict:
             w = out[key]
             if key == "experts.gate_up_proj":
                 inter = w.shape[1] // 2  # [E, 2I, H] -> device [E, H, I] per half
-                halves = [roundtrip(h.transpose(1, 2).contiguous(), dtype).transpose(1, 2) for h in (w[:, :inter], w[:, inter:])]
+                halves = [
+                    roundtrip(h.transpose(1, 2).contiguous(), dtype).transpose(1, 2)
+                    for h in (w[:, :inter], w[:, inter:])
+                ]
                 out[key] = torch.cat(halves, 1)
             elif key == "experts.down_proj":
-                out[key] = roundtrip(w.transpose(1, 2).contiguous(), dtype).transpose(1, 2).contiguous()
+                out[key] = (
+                    roundtrip(w.transpose(1, 2).contiguous(), dtype)
+                    .transpose(1, 2)
+                    .contiguous()
+                )
             else:
                 out[key] = roundtrip(w.T.contiguous(), dtype).T.contiguous()
     return out
 
 
 class Reference:
-    def __init__(self, ckpt: Checkpoint | None = None, dtype=torch.float32, quant: dict | None = None):
+    def __init__(
+        self,
+        ckpt: Checkpoint | None = None,
+        dtype=torch.float32,
+        quant: dict | None = None,
+    ):
         """quant: optional {"attention"|"mlp"|"experts"|"lm_head": ttnn dtype} weight emulation."""
         self.ckpt = ckpt or Checkpoint()
         self.dtype = dtype
@@ -91,10 +110,14 @@ class Reference:
 
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
         weight = self.ckpt.get("embed_tokens.weight")
-        return (weight[ids].float() * embed_scale(self.config.hidden_size)).to(self.dtype)[None]
+        return (weight[ids].float() * embed_scale(self.config.hidden_size)).to(
+            self.dtype
+        )[None]
 
     @torch.no_grad()
-    def layer_forward(self, layer, x: torch.Tensor, positions: torch.Tensor, masks) -> torch.Tensor:
+    def layer_forward(
+        self, layer, x: torch.Tensor, positions: torch.Tensor, masks
+    ) -> torch.Tensor:
         layer_type = self.config.layer_types[layer.layer_idx]
         cos_sin = self.rotary(x, positions[None], layer_type)
         return layer(
@@ -119,7 +142,12 @@ class Reference:
         return torch.tanh(logits / cap) * cap
 
     @torch.no_grad()
-    def forward(self, ids: torch.Tensor, keep_hidden: bool = False, num_layers: int | None = None):
+    def forward(
+        self,
+        ids: torch.Tensor,
+        keep_hidden: bool = False,
+        num_layers: int | None = None,
+    ):
         """Teacher-forced forward over `ids` (1D). Returns logits [S, V] and optional hiddens."""
         positions = torch.arange(ids.shape[0])
         masks = attention_masks(ids.shape[0], self.config.sliding_window)

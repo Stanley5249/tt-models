@@ -34,7 +34,9 @@ class Precision:
     lm_head: ttnn.DataType = ttnn.bfloat8_b
     kv_cache: ttnn.DataType = ttnn.bfloat8_b
     expert_fidelity: str = "LoFi"  # compute fidelity of the expert sparse matmuls
-    expert_q4: bool = False  # experimental Q4_0 experts (expert_q4.py): batch-1 decode only
+    expert_q4: bool = (
+        False  # experimental Q4_0 experts (expert_q4.py): batch-1 decode only
+    )
 
     @classmethod
     def parse(cls, spec: str) -> "Precision":
@@ -43,9 +45,17 @@ class Precision:
         kwargs = {}
         for item in filter(None, spec.split(",")):
             key, value = item.split("=")
-            kwargs[key] = value if key.endswith("fidelity") else value == "1" if key == "expert_q4" else names[value]
+            kwargs[key] = (
+                value
+                if key.endswith("fidelity")
+                else value == "1"
+                if key == "expert_q4"
+                else names[value]
+            )
         return cls(**kwargs)
 
     def tag(self) -> str:
         names = {ttnn.bfloat16: "bf16", ttnn.bfloat8_b: "bfp8", ttnn.bfloat4_b: "bfp4"}
-        return "-".join(names[d] for d in (self.attention, self.mlp, self.experts, self.lm_head))
+        return "-".join(
+            names[d] for d in (self.attention, self.mlp, self.experts, self.lm_head)
+        )

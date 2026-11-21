@@ -27,7 +27,11 @@ def resolve_snapshot(model: str = DEFAULT_MODEL) -> Path:
     if path.is_dir():
         return path
     # Only metadata patterns, so a snapshot with weights still downloading resolves too.
-    return Path(snapshot_download(model, local_files_only=True, allow_patterns=["*.json", "*.jinja", "*.md"]))
+    return Path(
+        snapshot_download(
+            model, local_files_only=True, allow_patterns=["*.json", "*.jinja", "*.md"]
+        )
+    )
 
 
 def attention_dims(cfg) -> dict[str, tuple[int, int]]:
@@ -70,7 +74,9 @@ class Checkpoint:
         with open(self.root / filename, "rb") as f:
             f.seek(base + start)
             f.readinto(buf)
-        return torch.frombuffer(buf, dtype=_DTYPES[meta["dtype"]]).reshape(meta["shape"])
+        return torch.frombuffer(buf, dtype=_DTYPES[meta["dtype"]]).reshape(
+            meta["shape"]
+        )
 
     def get(self, name: str) -> torch.Tensor:
         """Read one text-model tensor by its name below `model.language_model.`."""
@@ -80,4 +86,8 @@ class Checkpoint:
     def layer(self, idx: int) -> dict[str, torch.Tensor]:
         """All tensors of decoder layer `idx`, keyed relative to the layer."""
         prefix = f"{TEXT_PREFIX}layers.{idx}."
-        return {key[len(prefix) :]: self._read(file, key) for key, file in self.weight_map.items() if key.startswith(prefix)}
+        return {
+            key[len(prefix) :]: self._read(file, key)
+            for key, file in self.weight_map.items()
+            if key.startswith(prefix)
+        }

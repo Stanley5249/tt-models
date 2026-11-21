@@ -68,7 +68,9 @@ def dense(w: torch.Tensor, mode: str) -> torch.Tensor:
     if mode == "bfp8":
         return bfp8(w.T.contiguous()).T.contiguous()
     if w.shape[0] > 4096:
-        return torch.cat([dense(w[i : i + 4096], mode) for i in range(0, w.shape[0], 4096)])
+        return torch.cat(
+            [dense(w[i : i + 4096], mode) for i in range(0, w.shape[0], 4096)]
+        )
     return q4(w[None], mode)[0]
 
 
@@ -92,10 +94,19 @@ def main():
         result = dict(layer_state)
         if state["mode"] == "none":
             return result
-        for key in ("experts.gate_up_proj", "experts.down_proj"):  # HF layout [E, out, in]
+        for key in (
+            "experts.gate_up_proj",
+            "experts.down_proj",
+        ):  # HF layout [E, out, in]
             w = result[key]
-            if state["mode"] == "bfp4":  # the device stores [in, out]: blocks along the outputs
-                result[key] = bfp4(w.transpose(-1, -2).contiguous()).transpose(-1, -2).contiguous()
+            if (
+                state["mode"] == "bfp4"
+            ):  # the device stores [in, out]: blocks along the outputs
+                result[key] = (
+                    bfp4(w.transpose(-1, -2).contiguous())
+                    .transpose(-1, -2)
+                    .contiguous()
+                )
             else:
                 result[key] = q4(w, state["mode"])
         return result
@@ -113,7 +124,9 @@ def main():
 
     R.quantize_layer = quantize_all
     if dense_mode:  # Reference.logits sends the LM head [H, V] through roundtrip when "lm_head" is quantized
-        R.roundtrip = lambda head_t, _dtype: dense(head_t.T.contiguous(), dense_mode).T.contiguous()
+        R.roundtrip = lambda head_t, _dtype: dense(
+            head_t.T.contiguous(), dense_mode
+        ).T.contiguous()
     assert "ttnn" not in sys.modules, "ttnn would start the device cluster"
     ck = Checkpoint()
     n = int(os.environ.get("EMU_TOKENS", "2048"))
@@ -124,7 +137,9 @@ def main():
     for mode in modes:
         state["mode"] = mode
         t0 = time.time()
-        logits, _ = R.Reference(ck, dtype=dtype, quant={"lm_head": "emulated"} if dense_mode else None).forward(ids)
+        logits, _ = R.Reference(
+            ck, dtype=dtype, quant={"lm_head": "emulated"} if dense_mode else None
+        ).forward(ids)
         key = f"{mode}{'+dense-' + dense_mode if dense_mode else ''}@{n}" + (
             "" if dtype == torch.float32 else f"-{str(dtype).removeprefix('torch.')}"
         )
