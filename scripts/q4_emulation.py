@@ -47,6 +47,8 @@ def factor(b: torch.Tensor):
         ok = ((r - r.round()).abs().amax(-1, keepdim=True) < STEP_TOL) & (r.round().abs().amax(-1, keepdim=True) <= 8)
         s = torch.where(ok & ~done, s0 / k, s)
         done |= ok
+    if not bool(done.all()):  # such a block has no Q4_0 code: every mode below would misstate it
+        raise ValueError(f"{int((~done).sum())} blocks are not integer multiples of one step within -8..8")
     return (b / s).round(), s
 
 
