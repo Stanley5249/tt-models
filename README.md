@@ -47,6 +47,4 @@ A new model goes in `src/tt_models/models/<name>/`, with its adapter class added
 
 ## License
 
-`MIT OR Apache-2.0` ([MIT](LICENSE-MIT), [Apache-2.0](LICENSE-APACHE)). Files adapted from Apache-2.0 projects keep that license in an SPDX header, and `docs/experiments/2026-11-19-official-comparison/official/` holds Apache-2.0 extracts of tt-inference-server.
-
-Commit authorship and the `/home/st418` paths in experiment logs are public on purpose. Never commit tokens, credentials or `.env`.
+[MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Files adapted from Apache-2.0 projects, marked by SPDX headers, stay Apache-2.0.

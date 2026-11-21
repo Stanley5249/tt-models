@@ -5,6 +5,10 @@
 - `just check` runs the format checks, ruff and pyrefly.
 - `just test` runs the host tests, and `just test -m device` the N300 ones.
 
+## Privacy
+
+The repository is public. Commit authorship and the local paths in experiment logs are public on purpose. Never commit tokens, credentials or `.env`.
+
 ## Common mistakes
 
 Seen on this machine; the root causes are unknown.
