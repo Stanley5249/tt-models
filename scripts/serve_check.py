@@ -283,7 +283,11 @@ def check_tools(url):
             if want is None:
                 good = not calls and bool(choice0["message"].get("content"))
             else:
-                good = bool(names) and set(names) <= ({want} if isinstance(want, str) else want) and args_ok
+                if isinstance(choice, str):
+                    good = bool(names) and set(names) <= ({want} if isinstance(want, str) else want)
+                else:  # a named choice allows exactly one call, to that tool
+                    good = names == [want]
+                good &= args_ok
                 # OpenAI (and vLLM) finish a forced named call with "stop"
                 good &= choice0["finish_reason"] in (("tool_calls",) if isinstance(choice, str) else ("stop", "tool_calls"))
             label = choice if isinstance(choice, str) else "named get_time"

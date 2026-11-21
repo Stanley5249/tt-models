@@ -14,7 +14,10 @@ vLLM-side builder. Parsing stays the stock gemma4 parser, which reads the
 native syntax for every tool choice.
 
 Tool arguments follow the tool's schema only for `strict` tools, as vLLM does
-for every model (`--tool-strict-level parameter` enforces all of them).
+for every model (`--tool-strict-level parameter` enforces all of them). A
+non-strict tool still gets an object for its arguments: xgrammar would accept no
+argument block at all (`call:name<tool_call|>`), which the gemma4 parser cannot
+read as a call.
 """
 
 from xgrammar.builtin_structural_tag import get_gemma_4_structural_tag
@@ -26,13 +29,21 @@ from vllm.tool_parsers.structural_tag_registry import register_vllm_structural_t
 TAG_MODEL = "gemma_4"
 
 
+def _object_arguments(tool):
+    """A non-strict tool as a strict one whose arguments are any object."""
+    if tool.function.strict is not False:
+        return tool
+    function = tool.function.model_copy(update={"strict": True, "parameters": {"type": "object"}})
+    return tool.model_copy(update={"function": function})
+
+
 @register_vllm_structural_tag(TAG_MODEL)
 def gemma4_structural_tag(function_tools, builtin_tools, tool_choice, reasoning, token_suffix):
     """vLLM's builder signature over xgrammar's Gemma 4 tag (no token suffix in this format)."""
     if token_suffix:
         raise ValueError(f"the Gemma 4 structural tag takes no token suffix, got {token_suffix!r}")
     return get_gemma_4_structural_tag(
-        tools=function_tools,
+        tools=[_object_arguments(t) for t in function_tools],
         builtin_tools=builtin_tools,
         tool_choice=tool_choice,
         reasoning="enabled" if reasoning else "disabled",
