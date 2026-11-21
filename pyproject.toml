@@ -6,6 +6,10 @@ requires-python = ">=3.12"
 # The runtime stack (ttnn, torch, vLLM, vllm-tt-plugin) is pinned in pixi.toml.
 dependencies = []
 
+# vLLM loads this in every process: the model classes and the gemma4_tt tool parser.
+[project.entry-points."vllm.general_plugins"]
+tt_models = "tt_models.vllm_plugin:register"
+
 [build-system]
 requires = ["uv_build>=0.9.0"]
 build-backend = "uv_build"

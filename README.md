@@ -36,7 +36,7 @@ load the cache.
 | `docs/experiments/` | One dated record per decision, with its data |
 
 A new model goes in `src/tt_models/models/<name>/`, with its adapter class
-named in `TT_MODEL_CLASS_OVERRIDES`. Code that two models share moves to
+added to `MODELS` in `src/tt_models/vllm_plugin.py`. Code that two models share moves to
 `common/`.
 
 ## Working on it
