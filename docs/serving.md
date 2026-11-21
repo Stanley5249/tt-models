@@ -117,21 +117,25 @@ it is for accuracy runs only, because prefill then runs one token at a time
 
 ## Checking a change
 
-Run what the change can affect, from the repository root:
+Run what the change can affect, from the repository root. `py` stands for
+`pixi run python`.
 
 | What | Command |
 |---|---|
 | Host logic | `pixi run pytest` |
 | Device paths, random weights | `pixi run pytest -m device` |
-| Kernels against torch or ttnn | `scripts/kernels/*_check.py` |
-| Greedy outputs | `scripts/accuracy/greedy_check.py --compare scripts/accuracy/greedy-base.json` |
-| Decode accuracy against fp32 | `scripts/accuracy/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb <k>` for k = 1..3 |
-| Standalone speed | `scripts/bench/decode.py --batch <B> --steps 128 --trace`, `scripts/bench/prefill.py` |
-| Serving lifecycle | `scripts/serve/serve_check.py` against a running server |
-| Preemption | `GEMMA4_KV_POOL_GIB=0.2 pixi run serve-gemma4 --max-model-len 4096`, then `serve_check.py preempt` |
-| Serving speed | `scripts/serve/bench_tis.sh <label> c1-128-128-n8 c4-128-128-n16` |
+| One kernel against torch or ttnn | `py scripts/kernels/<name>_check.py` |
+| Greedy outputs | `py scripts/accuracy/greedy_check.py --compare scripts/accuracy/greedy-base.json` |
+| Decode accuracy against fp32 | `py scripts/accuracy/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb <k>` for k = 1..3 |
+| Standalone speed | `py scripts/bench/decode.py --batch <B> --steps 128 --trace`, `py scripts/bench/prefill.py` |
+| Serving lifecycle | `py scripts/serve/serve_check.py` against a running server |
+| Preemption | `GEMMA4_KV_POOL_GIB=0.2 pixi run serve-gemma4 --max-model-len 4096`, then `py scripts/serve/serve_check.py preempt` |
+| Serving speed | `pixi run bash scripts/serve/bench_tis.sh <label> c1-128-128-n8 c4-128-128-n16` |
 
-Prefix every command with `pixi run python` (or `pixi run bash` for `.sh`).
+All kernel checks, one process each:
+
+    for f in scripts/kernels/*_check.py; do pixi run python "$f" || break; done
+
 Accuracy needs 3 seeds and speed a same-day baseline
 ([experiments](experiments/README.md)). A numerics-preserving change should
 leave `compare.py`'s metrics identical.
