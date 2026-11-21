@@ -91,9 +91,6 @@ addopts = "-m 'not device'"
 markers = ["device: needs the N300 (run with `pytest -m device`)"]
 testpaths = ["tests"]
 
-[tool.ruff]
-line-length = 140
-
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 # B905: the zips pair sequences built to the same length. E741: H, I and E
