@@ -57,7 +57,7 @@ LENGTHS = [64, 48, 32, 16]
 GREEDY = {"temperature": 0}
 
 
-def post(url: str, path: str, body: dict, *, stream: bool = False):
+def post(url: str, path: str, body: dict[str, object], *, stream: bool = False):
     # The benchmark operator supplies the server URL.
     req = urllib.request.Request(  # noqa: S310
         f"{url}{path}",
@@ -69,7 +69,9 @@ def post(url: str, path: str, body: dict, *, stream: bool = False):
     return resp if stream else json.load(resp)
 
 
-def chat(url: str, prompt: str | list[dict], max_tokens: int, **extra) -> list[int]:
+def chat(
+    url: str, prompt: str | list[dict[str, object]], max_tokens: int, **extra: object
+) -> list[int]:
     """Token ids of a chat completion; thinking tokens count, since they are sampled
     too.
     """
@@ -87,7 +89,9 @@ def chat(url: str, prompt: str | list[dict], max_tokens: int, **extra) -> list[i
     return post(url, "/v1/chat/completions", body)["choices"][0]["token_ids"]
 
 
-def complete(url: str, prompt: list[int], max_tokens: int, **extra) -> list[int]:
+def complete(
+    url: str, prompt: list[int], max_tokens: int, **extra: object
+) -> list[int]:
     body = {
         "model": MODEL,
         "prompt": prompt,
@@ -120,7 +124,7 @@ def stream(
     prompt: list[int],
     max_tokens: int,
     stop_after: int | None = None,
-    first=None,
+    first: threading.Event | None = None,
 ) -> tuple[list[int], list[float]]:
     """Stream a raw-token greedy completion; returns its token ids and arrival times.
     stop_after closes the connection after that many tokens, which aborts the request.
@@ -134,7 +138,8 @@ def stream(
         **GREEDY,
     }
     resp = post(url, "/v1/completions", body, stream=True)
-    ids, times = [], []
+    ids: list[int] = []
+    times: list[float] = []
     with resp:
         for raw_line in resp:
             line = raw_line.strip()
@@ -180,12 +185,12 @@ def document(n_chars: int) -> str:
     return (text * (n_chars // len(text) + 1))[:n_chars]
 
 
-def check_isolation(url):
+def check_isolation(url: str):
     alone = [chat(url, p, n) for p, n in zip(PROMPTS, LENGTHS)]
     ok = True
     for rnd in range(2):  # the second round replays every captured trace again
         with ThreadPoolExecutor(len(PROMPTS)) as pool:
-            together = list(pool.map(lambda pn: chat(url, *pn), zip(PROMPTS, LENGTHS)))
+            together = list(pool.map(chat, itertools.repeat(url), PROMPTS, LENGTHS))
         for p, a, b in zip(PROMPTS, alone, together):
             ok &= compare(
                 f"concurrent round {rnd}: {p[:40]!r}", a, b, need=min(16, len(a))
@@ -193,7 +198,7 @@ def check_isolation(url):
     return ok
 
 
-def check_raw(url):
+def check_raw(url: str):
     prompt = list(
         range(1000, 1128)
     )  # no <bos>: flat logits, where any difference shows
@@ -201,7 +206,7 @@ def check_raw(url):
     return compare("raw tokens, temperature 0, twice", a, b)
 
 
-def check_arrival(url):
+def check_arrival(url: str):
     short = tokens(
         url, "Count from one to fifty in English words, separated by commas:", bos=True
     )
@@ -233,7 +238,7 @@ def check_arrival(url):
     return compare("stream while an 8192-token prompt arrives", ref, ids)
 
 
-def check_cancel(url):
+def check_cancel(url: str):
     prompt = tokens(url, "Write a long story about a lighthouse keeper.", bos=True)
     ref = complete(url, prompt, 64)
     stream(url, prompt, 512, stop_after=1)
@@ -241,7 +246,7 @@ def check_cancel(url):
     return compare("after a cancelled stream", ref, complete(url, prompt, 64))
 
 
-def check_prefix(url):
+def check_prefix(url: str):
     doc = document(24000)
     turn1 = [
         {
@@ -284,14 +289,14 @@ def check_prefix(url):
     return compare("turn 2 from the prefix cache vs fresh", fresh, hit, need=16) and ok
 
 
-def check_seeded(url):
+def check_seeded(url: str):
     sampled = {"temperature": 1.0, "top_k": 64, "top_p": 0.95, "seed": 1234}
     a = chat(url, PROMPTS[2], 48, **sampled)
     b = chat(url, PROMPTS[2], 48, **sampled)
     return compare("seeded sampling, twice", a, b)
 
 
-def check_preempt(url):
+def check_preempt(url: str):
     """Start the server with a pool too small for four of these requests:
 
         GEMMA4_KV_POOL_GIB=0.2 just serve-gemma4 --max-model-len 4096
@@ -320,13 +325,12 @@ def check_preempt(url):
             flush=True,
         )
     before = metric(url, "vllm:num_preemptions_total")
+
+    def replay(prompt: str, salt: str) -> list[int]:
+        return chat(url, prompt, 1536, cache_salt=salt + "-b", **run)
+
     with ThreadPoolExecutor(len(prompts)) as pool:
-        together = list(
-            pool.map(
-                lambda ps: chat(url, ps[0], 1536, cache_salt=ps[1] + "-b", **run),
-                zip(prompts, salts),
-            )
-        )
+        together = list(pool.map(replay, prompts, salts))
     preempted = metric(url, "vllm:num_preemptions_total") - before
     print(f"    {preempted:.0f} preemptions during the concurrent run", flush=True)
     ok = preempted > 0 and not short
@@ -366,7 +370,7 @@ CLOCK = {
 }
 
 
-def check_tools(url):
+def check_tools(url: str):
     """Tool choice is enforced by the structural tag of gemma4_tt/tool_parser.py."""
     tools = [WEATHER, CLOCK]
     named = {"type": "function", "function": {"name": "get_time"}}

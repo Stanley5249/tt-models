@@ -21,15 +21,26 @@ argument block at all (`call:name<tool_call|>`), which the gemma4 parser cannot
 read as a call.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.gemma4_engine_tool_parser import Gemma4EngineToolParser
-from vllm.tool_parsers.structural_tag_registry import register_vllm_structural_tag
+from vllm.tool_parsers.structural_tag_registry import (
+    SimplifiedToolChoice,
+    register_vllm_structural_tag,
+)
 from xgrammar.builtin_structural_tag import get_gemma_4_structural_tag
+
+if TYPE_CHECKING:
+    from xgrammar import StructuralTag
+    from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
 
 TAG_MODEL = "gemma_4"
 
 
-def _object_arguments(tool):
+def _object_arguments(tool: FunctionToolParam) -> FunctionToolParam:
     """A non-strict tool as a strict one whose arguments are any object."""
     if tool.function.strict is not False:
         return tool
@@ -41,8 +52,12 @@ def _object_arguments(tool):
 
 @register_vllm_structural_tag(TAG_MODEL)
 def gemma4_structural_tag(
-    function_tools, builtin_tools, tool_choice, reasoning, token_suffix
-):
+    function_tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,  # noqa: FBT001 - vLLM builder signature
+    token_suffix: str,
+) -> StructuralTag:
     """Build the xgrammar Gemma 4 tag using vLLM's signature.
 
     This tag format takes no token suffix.

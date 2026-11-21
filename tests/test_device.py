@@ -22,13 +22,13 @@ CACHE = Path(__file__).resolve().parents[1] / "cache" / "fake"
 PCC = 0.9995
 
 
-def pcc(a, b):
+def pcc(a: torch.Tensor, b: torch.Tensor):
     return torch.corrcoef(torch.stack([a.float().flatten(), b.float().flatten()]))[
         0, 1
     ].item()
 
 
-def assert_close(got, ref, what):
+def assert_close(got: torch.Tensor, ref: torch.Tensor, what: str):
     assert pcc(got, ref) > PCC, f"{what}: pcc {pcc(got, ref):.5f}"
     assert got.argmax() == ref.argmax(), f"{what}: argmax differs"
 
@@ -40,7 +40,7 @@ def mesh():
         yield m
 
 
-def model(mesh, max_batch):
+def model(mesh: ttnn.MeshDevice, max_batch: int):
     return Gemma4TT(
         mesh,
         FakeCheckpoint(["sliding_attention", "full_attention"]),
@@ -51,7 +51,7 @@ def model(mesh, max_batch):
 
 
 @pytest.mark.parametrize(("prompt_len", "batch"), [(64, 1), (64, 4), (1100, 1)])
-def test_decode_matches_prefill(mesh, prompt_len, batch):
+def test_decode_matches_prefill(mesh: ttnn.MeshDevice, prompt_len: int, batch: int):
     """decode(L) must match prefill(L + 1); 1100 tokens runs past the sliding window."""
     torch.manual_seed(0)
     steps = 2
@@ -74,7 +74,7 @@ def test_decode_matches_prefill(mesh, prompt_len, batch):
             )
 
 
-def scheduled(m, table: torch.Tensor, start: int, end: int) -> torch.Tensor:
+def scheduled(m: Gemma4TT, table: torch.Tensor, start: int, end: int) -> torch.Tensor:
     """table [groups, width] as vLLM sends it for computing [start, end)."""
     t = table.clone()
     for g, block in enumerate(m.kv.block_sizes):
@@ -86,7 +86,7 @@ def scheduled(m, table: torch.Tensor, start: int, end: int) -> torch.Tensor:
     return t
 
 
-def test_chunked_prefill_and_prefix_hit(mesh):
+def test_chunked_prefill_and_prefix_hit(mesh: ttnn.MeshDevice):
     """Chunks, a prefix-cache hit and the null block, with page tables shaped as vLLM
     sends them.
     """
@@ -133,7 +133,7 @@ def test_chunked_prefill_and_prefix_hit(mesh):
         m.prefill(seq[:L], 1088, tables[:, 2])  # off the block grid
 
 
-def test_inactive_rows_leave_live_kv_alone(mesh):
+def test_inactive_rows_leave_live_kv_alone(mesh: ttnn.MeshDevice):
     """Padding rows (position -1) point at user 0's block 0, where an unskipped write
     would land.
     """

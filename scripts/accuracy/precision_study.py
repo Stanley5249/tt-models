@@ -14,19 +14,25 @@ Configurations:
         fp32,emu:experts=bfp4,tt
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 
 from tt_models.models.gemma4.checkpoint import Checkpoint
 
+if TYPE_CHECKING:
+    import ttnn
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def tokens(ckpt, n):
+def tokens(ckpt: Checkpoint, n: int):
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(ckpt.root)
@@ -34,7 +40,7 @@ def tokens(ckpt, n):
     return ids[:n]
 
 
-def parse_quant(spec: str) -> dict:
+def parse_quant(spec: str) -> dict[str, ttnn.DataType]:
     import ttnn
 
     names = {"bfp4": ttnn.bfloat4_b, "bfp8": ttnn.bfloat8_b, "bf16": ttnn.bfloat16}
@@ -43,7 +49,12 @@ def parse_quant(spec: str) -> dict:
     }
 
 
-def run_reference(ckpt, ids, dtype, quant):
+def run_reference(
+    ckpt: Checkpoint,
+    ids: torch.Tensor,
+    dtype: torch.dtype,
+    quant: dict[str, ttnn.DataType],
+):
     from tt_models.models.gemma4.reference import Reference
 
     ref = Reference(ckpt, dtype=dtype, quant=quant)
@@ -51,7 +62,7 @@ def run_reference(ckpt, ids, dtype, quant):
     return logits.float()
 
 
-def run_tt(ckpt, ids, args):
+def run_tt(ckpt: Checkpoint, ids: torch.Tensor, args: argparse.Namespace):
     from tt_models.common.mesh import open_n300
     from tt_models.models.gemma4.model import Gemma4TT
 
@@ -63,7 +74,7 @@ def run_tt(ckpt, ids, args):
         return model.prefill(ids, 0, tables[:, 0], all_logits=True)
 
 
-def score(logits, base, ids):
+def score(logits: torch.Tensor, base: torch.Tensor, ids: torch.Tensor):
     n = ids.shape[0] - 1
     lg, bs = logits[:n].float(), base[:n].float()
     nll = torch.nn.functional.cross_entropy(lg, ids[1:])

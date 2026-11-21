@@ -99,19 +99,14 @@ search-path = ["src", "scripts/accuracy", "scripts/serve"]
 
 # Not yet fixed; remove one kind per change.
 [tool.pyrefly.errors]
-implicit-any-parameter = false
-implicit-any-type-argument = false
 missing-attribute = false
-implicit-any-empty-container = false
 unbound-name = false
 bad-argument-type = false
-implicit-any-lambda = false
 missing-import = false
 bad-assignment = false
 bad-return = false
 not-callable = false
 possibly-uninitialized-attribute = false
-implicit-any-attribute = false
 method-assign = false
 unsupported-operation = false
 
@@ -141,7 +136,6 @@ ignore = [
   "S101",  # internal assertions document kernel layout invariants
   "S311",  # benchmark inputs and cache salts need no cryptography
   # Not yet fixed; remove one family per change.
-  "ANN",  # annotations in src/
 ]
 
 [tool.ruff.lint.pydocstyle]

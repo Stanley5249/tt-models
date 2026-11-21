@@ -1,11 +1,14 @@
 """Decode router op (kernels/router_*)."""
 
+from __future__ import annotations
+
 import ttnn
 
 from tt_models.common.config import L1, TILE
 from tt_models.models.gemma4.generic_op import (
     FP32_TILE,
     KERNELS,
+    ProgramParts,
     accessor,
     cb,
     core_range_set,
@@ -33,14 +36,14 @@ class Router:
 
     def __init__(
         self,
-        mesh,
+        mesh: ttnn.MeshDevice,
         hidden: int,
         n_experts: int,
         top_k: int,
         parts: int = 11,
         core_row: int = 5,
         rows: int = 1,
-    ):
+    ) -> None:
         """Assign router partials to cores and output rows.
 
         rows: decode tokens (1 .. 4). The reducer stacks every core's partial rows in
@@ -59,7 +62,7 @@ class Router:
         self.cores = [ttnn.CoreCoord(i % 8, core_row - i // 8) for i in range(parts)]
         self.red = mesh.worker_core_from_logical_core(self.cores[0])
 
-    def outputs(self):
+    def outputs(self) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         """Allocate row-major expert ids and weights.
 
         Row-major ids and weights, token-major (entry t * k + j), at least 16 entries
@@ -67,7 +70,7 @@ class Router:
         layout the expert streams take.
         """
 
-        def row(dtype):
+        def row(dtype: ttnn.DataType) -> ttnn.Tensor:
             n = max(16, self.rows * self.top_k)
             return ttnn.allocate_tensor_on_device(
                 ttnn.Shape([1, n]), dtype, ttnn.ROW_MAJOR_LAYOUT, self.mesh, L1
@@ -75,7 +78,15 @@ class Router:
 
         return row(ttnn.uint16), row(ttnn.bfloat16)
 
-    def __call__(self, x, w, ids, wts, *, build=False):
+    def __call__(
+        self,
+        x: ttnn.Tensor,
+        w: ttnn.Tensor,
+        ids: ttnn.Tensor,
+        wts: ttnn.Tensor,
+        *,
+        build: bool = False,
+    ) -> ProgramParts | ttnn.Tensor:
         """Compute the router logits, ids and weights for the decode rows.
 
         x: normed row form BF16 [1, 1, rows, H]; w: the [H, E] BF16 router weight

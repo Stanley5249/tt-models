@@ -1,5 +1,7 @@
 """Memory and compute configs shared by the models."""
 
+from __future__ import annotations
+
 import ttnn
 
 DRAM = ttnn.DRAM_MEMORY_CONFIG
@@ -8,8 +10,12 @@ TILE = 32
 
 
 def compute_config(
-    fidelity=ttnn.MathFidelity.HiFi2, *, fp32_acc=True, packer_l1_acc=True, approx=False
-):
+    fidelity: ttnn.MathFidelity = ttnn.MathFidelity.HiFi2,
+    *,
+    fp32_acc: bool = True,
+    packer_l1_acc: bool = True,
+    approx: bool = False,
+) -> ttnn.WormholeComputeKernelConfig:
     """Build a Wormhole compute kernel configuration."""
     return ttnn.WormholeComputeKernelConfig(
         math_fidelity=fidelity,

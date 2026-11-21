@@ -4,6 +4,8 @@ Host planning and matmul configs for expert-major prefill
 (moe.FeedForward._experts_prefill).
 """
 
+from __future__ import annotations
+
 import torch
 import ttnn
 
@@ -15,8 +17,12 @@ CHUNK_GRANULE = 16
 
 
 def matmul_1d_config(
-    m_tiles: int, n: int, k: int, grid=(8, 8), in0_block_w: int | None = None
-):
+    m_tiles: int,
+    n: int,
+    k: int,
+    grid: tuple[int, int] = (8, 8),
+    in0_block_w: int | None = None,
+) -> ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig:
     """Configure a one-dimensional matmul for expert prefill."""
     n_tiles = n // TILE
     # The 1D mcast kernel needs every core of a full rectangle to own work.
@@ -55,7 +61,9 @@ def matmul_1d_config(
     )
 
 
-def plan_chunks(ids: torch.Tensor, weights: torch.Tensor, rows: int, n_experts: int):
+def plan_chunks(
+    ids: torch.Tensor, weights: torch.Tensor, rows: int, n_experts: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Host layout of expert-major prefill for top-k ids/weights [T, k].
 
     Each expert's (token, slot) pairs fill chunks of `rows` rows; padding rows

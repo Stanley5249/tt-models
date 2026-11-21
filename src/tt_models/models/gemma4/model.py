@@ -8,6 +8,8 @@ The model holds no per-request state: every K/V row lives in the paged cache
 moved, preempted, resumed and share cached prefixes without telling the model.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
 import torch
@@ -47,7 +49,7 @@ class Gemma4TT:
         max_seq_len: int = 32768,
         block_size: int = 64,
         num_layers: int | None = None,
-    ):
+    ) -> None:
         """Load the model weights and initialize the device operators."""
         if max_batch > STREAM_ROWS:
             raise ValueError(
@@ -102,9 +104,12 @@ class Gemma4TT:
         # A piece's padding can run PREFILL_BUCKET rows past the last position.
         self.rope = self._rope_tables(max_seq_len + PREFILL_BUCKET)
         self.kv: KvCache | None = None
-        self.traces = {}
+        self.traces: dict[
+            int, tuple[ttnn.MeshTraceId, dict[str, ttnn.Tensor], ttnn.Tensor]
+        ] = {}
         self._trace_inputs: dict[int, dict[str, ttnn.Tensor]] = {}
-        self._pt_last, self._pt_src = {}, {}
+        self._pt_last: dict[int, dict[str, torch.Tensor]] = {}
+        self._pt_src: dict[str, torch.Tensor] = {}
         init_ccl(mesh)
 
     # -- host-side tables ----------------------------------------------------
@@ -128,7 +133,10 @@ class Gemma4TT:
         return self.embed_table[ids] * self.embed_scale  # BF16 math, as HF
 
     def _to_device(
-        self, t: torch.Tensor, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+        self,
+        t: torch.Tensor,
+        dtype: ttnn.DataType = ttnn.bfloat16,
+        layout: ttnn.Layout = ttnn.TILE_LAYOUT,
     ) -> ttnn.Tensor:
         return ttnn.from_torch(
             t,
@@ -164,7 +172,7 @@ class Gemma4TT:
         )
         return self.page_tables(rows, tokens)
 
-    def use_kv(self, kv: KvCache):
+    def use_kv(self, kv: KvCache) -> None:
         """Take the KV cache, once: decode traces bind its buffers and table width."""
         if self.kv is not None:
             raise RuntimeError("the KV cache is set once per model")
@@ -247,7 +255,7 @@ class Gemma4TT:
         return torch.cat(out) if all_logits else out[-1][-1]
 
     def _prefill_chunk(
-        self, tokens, c0: int, c1: int, tables: torch.Tensor
+        self, tokens: torch.Tensor, c0: int, c1: int, tables: torch.Tensor
     ) -> ttnn.Tensor:
         """Run a prefill chunk through every layer and write its K/V.
 
@@ -330,8 +338,14 @@ class Gemma4TT:
         return out
 
     def decode_active(
-        self, tokens, positions, tables, *, trace: bool = False, softcap: bool = True
-    ):
+        self,
+        tokens: torch.Tensor,
+        positions: torch.Tensor,
+        tables: torch.Tensor,
+        *,
+        trace: bool = False,
+        softcap: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Decode only the active rows and return their indices and logits.
 
         decode() without the inactive rows: (active row indices, float logits [A,
@@ -345,16 +359,26 @@ class Gemma4TT:
         active = torch.nonzero(positions >= 0).flatten()
         if len(active) == tokens.shape[0]:
             return active, self._decode_rows(
-                tokens, positions, tables, trace, softcap=softcap
+                tokens, positions, tables, trace=trace, softcap=softcap
             )
         if not len(active):
             return active, torch.zeros(0, self.vocab)
         return active, self._decode_rows(
-            tokens[active], positions[active], tables[:, active], trace, softcap=softcap
+            tokens[active],
+            positions[active],
+            tables[:, active],
+            trace=trace,
+            softcap=softcap,
         )
 
     def _decode_rows(
-        self, tokens, positions, tables, trace, *, softcap: bool = True
+        self,
+        tokens: torch.Tensor,
+        positions: torch.Tensor,
+        tables: torch.Tensor,
+        *,
+        trace: bool,
+        softcap: bool = True,
     ) -> torch.Tensor:
         """Decode rows that are all active."""
         if tokens.shape[0] > self.max_batch:
@@ -397,7 +421,7 @@ class Gemma4TT:
         ttnn.execute_trace(self.mesh, tid, cq_id=0, blocking=False)
         return self.head.read(out, softcap=softcap)
 
-    def _prepare_traces(self):
+    def _prepare_traces(self) -> None:
         """Prepare one decode trace for every active row count.
 
         Allocate every batch size's trace inputs and run its decode once, eagerly,
@@ -432,7 +456,10 @@ class Gemma4TT:
             self._decode_device(dev).deallocate(True)
 
     def _host(
-        self, t: torch.Tensor, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+        self,
+        t: torch.Tensor,
+        dtype: ttnn.DataType = ttnn.bfloat16,
+        layout: ttnn.Layout = ttnn.TILE_LAYOUT,
     ) -> ttnn.Tensor:
         return ttnn.from_torch(
             t,
@@ -441,7 +468,9 @@ class Gemma4TT:
             mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh),
         )
 
-    def _decode_inputs(self, tokens, positions, tables) -> dict[str, ttnn.Tensor]:
+    def _decode_inputs(
+        self, tokens: torch.Tensor, positions: torch.Tensor, tables: torch.Tensor
+    ) -> dict[str, ttnn.Tensor]:
         """Host tensors for one decode step; shapes depend only on the batch size."""
         batch = tokens.shape[0]
         width = self.table_width
@@ -477,23 +506,23 @@ class Gemma4TT:
             roped = (
                 attn.shape.n_q + attn.shape.n_kv
             )  # Q and K rows; V rows keep cos 1, sin 0
-            tables = {}
+            rope_tables: dict[str, torch.Tensor] = {}
             for name, table, fill in (("cos", cos, 1.0), ("sin", sin, 0.0)):
                 rows = torch.full(
                     (batch, attn.heads, attn.shape.head_dim), fill, dtype=table.dtype
                 )
                 rows[:, :roped] = table[pos][:, None, :]
-                tables[name] = rows
+                rope_tables[name] = rows
             if (
                 batch == 1
             ):  # compact [cos | signed sin] tables for the fused q/k norm + RoPE
                 f32.append(
                     attn.qk_rope.host_tables(
-                        tables["cos"].flatten(), tables["sin"].flatten()
+                        rope_tables["cos"].flatten(), rope_tables["sin"].flatten()
                     )
                 )
             else:
-                for name, rows in tables.items():
+                for name, rows in rope_tables.items():
                     inputs[f"{kind}.{name}"] = self._host(
                         rows.reshape(1, 1, batch * attn.heads, -1), ttnn.float32
                     )
@@ -535,9 +564,11 @@ class Gemma4TT:
         h.deallocate(True)
         return out
 
-    def release_traces(self):
+    def release_traces(self) -> None:
         """Release the captures; their inputs stay allocated for the next capture."""
         for tid, _, _ in self.traces.values():
             ttnn.release_trace(self.mesh, tid)
-        self.traces = {}
+        self.traces: dict[
+            int, tuple[ttnn.MeshTraceId, dict[str, ttnn.Tensor], ttnn.Tensor]
+        ] = {}
         self._pt_last = {}

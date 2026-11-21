@@ -30,11 +30,15 @@ serving would
 store them compactly.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
 import ttnn
 
 from tt_models.common.config import TILE
-from tt_models.models.gemma4.expert_stream import _id_bytes, pad_down
+from tt_models.models.gemma4.expert_stream import ExpertStream, _id_bytes, pad_down
 from tt_models.models.gemma4.generic_op import (
     BF16_TILE,
     KERNELS,
@@ -43,6 +47,12 @@ from tt_models.models.gemma4.generic_op import (
     tile_bytes,
 )
 from tt_models.models.gemma4.q4 import BLOCK, factor_blocks
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from tt_models.common.weights import WeightLoader
+    from tt_models.models.gemma4.checkpoint import Checkpoint
 
 KERNELS_Q4 = "expert_q4_gate_up"
 
@@ -78,23 +88,23 @@ def step_tiles(s: torch.Tensor, groups: int) -> torch.Tensor:
 
 
 def gate_up_q4_op(
-    assign,
-    cores,
-    x,
-    ids,
-    weights,
-    scale,
-    w,
-    steps,
-    act,
+    assign: Sequence[tuple[ttnn.CoreCoord, int, int, int, int, int, int]],
+    cores: ttnn.CoreRangeSet,
+    x: ttnn.Tensor,
+    ids: ttnn.Tensor,
+    weights: ttnn.Tensor,
+    scale: ttnn.Tensor,
+    w: ttnn.Tensor,
+    steps: ttnn.Tensor,
+    act: ttnn.Tensor,
     *,
-    kx,
-    slots_per_core,
-    pairs,
-    n_scale,
-    rows=1,
-    slots_per_row=8,
-):
+    kx: int,
+    slots_per_core: int,
+    pairs: int,
+    n_scale: int,
+    rows: int = 1,
+    slots_per_row: int = 8,
+) -> ttnn.Tensor:
     """Build the Q4_0 gate and up operation.
 
     gate|up from Q4_0 tiles (kernels/expert_q4_gate_up_*): as
@@ -233,22 +243,22 @@ def gate_up_q4_op(
 
 
 def down_q4_op(
-    assign,
-    cores,
-    act,
-    ids,
-    w,
-    steps,
-    out,
+    assign: Sequence[tuple[ttnn.CoreCoord, int, int, int]],
+    cores: ttnn.CoreRangeSet,
+    act: ttnn.Tensor,
+    ids: ttnn.Tensor,
+    w: ttnn.Tensor,
+    steps: ttnn.Tensor,
+    out: ttnn.Tensor,
     *,
-    slots,
-    kt,
-    cols,
-    banks,
-    bank_cols,
-    n_tiles,
-    compact_chunk0=None,
-):
+    slots: int,
+    kt: int,
+    cols: int,
+    banks: Sequence[int],
+    bank_cols: int,
+    n_tiles: int,
+    compact_chunk0: int | None = None,
+) -> ttnn.Tensor:
     """Build the batch-1 Q4_0 down operation.
 
     Batch-1 down from Q4_0 tiles (kernels/expert_q4_down_*): as expert_stream.down_op
@@ -370,14 +380,20 @@ class Q4Experts:
     """
 
     def __init__(
-        self, loader, ckpt, layer_idx: int, stream, assemble_gate_up, expert_pad: int
-    ):
+        self,
+        loader: WeightLoader,
+        ckpt: Checkpoint,
+        layer_idx: int,
+        stream: ExpertStream,
+        assemble_gate_up: Callable[[torch.Tensor], torch.Tensor],
+        expert_pad: int,
+    ) -> None:
         """Set up the Q4_0 decode programs for one mesh."""
         p = f"layers.{layer_idx}."
         tp = loader.tp
         memo = {}
 
-        def factored(name):
+        def factored(name: str) -> tuple[torch.Tensor, torch.Tensor]:
             if name not in memo:
                 if name == "gate_up":  # [E, 2I, H] -> [E, H, 2I], blocks along H
                     memo[name] = q4_factor(
@@ -411,7 +427,9 @@ class Q4Experts:
             shard_dim=-2,
         )
 
-        def down_steps():  # [E, I / 32, W] -> per chip [E, 32, W], rows 0 .. kt - 1
+        def down_steps() -> (
+            torch.Tensor
+        ):  # [E, I / 32, W] -> per chip [E, 32, W], rows 0 .. kt - 1
             s = pad_down(factored("down")[1], width)
             e = s.shape[0]
             s = s.reshape(e, tp, kt, width)
@@ -428,8 +446,15 @@ class Q4Experts:
         memo.clear()
         self.stream = stream
 
-    def gate_up_op(self, x, ids, weights, scale, act):
-        """Allocate storage for the gate and up activations."""
+    def gate_up_op(
+        self,
+        x: ttnn.Tensor,
+        ids: ttnn.Tensor,
+        weights: ttnn.Tensor,
+        scale: ttnn.Tensor,
+        act: ttnn.Tensor,
+    ) -> ttnn.Tensor:
+        """Run the Q4_0 gate and up projections."""
         st = self.stream
         return gate_up_q4_op(
             st.gu_assign,
@@ -447,7 +472,13 @@ class Q4Experts:
             n_scale=st.n_experts,
         )
 
-    def down_op(self, act, ids, out, compact_chunk0=None):
+    def down_op(
+        self,
+        act: ttnn.Tensor,
+        ids: ttnn.Tensor,
+        out: ttnn.Tensor,
+        compact_chunk0: int | None = None,
+    ) -> ttnn.Tensor:
         """Run the Q4_0 down projection."""
         st = self.stream
         return down_q4_op(

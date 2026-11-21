@@ -33,8 +33,9 @@ def load(run: Path) -> pd.DataFrame:
         "INPUT_1_Y_PAD[LOGICAL]",
         "INPUT_1_X_PAD[LOGICAL]",
     ]
-    df = pd.read_csv(csv, usecols=lambda c: c in cols, low_memory=False)
-    phase, phases = "start", []
+    df = pd.read_csv(csv, usecols=cols.__contains__, low_memory=False)
+    phase = "start"
+    phases: list[str] = []
     for _, row in df.iterrows():
         if row["OP TYPE"] == "signpost":
             phase = row["OP CODE"]

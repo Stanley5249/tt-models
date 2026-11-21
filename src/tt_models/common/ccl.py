@@ -4,6 +4,8 @@ Cross-chip collectives on the N300 1x2 mesh (async all-gather with double-buffer
 semaphores).
 """
 
+from __future__ import annotations
+
 import ttnn
 
 from tt_models.common.config import DRAM, HIFI4, L1, TILE
@@ -17,7 +19,7 @@ class _Semaphores:
     TT_CCL.
     """
 
-    def __init__(self, mesh: ttnn.MeshDevice):
+    def __init__(self, mesh: ttnn.MeshDevice) -> None:
         grid = mesh.compute_with_storage_grid_size()
         cores = ttnn.CoreRangeSet(
             {
@@ -33,7 +35,12 @@ class _Semaphores:
         self.barrier = [ttnn.create_global_semaphore(mesh, cores, 0) for _ in range(2)]
         self.turn = 0
 
-    def next(self):
+    def next(
+        self,
+    ) -> tuple[
+        list[ttnn._ttnn.global_semaphore.GlobalSemaphore],
+        ttnn._ttnn.global_semaphore.GlobalSemaphore,
+    ]:
         self.turn ^= 1
         return self.gather[self.turn], self.barrier[self.turn]
 
@@ -41,7 +48,7 @@ class _Semaphores:
 _SEMAPHORES: dict[int, _Semaphores] = per_mesh_cache()
 
 
-def init_ccl(mesh: ttnn.MeshDevice):
+def init_ccl(mesh: ttnn.MeshDevice) -> None:
     """Allocate CCL semaphores before trace capture.
 
     Allocate the CCL semaphores; call before any trace capture (see

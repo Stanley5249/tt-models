@@ -1,5 +1,7 @@
 """Fused q/k RMSNorm, head weights and RoPE for the batch-1 QKV row."""
 
+from __future__ import annotations
+
 import torch
 import ttnn
 
@@ -43,7 +45,14 @@ class QkRope:
     reshape back (~60 us per layer).
     """
 
-    def __init__(self, mesh, width: int, head_dim: int, eps: float, core_row: int = 6):
+    def __init__(
+        self,
+        mesh: ttnn.MeshDevice,
+        width: int,
+        head_dim: int,
+        eps: float,
+        core_row: int = 6,
+    ) -> None:
         """Set up the fused RMSNorm and RoPE operation."""
         self.mesh, self.width, self.head_dim, self.eps = mesh, width, head_dim, eps
         self.V = width // (CHUNK * CHUNKS_PER_TILE)
@@ -66,7 +75,14 @@ class QkRope:
         """
         return to_compact(torch.stack([cos_row, sin_row * self.sign]))[None, None]
 
-    def __call__(self, x, cs, w, out, cs_page0: int = 0):
+    def __call__(
+        self,
+        x: ttnn.Tensor,
+        cs: ttnn.Tensor,
+        w: ttnn.Tensor,
+        out: ttnn.Tensor,
+        cs_page0: int = 0,
+    ) -> ttnn.Tensor:
         """Apply fused RMSNorm and RoPE to the QKV row.
 
         x: FP32 row-form QKV matmul output [1, 1, 1, W]; out: BF16 row form [1, 1, 1,

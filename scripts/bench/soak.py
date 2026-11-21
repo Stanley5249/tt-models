@@ -14,7 +14,7 @@ from tt_models.models.gemma4.checkpoint import Checkpoint
 from tt_models.models.gemma4.model import Gemma4TT
 
 
-def used(mesh):
+def used(mesh: ttnn.MeshDevice):
     v = ttnn.get_memory_view(mesh, ttnn.BufferType.DRAM)
     return v.total_bytes_allocated_per_bank * v.num_banks / 2**30
 

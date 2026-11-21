@@ -29,7 +29,7 @@ from tt_models.models.gemma4.expert_stream import TILE, pad_down
 from tt_models.models.gemma4.moe import FeedForward
 
 
-def gelu_tanh(x):
+def gelu_tanh(x: torch.Tensor):
     return torch.nn.functional.gelu(x, approximate="tanh")
 
 
@@ -53,7 +53,7 @@ def main():
         n, pad = ff.expert_local, ff.expert_pad - ff.expert_local
 
         def assembled(
-            t,
+            t: torch.Tensor,
         ):  # [E, H, 2I] (gate | up) -> device order per chip: gate c, pad, up c, pad
             g, u = t[..., :I], t[..., I:]
             z = t.new_zeros(*t.shape[:-1], pad)
@@ -117,21 +117,27 @@ def main():
         dn64 = dn.to(torch.float64)
         scale = ckpt.get(p + "router.per_expert_scale").double()
 
-        def act_host(xh, ids, wts, w):
+        def act_host(
+            xh: torch.Tensor, ids: torch.Tensor, wts: torch.Tensor, w: torch.Tensor
+        ):
             out = []
             for e, we in zip(ids.tolist(), wts.tolist()):
                 h = xh @ w[e]
                 out.append(gelu_tanh(h[:I]) * h[I:] * we * scale[e])
             return torch.stack(out)  # [slots, I]
 
-        def act_dev(act):  # per chip [32, slots * pairs * 32] row 0 -> [slots, I]
+        def act_dev(
+            act: ttnn.Tensor,
+        ):  # per chip [32, slots * pairs * 32] row 0 -> [slots, I]
             parts = [
                 ttnn.to_torch(t).double()[0, 0, 0].reshape(ff.top_k, -1)[:, :n]
                 for t in ttnn.get_device_tensors(act)
             ]
             return torch.cat(parts, -1)
 
-        def down_host(act_chips, ids, w):  # act per chip [slots, n] -> per chip [H]
+        def down_host(
+            act_chips: list[torch.Tensor], ids: torch.Tensor, w: torch.Tensor
+        ):  # act per chip [slots, n] -> per chip [H]
             return [
                 sum(
                     a[j] @ w[e, c * n : (c + 1) * n] for j, e in enumerate(ids.tolist())
@@ -139,13 +145,13 @@ def main():
                 for c, a in enumerate(act_chips)
             ]
 
-        def down_dev(out):
+        def down_dev(out: ttnn.Tensor):
             return [
                 ttnn.to_torch(t).double()[0, 0, 0, :H]
                 for t in ttnn.get_device_tensors(out)
             ]
 
-        def snr(a, ref):
+        def snr(a: torch.Tensor, ref: torch.Tensor):
             return (10 * torch.log10(ref.pow(2).sum() / (a - ref).pow(2).sum())).item()
 
         for seed in range(args.seeds):

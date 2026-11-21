@@ -34,7 +34,9 @@ def prompt_tokens(ckpt: Checkpoint, n: int) -> torch.Tensor:
     return ids[:n]
 
 
-def reference_logits(ckpt, ids, first, layers, offset=0) -> torch.Tensor:
+def reference_logits(
+    ckpt: Checkpoint, ids: torch.Tensor, first: int, layers: int, offset: int = 0
+) -> torch.Tensor:
     tag = f"-at{offset}" if offset else ""
     path = (
         ROOT / "cache" / "ref" / f"readme{tag}-n{ids.shape[0]}-from{first}-L{layers}.pt"
@@ -61,7 +63,7 @@ def reference_logits(ckpt, ids, first, layers, offset=0) -> torch.Tensor:
     return logits
 
 
-def metrics(tt: torch.Tensor, ref: torch.Tensor) -> dict:
+def metrics(tt: torch.Tensor, ref: torch.Tensor) -> dict[str, bool | int | float]:
     tt, ref = tt.float(), ref.float()
     pcc = torch.corrcoef(torch.stack([tt, ref]))[0, 1].item()
     t5, r5 = tt.topk(5).indices, ref.topk(5).indices
@@ -146,7 +148,7 @@ def main():
         if args.perturb:
             plain = model.embed
 
-            def embed(t):
+            def embed(t: torch.Tensor):
                 # Noise keyed by the call's tokens, so calls the model makes for itself
                 # (trace warm-up) do not shift the noise of the measured steps.
                 x = plain(t)

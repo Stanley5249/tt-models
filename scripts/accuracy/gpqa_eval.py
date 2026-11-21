@@ -62,6 +62,7 @@ def main():
         (args.out / "responses.jsonl").open("w") as log,
     ):
         for i, doc, prompt in cases:
+            stops: list[str] = []
             payload = {
                 "model": args.model,
                 "messages": [{"role": "user", "content": prompt}],
@@ -71,7 +72,7 @@ def main():
                 "top_k": 20,
                 "seed": SEED,
                 "chat_template_kwargs": {"enable_thinking": False},
-                "stop": [],
+                "stop": stops,
             }
             t0 = time.perf_counter()
             response = client.post("/v1/chat/completions", json=payload)

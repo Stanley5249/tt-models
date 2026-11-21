@@ -7,6 +7,8 @@ starts at chunk
 v * 64 * compact_tiles(H); padding chunks are zero.
 """
 
+from __future__ import annotations
+
 import torch
 import ttnn
 
@@ -47,7 +49,9 @@ def from_compact(t: torch.Tensor, n: int, h: int) -> torch.Tensor:
 
 
 def compact_tensor(
-    mesh, v: torch.Tensor, memory_config=ttnn.DRAM_MEMORY_CONFIG
+    mesh: ttnn.MeshDevice,
+    v: torch.Tensor,
+    memory_config: ttnn.MemoryConfig = ttnn.DRAM_MEMORY_CONFIG,
 ) -> ttnn.Tensor:
     """Host vectors [n, H] -> device compact FP32 [1, 1, 32, n * V * 32], replicated."""
     return ttnn.from_torch(

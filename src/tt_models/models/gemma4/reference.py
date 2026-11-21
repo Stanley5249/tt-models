@@ -5,9 +5,15 @@ float32 within about 6 GB. Use it for teacher-forced logits and per-layer
 hidden states; it is slow (tens of seconds per layer for long prompts).
 """
 
+from __future__ import annotations
+
 import math
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    import ttnn
 from transformers.models.gemma4 import modeling_gemma4 as hf
 
 from tt_models.models.gemma4.checkpoint import Checkpoint
@@ -27,13 +33,13 @@ def attention_masks(seq_len: int, sliding_window: int) -> dict[str, torch.Tensor
     sliding = causal & (k > q - sliding_window)
     neg = torch.finfo(torch.float32).min
 
-    def additive(allowed):
+    def additive(allowed: torch.Tensor) -> torch.Tensor:
         return torch.where(allowed, 0.0, neg)[None, None]
 
     return {"full_attention": additive(causal), "sliding_attention": additive(sliding)}
 
 
-def roundtrip(w: torch.Tensor, ttnn_dtype) -> torch.Tensor:
+def roundtrip(w: torch.Tensor, ttnn_dtype: ttnn.DataType) -> torch.Tensor:
     """Emulate quantization by round-tripping a tensor in TILE layout.
 
     Quantize-dequantize `w` exactly as a TILE upload in `ttnn_dtype` would (host
@@ -65,7 +71,9 @@ QUANT_GROUPS = {
 }
 
 
-def quantize_layer(state: dict, quant: dict) -> dict:
+def quantize_layer(
+    state: dict[str, torch.Tensor], quant: dict[str, ttnn.DataType]
+) -> dict[str, torch.Tensor]:
     """Apply the requested quantization emulation to layer weights."""
     out = dict(state)
     for group, dtype in quant.items():
@@ -97,9 +105,9 @@ class Reference:
     def __init__(
         self,
         ckpt: Checkpoint | None = None,
-        dtype=torch.float32,
-        quant: dict | None = None,
-    ):
+        dtype: torch.dtype = torch.float32,
+        quant: dict[str, ttnn.DataType] | None = None,
+    ) -> None:
         """Set up the host reference and its weight emulation.
 
         Args:
@@ -134,7 +142,11 @@ class Reference:
 
     @torch.no_grad()
     def layer_forward(
-        self, layer, x: torch.Tensor, positions: torch.Tensor, masks
+        self,
+        layer: hf.Gemma4TextDecoderLayer,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        masks: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Run one layer of the teacher-forced reference."""
         layer_type = self.config.layer_types[layer.layer_idx]
@@ -168,7 +180,7 @@ class Reference:
         *,
         keep_hidden: bool = False,
         num_layers: int | None = None,
-    ):
+    ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
         """Run a teacher-forced forward pass over one sequence.
 
         Teacher-forced forward over `ids` (1D). Returns logits [S, V] and optional

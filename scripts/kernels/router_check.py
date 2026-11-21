@@ -19,7 +19,7 @@ from tt_models.models.gemma4.moe import FeedForward
 from tt_models.models.gemma4.router import Router
 
 
-def host(t, c=0):
+def host(t: ttnn.Tensor, c: int = 0):
     return ttnn.to_torch(ttnn.get_device_tensors(t)[c])
 
 
@@ -42,7 +42,8 @@ def main():
                 ff = FeedForward(loader, ckpt, cfg, layer)
                 ff.decode_constants(rows)
                 same, total, wdiff = 0, 0, 0.0
-                err_mine, err_gpt = [], []
+                err_mine: list[float] = []
+                err_gpt: list[float] = []
                 for seed in range(args.seeds):
                     torch.manual_seed(seed)
                     r = ttnn.from_torch(

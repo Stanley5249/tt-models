@@ -15,9 +15,12 @@ vLLM's prefix hits and the plugin's chunk ends fall. vLLM's Python
 streaming-input sessions can resume off that grid and are not supported.
 """
 
+from __future__ import annotations
+
 import math
 import os
 import time
+from typing import TYPE_CHECKING, Self
 
 import torch
 from loguru import logger
@@ -26,6 +29,15 @@ from tt_models.models.gemma4.checkpoint import Checkpoint, attention_dims
 from tt_models.models.gemma4.config import PREFILL_BUCKET, PREFILL_CHUNK, prefill_rows
 from tt_models.models.gemma4.kv_cache import KvCache, kv_groups
 from tt_models.models.gemma4.model import Gemma4TT
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
+    import ttnn
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+    from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheSpec
+    from vllm_tt_plugin.model_input import TTSamplingParams
 
 # Device DRAM per chip for the shared KV pool. Weights take 8.0 of 11.87 GiB;
 # the rest holds prefill activations, decode traces and their inputs.
@@ -42,8 +54,12 @@ LOGPROBS_K = 32
 
 
 def sample(
-    logits: torch.Tensor, params, positions: torch.Tensor, rows_idx=None, softcap=None
-):
+    logits: torch.Tensor,
+    params: TTSamplingParams,
+    positions: torch.Tensor,
+    rows_idx: torch.Tensor | Sequence[int] | None = None,
+    softcap: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
     """Sample one token per row from float logits [B, V] with vLLM's semantics.
 
     The softcap keeps the order, so greedy and top-k work on the raw logits and only
@@ -96,7 +112,9 @@ def sample(
         if top_p < 1.0:
             before = torch.cumsum(probs, 0) - probs  # mass of the better candidates
             probs = torch.where(before < top_p, probs, torch.zeros_like(probs))
-        seed = params.seed[r] if params.seed is not None else None
+        seed = params.seed
+        if isinstance(seed, (torch.Tensor, list)):
+            seed = seed[r]
         gen = (
             None
             if seed is None
@@ -131,7 +149,7 @@ class Gemma4ForCausalLM:
     # plugin passes no scheduler settings to the model itself).
     longest_prefill = PREFILL_CHUNK
 
-    def __init__(self, model: Gemma4TT):
+    def __init__(self, model: Gemma4TT) -> None:
         """Wrap the model and configure instance capabilities."""
         self.model = model
         self._prefill_warmed = False
@@ -139,21 +157,21 @@ class Gemma4ForCausalLM:
         # GEMMA4_TIMING=1 logs the model's share of every step, to separate it from
         # vLLM's.
         self.timing = os.environ.get("GEMMA4_TIMING") == "1"
-        self._last_return = None
+        self._last_return: float | None = None
 
     # -- setup ---------------------------------------------------------------
 
     @classmethod
     def initialize_vllm_model(
         cls,
-        hf_config,
-        mesh_device,
-        max_batch_size,
-        max_seq_len,
-        tt_data_parallel=1,
-        optimizations=None,  # noqa: ARG003 - plugin API
-        **_,
-    ):
+        hf_config: Gemma4TextConfig,
+        mesh_device: ttnn.MeshDevice,
+        max_batch_size: int,
+        max_seq_len: int,
+        tt_data_parallel: int = 1,
+        optimizations: object = None,  # noqa: ARG003 - plugin API
+        **_: object,
+    ) -> Self:
         """Load Gemma 4 using the vLLM plugin settings."""
         if tt_data_parallel != 1:
             raise ValueError(
@@ -174,7 +192,9 @@ class Gemma4ForCausalLM:
         return cls(model)
 
     @classmethod
-    def get_max_tokens_all_users(cls, model_name="", num_devices=2, **_):
+    def get_max_tokens_all_users(
+        cls, model_name: str = "", num_devices: int = 2, **_: object
+    ) -> int:
         """Return the number of token slots in the KV pool.
 
         Token slots of the KV pool: KV_POOL_BYTES over the bytes one token slot
@@ -189,7 +209,7 @@ class Gemma4ForCausalLM:
         return int(KV_POOL_BYTES / (layers_per_group * 2 * per_token * BFP8_BYTES))
 
     @classmethod
-    def get_kv_cache_spec(cls, vllm_config):
+    def get_kv_cache_spec(cls, vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         """Build one KV-cache spec per layer.
 
         One spec per layer, so vLLM forms sliding and global KV-cache groups. The
@@ -227,7 +247,9 @@ class Gemma4ForCausalLM:
         return specs
 
     @staticmethod
-    def _check_chunk_grid(vllm_config, dims):
+    def _check_chunk_grid(
+        vllm_config: VllmConfig, dims: dict[str, tuple[int, int]]
+    ) -> None:
         """Check that vLLM schedules prefill on the KV block grid.
 
         Prefill must start on the KV block grid, the lcm of the group block sizes
@@ -249,7 +271,9 @@ class Gemma4ForCausalLM:
                     f"(now {align})"
                 )
 
-    def allocate_kv_cache_per_layer(self, per_layer_specs):
+    def allocate_kv_cache_per_layer(
+        self, per_layer_specs: Mapping[str, KVCacheSpec]
+    ) -> KvCache | None:
         """per_layer_specs: (shape, dtype, buffer index) per layer from vLLM's plan."""
         m = self.model
         shapes = [tuple(shape) for shape, _, _ in per_layer_specs]
@@ -299,14 +323,14 @@ class Gemma4ForCausalLM:
 
     def prefill_forward(
         self,
-        tokens,
-        start_pos,
-        prompt_lens,
-        page_table,  # noqa: ARG002 - plugin API
-        kv_cache,  # noqa: ARG002 - plugin API
-        page_tables_per_layer=None,
-        **_,
-    ):
+        tokens: torch.Tensor,
+        start_pos: torch.Tensor,
+        prompt_lens: Sequence[int] | torch.Tensor,
+        page_table: torch.Tensor,  # noqa: ARG002 - plugin API
+        kv_cache: KvCache,  # noqa: ARG002 - plugin API
+        page_tables_per_layer: list[torch.Tensor] | None = None,
+        **_: object,
+    ) -> torch.Tensor:
         """Run prefill for each requested range of positions.
 
         Row i computes tokens[i, start_pos[i]:prompt_lens[i]]; the cache holds the
@@ -328,15 +352,15 @@ class Gemma4ForCausalLM:
 
     def decode_forward(
         self,
-        tokens,
-        start_pos,
-        page_table,  # noqa: ARG002 - plugin API
-        kv_cache,  # noqa: ARG002 - plugin API
-        enable_trace=False,  # noqa: FBT002 - plugin API
-        page_tables_per_layer=None,
-        sampling_params=None,
-        **_,
-    ):
+        tokens: torch.Tensor,
+        start_pos: torch.Tensor,
+        page_table: torch.Tensor,  # noqa: ARG002 - plugin API
+        kv_cache: KvCache,  # noqa: ARG002 - plugin API
+        enable_trace: bool = False,  # noqa: FBT001, FBT002 - plugin API
+        page_tables_per_layer: list[torch.Tensor] | None = None,
+        sampling_params: TTSamplingParams | None = None,
+        **_: object,
+    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """Run one scheduler decode step and sample when requested."""
         tables = self._group_tables(page_tables_per_layer, tokens.shape[0])
         t0 = time.perf_counter()
@@ -383,11 +407,11 @@ class Gemma4ForCausalLM:
 
     def warmup_model_prefill(
         self,
-        kv_cache,  # noqa: ARG002 - plugin API
-        enable_trace,  # noqa: ARG002 - plugin API
-        can_sample_on_device,  # noqa: ARG002 - plugin API
-        **_,
-    ):
+        kv_cache: KvCache,  # noqa: ARG002 - plugin API
+        enable_trace: bool,  # noqa: ARG002, FBT001 - plugin API
+        can_sample_on_device: bool,  # noqa: ARG002, FBT001 - plugin API
+        **_: object,
+    ) -> None:
         """Build prefill programs for every padded length.
 
         Build the prefill programs of every padded length (prefill_rows), for a piece
@@ -427,13 +451,13 @@ class Gemma4ForCausalLM:
 
     def warmup_model_decode(
         self,
-        kv_cache,  # noqa: ARG002 - plugin API
-        max_batch_size,
-        num_blocks,  # noqa: ARG002 - plugin API
-        can_sample_on_device,  # noqa: ARG002 - plugin API
-        enable_trace,
-        **_,
-    ):
+        kv_cache: KvCache,  # noqa: ARG002 - plugin API
+        max_batch_size: int,
+        num_blocks: int,  # noqa: ARG002 - plugin API
+        can_sample_on_device: bool,  # noqa: ARG002, FBT001 - plugin API
+        enable_trace: bool,  # noqa: FBT001 - plugin API
+        **_: object,
+    ) -> None:
         """Compile one decode program per active row count.
 
         Compile (and capture) one decode program per active row count, since
@@ -446,6 +470,6 @@ class Gemma4ForCausalLM:
             positions[:active] = 0
             self.model.decode(tokens, positions, tables, trace=enable_trace)
 
-    def release_persistent_capture(self):
+    def release_persistent_capture(self) -> None:
         """Release the persistent decode traces."""
         self.model.release_traces()

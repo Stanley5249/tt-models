@@ -13,6 +13,10 @@ weights once. The down weight is stored with the hidden padded to 3072 columns
 for the stream's bank layout; prefill slices the padding off.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
 import ttnn
 
@@ -26,10 +30,20 @@ from tt_models.models.gemma4.expert_q4 import Q4Experts
 from tt_models.models.gemma4.expert_stream import ExpertStream, MlpStream, pad_down, run
 from tt_models.models.gemma4.router import Router
 
-_STREAMS: dict[tuple, object] = per_mesh_cache()
+if TYPE_CHECKING:
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+
+    from tt_models.models.gemma4.boundary import Boundary
+    from tt_models.models.gemma4.checkpoint import Checkpoint
+
+_STREAMS: dict[
+    tuple[str, int] | tuple[str, int, int], ExpertStream | MlpStream | Router
+] = per_mesh_cache()
 
 
-def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:
+def expert_stream(
+    mesh: ttnn.MeshDevice, cfg: Gemma4TextConfig, expert_local: int, rows: int = 1
+) -> ExpertStream:
     """Share an ExpertStream per mesh and token count across the layers."""
     key = ("experts", id(mesh), rows)
     if key not in _STREAMS:
@@ -44,7 +58,7 @@ def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:
     return _STREAMS[key]
 
 
-def router_op(mesh, cfg, rows: int = 1) -> Router:
+def router_op(mesh: ttnn.MeshDevice, cfg: Gemma4TextConfig, rows: int = 1) -> Router:
     """Build the router for the given decode row count."""
     key = ("router", id(mesh), rows)
     if key not in _STREAMS:
@@ -54,7 +68,7 @@ def router_op(mesh, cfg, rows: int = 1) -> Router:
     return _STREAMS[key]
 
 
-def mlp_stream(mesh, cfg, mlp_pad: int) -> MlpStream:
+def mlp_stream(mesh: ttnn.MeshDevice, cfg: Gemma4TextConfig, mlp_pad: int) -> MlpStream:
     """Build the dense MLP stream for the padded intermediate width."""
     key = ("mlp", id(mesh))
     if key not in _STREAMS:
@@ -76,15 +90,15 @@ class FeedForward:
     def __init__(
         self,
         loader: WeightLoader,
-        ckpt,
-        cfg,
+        ckpt: Checkpoint,
+        cfg: Gemma4TextConfig,
         layer_idx: int,
-        mlp_dtype=ttnn.bfloat8_b,
-        expert_dtype=ttnn.bfloat4_b,
-        expert_fidelity="LoFi",
+        mlp_dtype: ttnn.DataType = ttnn.bfloat8_b,
+        expert_dtype: ttnn.DataType = ttnn.bfloat4_b,
+        expert_fidelity: str = "LoFi",
         *,
         expert_q4: bool = False,
-    ):
+    ) -> None:
         """Load the feedforward weights and prepare the decode streams."""
         tp = loader.tp
         self.tp = tp
@@ -111,7 +125,7 @@ class FeedForward:
         put = loader.put
         rm = ttnn.ROW_MAJOR_LAYOUT
 
-        def norm(name):
+        def norm(name: str) -> ttnn.Tensor:
             return put(
                 f"L{layer_idx}.{name}",
                 lambda: norm_weight(ckpt.get(p + name + ".weight")),
@@ -120,7 +134,7 @@ class FeedForward:
 
         # The router norm, pre_ff and pre_ff2 all normalize the same residual, so
         # one weightless RMSNorm feeds three weight multiplies (TILE row vectors).
-        def row(name):
+        def row(name: str) -> ttnn.Tensor:
             return put(
                 f"L{layer_idx}.{name}.row",
                 lambda: ckpt.get(p + name + ".weight").float().reshape(1, 1, 1, H),
@@ -134,7 +148,7 @@ class FeedForward:
 
         self.mlp_stream = mlp_stream(loader.mesh, cfg, self.mlp_pad)
 
-        def mlp_gate_up():
+        def mlp_gate_up() -> torch.Tensor:
             g = ckpt.get(p + "mlp.gate_proj.weight").T  # [H, I]
             u = ckpt.get(p + "mlp.up_proj.weight").T
             n, zeros = self.mlp_local, g.new_zeros(H, self.mlp_pad - self.mlp_local)
@@ -152,7 +166,7 @@ class FeedForward:
             ]
             return torch.cat(parts, -1)[None, None]
 
-        def mlp_down():
+        def mlp_down() -> torch.Tensor:
             d = ckpt.get(p + "mlp.down_proj.weight").T  # [I, H]
             n, zeros = self.mlp_local, d.new_zeros(self.mlp_pad - self.mlp_local, H)
             d = torch.cat(
@@ -175,7 +189,7 @@ class FeedForward:
             shard_dim=-2,
         )
 
-        def router():
+        def router() -> torch.Tensor:
             # HF: softmax((rmsnorm(x) * scale * H^-0.5) @ proj.T); fold scale and H^-0.5
             # into proj.
             w = ckpt.get(p + "router.proj.weight").float()  # [E, H]
@@ -184,7 +198,7 @@ class FeedForward:
 
         self.router = put(f"L{layer_idx}.router", router, ttnn.bfloat16)
 
-        def assemble_gate_up(t):
+        def assemble_gate_up(t: torch.Tensor) -> torch.Tensor:
             """Reorder gate and up weights for the device.
 
             [E, H, 2I] (gate columns, then up) -> the device order: per chip, gate c,
@@ -210,7 +224,7 @@ class FeedForward:
                 -1,
             )
 
-        def experts_gate_up():
+        def experts_gate_up() -> torch.Tensor:
             return assemble_gate_up(
                 ckpt.get(p + "experts.gate_up_proj").transpose(1, 2)
             )[None]  # [E, 2I, H] -> [1, E, H, 2I]
@@ -219,7 +233,7 @@ class FeedForward:
         self.pack_cores = [ttnn.CoreCoord(x, 7) for x in range(8)]
         self.down_width = self.stream.down_width
 
-        def experts_down():
+        def experts_down() -> torch.Tensor:
             down = (
                 ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous()
             )  # [E, I, H]
@@ -280,10 +294,10 @@ class FeedForward:
         self._zero_bias = {}
         self._chunk_cfgs = {}
 
-    def _rms(self, x, w):
+    def _rms(self, x: ttnn.Tensor, w: ttnn.Tensor) -> ttnn.Tensor:
         return rms_norm(x, w, self.eps)
 
-    def topk_route(self, normed: ttnn.Tensor):
+    def topk_route(self, normed: ttnn.Tensor) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         """Top-k routing from the weightless RMSNorm of the residual.
 
         Returns renormalized weights [1, 1, T, k] and expert ids [1, 1, T, k] (uint16).
@@ -306,7 +320,7 @@ class FeedForward:
             t.deallocate(True)
         return weights, top_i
 
-    def decode_constants(self, tokens: int):
+    def decode_constants(self, tokens: int) -> None:
         """Allocate the decode constants for the given row count.
 
         Allocate the decode constants for `tokens` rows now (see
@@ -325,7 +339,9 @@ class FeedForward:
             )
         return self._zero_bias[tokens]
 
-    def _route(self, normed: ttnn.Tensor, tokens: int):
+    def _route(
+        self, normed: ttnn.Tensor, tokens: int
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         """Compute the expert ids and weights with topk_router_gpt.
 
         topk_router_gpt: row-major [T, k] uint16 ids and BF16 softmax weights over
@@ -387,7 +403,7 @@ class FeedForward:
         t.deallocate(True)
         return out
 
-    def _mlp(self, x, dtype=None):
+    def _mlp(self, x: ttnn.Tensor, dtype: ttnn.DataType | None = None) -> ttnn.Tensor:
         gu = ttnn.linear(
             x, self.mlp_gate_up, compute_kernel_config=HIFI2, memory_config=DRAM
         )
@@ -411,7 +427,13 @@ class FeedForward:
         h.deallocate(True)
         return self._unpad(out)
 
-    def decode_compact(self, normed, mlp_in, exp_in, boundary) -> ttnn.Tensor:
+    def decode_compact(
+        self,
+        normed: ttnn.Tensor,
+        mlp_in: ttnn.Tensor,
+        exp_in: ttnn.Tensor,
+        boundary: Boundary,
+    ) -> ttnn.Tensor:
         """Run feedforward decode on compact boundaries.
 
         1-4 decode tokens on compact boundaries (boundary.py). normed, mlp_in,
@@ -459,7 +481,12 @@ class FeedForward:
         ids.deallocate(True)
         return out
 
-    def _chunk_config(self, rows: int):
+    def _chunk_config(
+        self, rows: int
+    ) -> tuple[
+        ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig,
+        ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig,
+    ]:
         """Sparse matmul configs for prefill chunks of `rows` token rows."""
         if rows not in self._chunk_cfgs:
             m = rows // TILE
@@ -518,7 +545,11 @@ class FeedForward:
 
         rep = ttnn.ReplicateTensorToMesh(self.mesh)
 
-        def up(t, dtype, layout=ttnn.ROW_MAJOR_LAYOUT):
+        def up(
+            t: torch.Tensor,
+            dtype: ttnn.DataType,
+            layout: ttnn.Layout = ttnn.ROW_MAJOR_LAYOUT,
+        ) -> ttnn.Tensor:
             return ttnn.from_torch(
                 t,
                 dtype=dtype,
@@ -614,7 +645,9 @@ class FeedForward:
         pairs.deallocate(True)
         return self._unpad(out)
 
-    def _experts(self, x, normed, chunk_tokens: int = 4096):
+    def _experts(
+        self, x: ttnn.Tensor, normed: ttnn.Tensor, chunk_tokens: int = 4096
+    ) -> ttnn.Tensor:
         """Prefill experts in token chunks, which bound the gathered-row buffers."""
         t = x.shape[2]
         if t <= chunk_tokens:

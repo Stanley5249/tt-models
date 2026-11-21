@@ -19,6 +19,8 @@ scatters the next matmul inputs back to row form (BF16).
 The residual stream is FP32 (it was BF16).
 """
 
+from __future__ import annotations
+
 import ttnn
 
 from tt_models.common.config import L1, TILE
@@ -41,7 +43,9 @@ class Boundary:
     layers).
     """
 
-    def __init__(self, mesh, hidden: int, eps: float, tail_cores: int = 6):
+    def __init__(
+        self, mesh: ttnn.MeshDevice, hidden: int, eps: float, tail_cores: int = 6
+    ) -> None:
         """Set up the compact operators for one mesh."""
         self.mesh = mesh
         self.hidden = hidden
@@ -85,7 +89,7 @@ class Boundary:
         self,
         src: ttnn.Tensor,
         dst: ttnn.Tensor,
-        cores: list,
+        cores: list[ttnn.CoreCoord],
         dst_chunk0: int = 0,
         rows: int = 1,
     ) -> ttnn.Tensor:
@@ -141,16 +145,16 @@ class Boundary:
     def _tail(
         self,
         kind: str,
-        g,
-        x,
-        w,
-        x_out,
-        outs: list,
+        g: ttnn.Tensor,
+        x: ttnn.Tensor,
+        w: ttnn.Tensor,
+        x_out: ttnn.Tensor,
+        outs: list[ttnn.Tensor],
         w_vectors: int,
         scalar: float = 1.0,
         x_page0: int = 0,
         rows: int = 1,
-    ):
+    ) -> ttnn.Tensor:
         V = self.V
         cores = line_cores(self.tail_cores * rows, y0=0)  # core i: row i // tail_cores
         crs = core_range_set(cores)
@@ -273,8 +277,17 @@ class Boundary:
         return ttnn.generic_op([g, x, w, *outs, x_out], program)
 
     def attn_tail(
-        self, g, x, w, x_out, n, mlp_in, exp_in, x_page0: int = 0, rows: int = 1
-    ):
+        self,
+        g: ttnn.Tensor,
+        x: ttnn.Tensor,
+        w: ttnn.Tensor,
+        x_out: ttnn.Tensor,
+        n: ttnn.Tensor,
+        mlp_in: ttnn.Tensor,
+        exp_in: ttnn.Tensor,
+        x_page0: int = 0,
+        rows: int = 1,
+    ) -> ttnn.Tensor:
         """Sum the attention partials and prepare feedforward inputs.
 
         g: all-gathered compact attention partials [1, 2, 32, rows*V*32]; x: compact
@@ -297,7 +310,16 @@ class Boundary:
             rows=rows,
         )
 
-    def ff_tail(self, g, x, w, x_out, h, scalar: float, rows: int = 1):
+    def ff_tail(
+        self,
+        g: ttnn.Tensor,
+        x: ttnn.Tensor,
+        w: ttnn.Tensor,
+        x_out: ttnn.Tensor,
+        h: ttnn.Tensor,
+        scalar: float,
+        rows: int = 1,
+    ) -> ttnn.Tensor:
         """Sum the feedforward partials and prepare the next layer's input.
 
         g: all-gathered compact [mlp rows | expert rows] partials [1, 2, 32,

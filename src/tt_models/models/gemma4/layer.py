@@ -1,22 +1,39 @@
 """One Gemma 4 decoder layer: attention and feed-forward with their norms."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
 import ttnn
 
 from tt_models.common.ccl import all_gather_compact
 from tt_models.common.norm import rms_norm
-from tt_models.common.weights import norm_weight
-from tt_models.models.gemma4.attention import Attention
-from tt_models.models.gemma4.boundary import Boundary
+from tt_models.common.weights import WeightLoader, norm_weight
+from tt_models.models.gemma4.attention import Attention, CompactRope, PrefillChunk
 from tt_models.models.gemma4.compact import compact_tensor
-from tt_models.models.gemma4.config import Precision
 from tt_models.models.gemma4.moe import FeedForward
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+
+    from tt_models.models.gemma4.boundary import Boundary
+    from tt_models.models.gemma4.checkpoint import Checkpoint
+    from tt_models.models.gemma4.config import Precision
+    from tt_models.models.gemma4.kv_cache import LayerKv
 
 
 class DecoderLayer:
     """Combine attention and feedforward for one decoder layer."""
 
-    def __init__(self, loader, ckpt, cfg, idx, precision: Precision):
+    def __init__(
+        self,
+        loader: WeightLoader,
+        ckpt: Checkpoint,
+        cfg: Gemma4TextConfig,
+        idx: int,
+        precision: Precision,
+    ) -> None:
         """Load the weights and operators for one layer."""
         p = f"layers.{idx}."
         rm = ttnn.ROW_MAJOR_LAYOUT
@@ -63,7 +80,7 @@ class DecoderLayer:
         """Return the host input normalization weight."""
         return self._raw["input_layernorm"]
 
-    def boundary_weights(self, mesh, next_norm: torch.Tensor):
+    def boundary_weights(self, mesh: ttnn.MeshDevice, next_norm: torch.Tensor) -> None:
         """Load the compact weights for the two batch-1 tails.
 
         Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's
@@ -88,10 +105,10 @@ class DecoderLayer:
         self.w_attn_c = compact_tensor(mesh, attn)
         self.w_ff_c = compact_tensor(mesh, ff)
 
-    def _rms(self, x, w):
+    def _rms(self, x: ttnn.Tensor, w: ttnn.Tensor) -> ttnn.Tensor:
         return rms_norm(x, w, self.eps)
 
-    def _finish(self, x, attn_out):
+    def _finish(self, x: ttnn.Tensor, attn_out: ttnn.Tensor) -> ttnn.Tensor:
         a = self._rms(attn_out, self.post_attn_ln)
         attn_out.deallocate(True)
         x2 = ttnn.add(x, a)
@@ -107,7 +124,13 @@ class DecoderLayer:
             x3 = x4
         return x3
 
-    def prefill(self, x, rope, kv, chunk):
+    def prefill(
+        self,
+        x: ttnn.Tensor,
+        rope: tuple[ttnn.Tensor, ttnn.Tensor],
+        kv: LayerKv,
+        chunk: PrefillChunk,
+    ) -> ttnn.Tensor:
         """Run one decoder layer over a prefill chunk."""
         h = self._rms(x, self.input_ln)
         a = self.attn.prefill(h, rope, kv, chunk)
@@ -115,8 +138,16 @@ class DecoderLayer:
         return self._finish(x, a)
 
     def decode_compact(
-        self, xc, h, rope, kv, page_table, cur_pos, b: Boundary, x_page0: int = 0
-    ):
+        self,
+        xc: ttnn.Tensor,
+        h: ttnn.Tensor,
+        rope: tuple[ttnn.Tensor, ttnn.Tensor] | CompactRope,
+        kv: LayerKv,
+        page_table: ttnn.Tensor,
+        cur_pos: ttnn.Tensor,
+        b: Boundary,
+        x_page0: int = 0,
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         """Decode one layer using compact boundaries.
 
         1-4 decode tokens on compact boundaries: xc compact FP32 residuals (one

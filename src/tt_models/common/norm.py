@@ -1,5 +1,7 @@
 """RMSNorm on decode and prefill rows."""
 
+from __future__ import annotations
+
 import ttnn
 
 from tt_models.common.config import DRAM, HIFI4, TILE
@@ -7,7 +9,7 @@ from tt_models.common.config import DRAM, HIFI4, TILE
 _NORM_SHARD = {}
 
 
-def rms_norm(x: ttnn.Tensor, weight, eps: float) -> ttnn.Tensor:
+def rms_norm(x: ttnn.Tensor, weight: ttnn.Tensor, eps: float) -> ttnn.Tensor:
     """RMSNorm over the last dim of [1, 1, T, H].
 
     For decode (T <= 32) the interleaved op runs on few cores (63 us on

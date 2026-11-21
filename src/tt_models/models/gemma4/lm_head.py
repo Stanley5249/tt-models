@@ -4,13 +4,22 @@ The tied LM head: the embedding table as a DRAM-sharded matmul split over the
 vocabulary.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 import ttnn
 
 from tt_models.common.config import DRAM, HIFI2, TILE, dram_sharded, width_sharded_l1
 from tt_models.common.norm import rms_norm
-from tt_models.common.weights import norm_weight
+from tt_models.common.weights import WeightLoader, norm_weight
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+
+    from tt_models.models.gemma4.checkpoint import Checkpoint
 
 # The LM head is read as LM_SPLITS DRAM-sharded matmuls per chip: 2.5 -> 1.37 ms per
 # decode step against one interleaved matmul
@@ -23,7 +32,14 @@ LM_CORES = 8
 class LmHead:
     """Project hidden states through the tied embedding weights."""
 
-    def __init__(self, mesh, loader, ckpt, cfg, dtype):
+    def __init__(
+        self,
+        mesh: ttnn.MeshDevice,
+        loader: WeightLoader,
+        ckpt: Checkpoint,
+        cfg: Gemma4TextConfig,
+        dtype: ttnn.DataType,
+    ) -> None:
         """Load the sharded embedding weight and final normalization weight."""
         self.mesh = mesh
         self.cfg = cfg
@@ -38,7 +54,9 @@ class LmHead:
         self.weights = self._weights(loader, ckpt, dtype)
         self.lm_in = width_sharded_l1(self.hidden, LM_CORES)
 
-    def _weights(self, loader, ckpt, dtype) -> list[ttnn.Tensor]:
+    def _weights(
+        self, loader: WeightLoader, ckpt: Checkpoint, dtype: ttnn.DataType
+    ) -> list[ttnn.Tensor]:
         """Load the tied embedding weights in DRAM-sharded column blocks.
 
         LM_SPLITS DRAM-sharded column blocks per chip; chip c split i holds vocab
@@ -55,9 +73,9 @@ class LmHead:
             fused_activation=None,
         )
         self.lm_out = width_sharded_l1(width, LM_CORES)
-        table = {}
+        table: dict[str, torch.Tensor] = {}
 
-        def split(i):
+        def split(i: int) -> torch.Tensor:
             if "t" not in table:
                 table["t"] = ckpt.get("embed_tokens.weight").T  # [H, V]
             t = table["t"]

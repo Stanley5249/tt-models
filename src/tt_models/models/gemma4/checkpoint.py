@@ -7,14 +7,20 @@ fails with ENOMEM. So the header is parsed here and each tensor is read with
 a plain `readinto` at its offset.
 """
 
+from __future__ import annotations
+
 import json
 import struct
 from functools import cached_property
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict
 
 import torch
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 DEFAULT_MODEL = "google/gemma-4-26B-A4B-it-qat-q4_0-unquantized"
 TEXT_PREFIX = "model.language_model."
@@ -34,35 +40,43 @@ def resolve_snapshot(model: str = DEFAULT_MODEL) -> Path:
     )
 
 
-def attention_dims(cfg) -> dict[str, tuple[int, int]]:
+def attention_dims(cfg: Gemma4TextConfig) -> dict[str, tuple[int, int]]:
     """(head_dim, num_kv_heads) per layer type.
 
     transformers >= 5.15 keeps the global layers' values in per_layer_config
     and refuses the old global attributes, such as cfg.head_dim.
     """
     dims = {}
+    assert cfg.layer_types is not None
+    assert cfg.per_layer_config is not None
     for i, kind in enumerate(cfg.layer_types):
         layer = cfg.per_layer_config[i]
         dims.setdefault(kind, (layer.head_dim, layer.num_key_value_heads))
     return dims
 
 
+class _TensorHeader(TypedDict):
+    dtype: str
+    shape: list[int]
+    data_offsets: tuple[int, int]
+
+
 class Checkpoint:
     """Read config and tensors from a Gemma 4 checkpoint."""
 
-    def __init__(self, model: str = DEFAULT_MODEL):
+    def __init__(self, model: str = DEFAULT_MODEL) -> None:
         """Resolve the snapshot and index its tensor shards."""
         self.root = resolve_snapshot(model)
         index = json.loads((self.root / "model.safetensors.index.json").read_text())
         self.weight_map: dict[str, str] = index["weight_map"]
-        self._headers: dict[str, tuple[int, dict]] = {}
+        self._headers: dict[str, tuple[int, dict[str, _TensorHeader]]] = {}
 
     @cached_property
-    def config(self):
+    def config(self) -> Gemma4TextConfig:
         """The text config (Gemma4TextConfig)."""
         return AutoConfig.from_pretrained(self.root).get_text_config()
 
-    def _header(self, filename: str) -> tuple[int, dict]:
+    def _header(self, filename: str) -> tuple[int, dict[str, _TensorHeader]]:
         if filename not in self._headers:
             with (self.root / filename).open("rb") as f:
                 (size,) = struct.unpack("<Q", f.read(8))

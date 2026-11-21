@@ -14,7 +14,10 @@ buffer. A prefill chunk at position 0 attends over its own K/V; a later chunk
 holds the earlier positions and the chunk itself.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import ttnn
@@ -31,12 +34,21 @@ from tt_models.common.config import (
 from tt_models.common.mesh import per_mesh_cache
 from tt_models.common.weights import WeightLoader, norm_weight
 from tt_models.models.gemma4.checkpoint import attention_dims
-from tt_models.models.gemma4.kv_cache import LayerKv
 from tt_models.models.gemma4.qk_rope import QkRope
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+
+    from tt_models.models.gemma4.boundary import Boundary
+    from tt_models.models.gemma4.checkpoint import Checkpoint
+    from tt_models.models.gemma4.kv_cache import LayerKv
 
 # Chunked prefill attention needs its chunk start on a multiple of the SDPA q and
 # k chunks, which must also cover every KV block size (64 sliding, 128 global).
 CHUNK_ALIGN = 128
+
+
+type CompactRope = tuple[Literal["compact"], ttnn.Tensor, int]
 
 
 @dataclass(frozen=True)
@@ -50,7 +62,7 @@ class AttnShape:
     window: int | None
 
 
-def attn_shape(cfg, layer_idx: int, tp: int) -> AttnShape:
+def attn_shape(cfg: Gemma4TextConfig, layer_idx: int, tp: int) -> AttnShape:
     """Calculate the per-chip attention shape for one layer."""
     kind = cfg.layer_types[layer_idx]
     head_dim, n_kv = attention_dims(cfg)[kind]
@@ -82,10 +94,10 @@ class PrefillChunk:
     fill_tables: list[ttnn.Tensor]
 
 
-_QK_ROPE = per_mesh_cache()
+_QK_ROPE: dict[tuple[int, int, int], QkRope] = per_mesh_cache()
 
 
-def qk_rope(mesh, width: int, head_dim: int, eps: float) -> QkRope:
+def qk_rope(mesh: ttnn.MeshDevice, width: int, head_dim: int, eps: float) -> QkRope:
     """Get the cached fused query and key RoPE operator."""
     key = (id(mesh), width, head_dim)
     if key not in _QK_ROPE:
@@ -93,10 +105,10 @@ def qk_rope(mesh, width: int, head_dim: int, eps: float) -> QkRope:
     return _QK_ROPE[key]
 
 
-_ROTATE = per_mesh_cache()
+_ROTATE: dict[tuple[int, int], ttnn.Tensor] = per_mesh_cache()
 
 
-def rotate_half(x: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:
+def rotate_half(x: ttnn.Tensor, memory_config: ttnn.MemoryConfig = DRAM) -> ttnn.Tensor:
     """Rotate the two halves of the input in one matmul.
 
     cat(-x2, x1) as one matmul with a constant +-1 matrix (exact in BF16 with fp32
@@ -127,7 +139,11 @@ def rotate_half(x: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:
 
 
 def apply_rope(
-    x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor, memory_config=DRAM, dtype=None
+    x: ttnn.Tensor,
+    cos: ttnn.Tensor,
+    sin: ttnn.Tensor,
+    memory_config: ttnn.MemoryConfig = DRAM,
+    dtype: ttnn.DataType | None = None,
 ) -> ttnn.Tensor:
     """Apply RoPE with x's dtype for intermediates and `dtype` for the sum."""
     rot = rotate_half(x, memory_config)
@@ -140,7 +156,12 @@ def apply_rope(
     return out
 
 
-def head_norm(x: ttnn.Tensor, weight, eps: float, memory_config=DRAM) -> ttnn.Tensor:
+def head_norm(
+    x: ttnn.Tensor,
+    weight: ttnn.Tensor,
+    eps: float,
+    memory_config: ttnn.MemoryConfig = DRAM,
+) -> ttnn.Tensor:
     """RMSNorm over head_dim of a [1, H, S, D] or [1, B, H, D] tensor."""
     shape = list(x.shape)
     flat = ttnn.reshape(x, (1, 1, shape[1] * shape[2], shape[3]))
@@ -158,8 +179,13 @@ class Attention:
     """Run attention for one decoder layer."""
 
     def __init__(
-        self, loader: WeightLoader, ckpt, cfg, layer_idx: int, dtype=ttnn.bfloat8_b
-    ):
+        self,
+        loader: WeightLoader,
+        ckpt: Checkpoint,
+        cfg: Gemma4TextConfig,
+        layer_idx: int,
+        dtype: ttnn.DataType | None = ttnn.bfloat8_b,
+    ) -> None:
         """Load the attention weights and prepare the decode operators."""
         tp = loader.tp
         self.cfg = cfg
@@ -167,7 +193,7 @@ class Attention:
         self.eps = cfg.rms_norm_eps
         p = f"layers.{layer_idx}.self_attn."
 
-        def wqkv():
+        def wqkv() -> torch.Tensor:
             q = ckpt.get(p + "q_proj.weight")  # [nq*hd, H]
             k = ckpt.get(p + "k_proj.weight")
             v = k if not s.sliding else ckpt.get(p + "v_proj.weight")
@@ -184,7 +210,7 @@ class Attention:
             ]
             return torch.cat(chips).T.contiguous()[None, None]  # [1, 1, H, tp*(qd+2kd)]
 
-        def wo():
+        def wo() -> torch.Tensor:
             return ckpt.get(p + "o_proj.weight").T.contiguous()[
                 None, None
             ]  # [1, 1, nq*hd, H]
@@ -247,7 +273,11 @@ class Attention:
     # -- prefill -----------------------------------------------------------
 
     def prefill(
-        self, x: ttnn.Tensor, rope, kv: LayerKv, chunk: PrefillChunk
+        self,
+        x: ttnn.Tensor,
+        rope: tuple[ttnn.Tensor, ttnn.Tensor],
+        kv: LayerKv,
+        chunk: PrefillChunk,
     ) -> ttnn.Tensor:
         """Compute prefill attention over a replicated chunk.
 
@@ -310,7 +340,7 @@ class Attention:
         return all_reduce(out2)
 
     @staticmethod
-    def _fill(k: ttnn.Tensor, v: ttnn.Tensor, kv: LayerKv, chunk: PrefillChunk):
+    def _fill(k: ttnn.Tensor, v: ttnn.Tensor, kv: LayerKv, chunk: PrefillChunk) -> None:
         """Write the chunk's real K/V rows to the paged cache.
 
         Write the chunk's K/V rows up to the last tile holding a real position, which
@@ -335,17 +365,19 @@ class Attention:
             )
             t8.deallocate(True)
 
-    def _norm_rope(self, x, weight, rope):
+    def _norm_rope(
+        self, x: ttnn.Tensor, weight: ttnn.Tensor, rope: tuple[ttnn.Tensor, ttnn.Tensor]
+    ) -> ttnn.Tensor:
         normed = head_norm(x, weight, self.eps)
         x.deallocate(True)
         out = apply_rope(normed, *rope)
         normed.deallocate(True)
         return out
 
-    def _sdpa_prefill_config(self, seq_len: int):
+    def _sdpa_prefill_config(self, seq_len: int) -> ttnn.SDPAProgramConfig:
         # From models/demos/gemma4: q=k=256 overflows L1 at head_dim 256, and
         # head_dim 512 needs an (8, 4) grid with 128 chunks.
-        def fit(target):
+        def fit(target: int) -> int:
             return next(
                 c for c in (target, 128, 64, 32) if c <= target and seq_len % c == 0
             )
@@ -361,7 +393,7 @@ class Attention:
             exp_approx_mode=False,
         )
 
-    def _sdpa_chunked_config(self):
+    def _sdpa_chunked_config(self) -> ttnn.SDPAProgramConfig:
         """Configure chunked SDPA over the paged cache.
 
         Chunked SDPA over the paged cache; the chunk start must be a multiple of both
@@ -405,7 +437,13 @@ class Attention:
         return self._head_w_dev[batch]
 
     def decode_compact(
-        self, x: ttnn.Tensor, rope, kv: LayerKv, page_table, cur_pos, boundary
+        self,
+        x: ttnn.Tensor,
+        rope: tuple[ttnn.Tensor, ttnn.Tensor] | CompactRope,
+        kv: LayerKv,
+        page_table: ttnn.Tensor,
+        cur_pos: ttnn.Tensor,
+        boundary: Boundary,
     ) -> ttnn.Tensor:
         """Compute compact attention partial sums for a decode step.
 
@@ -432,7 +470,14 @@ class Attention:
         out_sh.deallocate(True)
         return out
 
-    def _heads_decode(self, x, rope, kv: LayerKv, page_table, cur_pos):
+    def _heads_decode(
+        self,
+        x: ttnn.Tensor,
+        rope: tuple[ttnn.Tensor, ttnn.Tensor] | CompactRope,
+        kv: LayerKv,
+        page_table: ttnn.Tensor,
+        cur_pos: ttnn.Tensor,
+    ) -> ttnn.Tensor:
         """Compute one decode attention head per core.
 
         QKV, q/k norm and RoPE, cache update and SDPA: the concatenated heads, one
@@ -533,7 +578,7 @@ class Attention:
             attn, batch
         )  # [1, 1, 32, n_q * hd], one head per core
 
-    def _concat_heads_decode(self, attn, batch):
+    def _concat_heads_decode(self, attn: ttnn.Tensor, batch: int) -> ttnn.Tensor:
         s = self.shape
         grid_x = min(batch, 8)
         while batch % grid_x:

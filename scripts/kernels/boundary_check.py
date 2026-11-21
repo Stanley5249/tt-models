@@ -19,11 +19,11 @@ from tt_models.models.gemma4.compact import compact_tensor, from_compact, to_com
 H, EPS = 2816, 1e-6
 
 
-def rms(v):
+def rms(v: torch.Tensor):
     return v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + EPS)
 
 
-def report(name, got, ref):
+def report(name: str, got: torch.Tensor, ref: torch.Tensor):
     got, ref = got.float().flatten(), ref.float().flatten()
     pcc = torch.corrcoef(torch.stack([got, ref]))[0, 1].item()
     print(
@@ -52,7 +52,12 @@ def main():
         shard0 = ttnn.ShardTensorToMesh(mesh, dim=0)
         cores = [ttnn.CoreCoord(i, 7) for i in range(8)]
 
-        def dev(t, dtype=ttnn.float32, mapper=None, mem=ttnn.L1_MEMORY_CONFIG):
+        def dev(
+            t: torch.Tensor,
+            dtype: ttnn.DataType = ttnn.float32,
+            mapper: ttnn.CppTensorToMesh | None = None,
+            mem: ttnn.MemoryConfig = ttnn.L1_MEMORY_CONFIG,
+        ):
             return ttnn.from_torch(
                 t,
                 dtype=dtype,
@@ -62,10 +67,10 @@ def main():
                 memory_config=mem,
             )
 
-        def chip(t, i=0):
+        def chip(t: ttnn.Tensor, i: int = 0):
             return ttnn.to_torch(ttnn.get_device_tensors(t)[i]).float()
 
-        def gather(t):
+        def gather(t: ttnn.Tensor):
             s, br = _SEMAPHORES[id(mesh)].next()
             return ttnn.experimental.all_gather_async(
                 t,

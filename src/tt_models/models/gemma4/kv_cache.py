@@ -16,13 +16,19 @@ sliding groups free blocks that leave the window (vLLM's null block 0 takes
 their place), and prefix caching keeps freed blocks until they are evicted.
 """
 
+from __future__ import annotations
+
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import ttnn
 
 from tt_models.common.config import DRAM
+
+if TYPE_CHECKING:
+    from tt_models.models.gemma4.attention import AttnShape
 
 SLIDING = "sliding_attention"
 
@@ -65,7 +71,7 @@ class LayerKv:
         ttnn.PagedCacheGeometryOverride | None
     )  # None when the view is the buffer's own shape
 
-    def update_args(self) -> dict:
+    def update_args(self) -> dict[str, int]:
         """Return the cache and metadata arguments for a decode update."""
         return (
             {}
@@ -73,11 +79,11 @@ class LayerKv:
             else {"block_size": self.block_size, "num_kv_heads": self.n_kv}
         )
 
-    def fill_args(self) -> dict:
+    def fill_args(self) -> dict[str, int]:
         """Return the cache and page table arguments for a prefill fill."""
         return {} if self.geometry is None else {"block_size": self.block_size}
 
-    def sdpa_args(self) -> dict:
+    def sdpa_args(self) -> dict[str, int]:
         """Return the cache and page table arguments for paged attention."""
         return {} if self.geometry is None else {"paged_cache_geometry": self.geometry}
 
@@ -92,8 +98,8 @@ class KvCache:
         shapes: list[tuple[int, int, int, int]],
         buffer_of: list[int],
         group_of: list[int],
-        dtype,
-    ):
+        dtype: ttnn.DataType,
+    ) -> None:
         """Allocate the paged KV cache for all layers.
 
         shapes: per layer (num_blocks, KV heads per chip, block_size, head_dim);
@@ -104,7 +110,9 @@ class KvCache:
         self.sliding = [False] * self.groups
         for kind, g in zip(layer_types, group_of):
             self.sliding[g] = kind == SLIDING
-        buffers: dict[int, tuple[ttnn.Tensor, ttnn.Tensor, tuple]] = {}
+        buffers: dict[
+            int, tuple[ttnn.Tensor, ttnn.Tensor, tuple[int, int, int, int]]
+        ] = {}
         self.layers: list[LayerKv] = []
         self.block_sizes = [0] * self.groups
         for shape, buf, group in zip(shapes, buffer_of, group_of):
@@ -144,15 +152,15 @@ class KvCache:
     @classmethod
     def standalone(
         cls,
-        mesh,
+        mesh: ttnn.MeshDevice,
         layer_types: list[str],
-        attn_shapes,
+        attn_shapes: list[AttnShape],
         block_size: int,
-        dtype,
+        dtype: ttnn.DataType,
         rows: int,
         tokens: int,
         ring_tokens: int,
-    ) -> "KvCache":
+    ) -> KvCache:
         """Allocate a standalone cache using vLLM's layout.
 
         The layout vLLM builds, sized for `rows` sequences of `tokens` positions,

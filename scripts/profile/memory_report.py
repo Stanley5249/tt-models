@@ -13,7 +13,7 @@ from tt_models.models.gemma4.checkpoint import Checkpoint
 from tt_models.models.gemma4.model import Gemma4TT
 
 
-def report(mesh, stage):
+def report(mesh: ttnn.MeshDevice, stage: str):
     """Mesh buffers are allocated in lock step, so one view covers each chip."""
     v = ttnn.get_memory_view(mesh, ttnn.BufferType.DRAM)
     total = v.total_bytes_per_bank * v.num_banks

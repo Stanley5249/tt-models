@@ -18,7 +18,7 @@ from tt_models.models.gemma4.config import Precision
 from tt_models.models.gemma4.model import Gemma4TT
 
 
-def signpost(name):
+def signpost(name: str):
     try:
         from tracy import signpost as sp
 

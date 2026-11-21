@@ -1,12 +1,18 @@
 """Weight upload through a tensorbin cache."""
 
-from collections.abc import Callable
-from pathlib import Path
+from __future__ import annotations
 
-import torch
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 import ttnn
 
 from tt_models.common.config import DRAM, TILE
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import torch
 
 
 class WeightLoader:
@@ -16,7 +22,7 @@ class WeightLoader:
     checkpoint for that tensor.
     """
 
-    def __init__(self, mesh: ttnn.MeshDevice, cache_dir: Path):
+    def __init__(self, mesh: ttnn.MeshDevice, cache_dir: Path) -> None:
         """Set up the weight cache for a mesh and checkpoint."""
         self.mesh = mesh
         self.cache_dir = Path(cache_dir)
@@ -29,10 +35,10 @@ class WeightLoader:
         self,
         name: str,
         build: Callable[[], torch.Tensor],
-        dtype=ttnn.bfloat16,
+        dtype: ttnn.DataType = ttnn.bfloat16,
         shard_dim: int | None = None,
-        layout=ttnn.TILE_LAYOUT,
-        memory_config=DRAM,
+        layout: ttnn.Layout = ttnn.TILE_LAYOUT,
+        memory_config: ttnn.MemoryConfig = DRAM,
     ) -> ttnn.Tensor:
         """Load a cached tensor or build and upload it."""
         if shard_dim is None:

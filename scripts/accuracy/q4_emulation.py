@@ -20,11 +20,14 @@ No ttnn import: a ttnn host conversion starts the device cluster, which breaks a
 device job running next to this one.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 from precision_study import score, tokens  # a sibling script
@@ -32,6 +35,9 @@ from precision_study import score, tokens  # a sibling script
 from tt_models.models.gemma4 import reference
 from tt_models.models.gemma4.checkpoint import Checkpoint
 from tt_models.models.gemma4.q4 import factor_blocks
+
+if TYPE_CHECKING:
+    import ttnn
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -96,7 +102,9 @@ def main():
     modes = sys.argv[2:]
     state = {"mode": None}
 
-    def quantize_layer(layer_state, _quant):
+    def quantize_layer(
+        layer_state: dict[str, torch.Tensor], _quant: dict[str, ttnn.DataType]
+    ):
         result = dict(layer_state)
         if state["mode"] == "none":
             return result
@@ -120,7 +128,9 @@ def main():
     dense_mode = os.environ.get("EMU_DENSE", "")
     plain_quantize = quantize_layer
 
-    def quantize_all(layer_state, quant):
+    def quantize_all(
+        layer_state: dict[str, torch.Tensor], quant: dict[str, ttnn.DataType]
+    ):
         result = plain_quantize(layer_state, quant)
         if dense_mode:
             for key in DENSE_KEYS:
@@ -132,9 +142,11 @@ def main():
     # Reference.logits sends the LM head [H, V] through roundtrip when "lm_head" is
     # quantized
     if dense_mode:
-        reference.roundtrip = lambda head_t, _dtype: dense(
-            head_t.T.contiguous(), dense_mode
-        ).T.contiguous()
+
+        def roundtrip_head(head_t: torch.Tensor, _dtype: ttnn.DataType) -> torch.Tensor:
+            return dense(head_t.T.contiguous(), dense_mode).T.contiguous()
+
+        reference.roundtrip = roundtrip_head
     assert "ttnn" not in sys.modules, "ttnn would start the device cluster"
     ck = Checkpoint()
     n = int(os.environ.get("EMU_TOKENS", "2048"))

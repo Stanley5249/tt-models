@@ -1,9 +1,15 @@
 """Helpers for this model's custom kernels (kernels/), run through ttnn.generic_op."""
 
+from __future__ import annotations
+
 import struct
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import ttnn
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 KERNELS = Path(__file__).parent / "kernels"
 BFP4_TILE = 576
@@ -12,7 +18,10 @@ BF16_TILE = 2048
 FP32_TILE = 4096
 
 
-def tile_bytes(dtype) -> int:
+type ProgramParts = tuple[ttnn.ProgramDescriptor, list[ttnn.Tensor]]
+
+
+def tile_bytes(dtype: ttnn.DataType) -> int:
     """Return the byte size of a tile with the given dtype."""
     return {
         ttnn.bfloat4_b: BFP4_TILE,
@@ -22,7 +31,9 @@ def tile_bytes(dtype) -> int:
     }[dtype]
 
 
-def cb(cores, index, dtype, page, pages):
+def cb(
+    cores: ttnn.CoreRangeSet, index: int, dtype: ttnn.DataType, page: int, pages: int
+) -> ttnn.CBDescriptor:
     """A circular buffer of `pages` pages of `page` bytes on `cores`."""
     return ttnn.CBDescriptor(
         total_size=page * pages,
@@ -35,7 +46,7 @@ def cb(cores, index, dtype, page, pages):
     )
 
 
-def accessor(t) -> list[int]:
+def accessor(t: ttnn.Tensor) -> list[int]:
     """Compile-time args of a TensorAccessor for t."""
     return ttnn.TensorAccessorArgs(t).get_compile_time_args()
 
@@ -45,7 +56,7 @@ def line_cores(n: int, y0: int = 0) -> list[ttnn.CoreCoord]:
     return [ttnn.CoreCoord(i % 8, y0 + i // 8) for i in range(n)]
 
 
-def core_range_set(cores) -> ttnn.CoreRangeSet:
+def core_range_set(cores: Iterable[ttnn.CoreCoord]) -> ttnn.CoreRangeSet:
     """Build a core range set from individual coordinates."""
     return ttnn.CoreRangeSet([ttnn.CoreRange(c, c) for c in cores])
 
