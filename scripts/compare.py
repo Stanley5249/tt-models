@@ -84,6 +84,8 @@ def main():
         "--perturb", type=int, default=0, help="seed of a 2^-9 relative noise on the embeddings (0: none), to sample the noise floor"
     )
     args = ap.parse_args()
+    if args.batch < 1:
+        ap.error("--batch must be at least 1")
 
     ckpt = Checkpoint()
     total = args.prompt_len + args.decode_steps

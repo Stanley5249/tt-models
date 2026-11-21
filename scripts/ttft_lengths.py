@@ -1,11 +1,12 @@
-"""Time to first token of chat prompts at lengths the server has not seen.
+"""Latency of one-token chat requests at prompt lengths the server has not seen.
 
     pixi run python scripts/ttft_lengths.py [seed]
 
 Needs a running `pixi run serve-gemma4`. Sends eight prompts of 400-3,700 tokens
 (repository source, lengths drawn from the seed) one at a time, each with a fresh
-cache_salt and one output token, and prints the wall time of each request. A
-length whose prefill programs were never built pays for building them here.
+cache_salt and one output token, and prints the wall time of each request: the
+time to first token plus the response's finalization and transfer. A length
+whose prefill programs were never built pays for building them here.
 """
 
 import random

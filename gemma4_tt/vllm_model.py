@@ -44,7 +44,9 @@ def sample(logits: torch.Tensor, params, positions: torch.Tensor, rows_idx=None,
     rows_idx: the batch rows these logits belong to (their sampling params); default 0..B-1.
     softcap: the model's in-place final softcap when `logits` are taken before it.
     The softcap keeps the order, so greedy and top-k work on the raw logits and only
-    the k candidates are capped; logprobs need the whole capped row.
+    the k candidates are capped; logprobs need the whole capped row. (Only raw
+    logits above about 270, where fp32 tanh saturates, tie after capping; the raw
+    order then picks the truly larger one.)
 
     vLLM's CPU sampler sorts the whole 262k vocabulary whenever top-p is set
     (14 ms per row on one thread, which vLLM's worker uses). Top-k first and
