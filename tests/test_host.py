@@ -61,4 +61,5 @@ def test_q4_factor_recovers_the_grid():
     q2, s2 = factor_blocks(b)
     assert torch.allclose(q2 * s2, b, rtol=0.01, atol=1e-6)
     zero_q, zero_s = factor_blocks(torch.zeros(1, 32))
-    assert zero_s.item() == 0 and torch.all(zero_q == 0)
+    assert zero_s.item() == 0
+    assert torch.all(zero_q == 0)

@@ -381,7 +381,8 @@ class ExpertStream:
         self.n_tiles = hidden // TILE  # 88 real down columns
         self.bank_cols = -(-self.n_tiles // self.banks)  # 8
         self.down_width = self.bank_cols * self.banks * TILE  # 3072
-        assert self.slots % gate_up_readers == 0 and self.bank_cols % down_readers == 0
+        assert self.slots % gate_up_readers == 0
+        assert self.bank_cols % down_readers == 0
         self.gu_slots = self.slots // gate_up_readers
         self.down_cols = self.bank_cols // down_readers
         assert self.down_cols <= 4, "fp32 dest holds 4 tiles"

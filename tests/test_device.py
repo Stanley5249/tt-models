@@ -28,9 +28,8 @@ def pcc(a, b):
 
 
 def assert_close(got, ref, what):
-    assert pcc(got, ref) > PCC and got.argmax() == ref.argmax(), (
-        f"{what}: pcc {pcc(got, ref):.5f}"
-    )
+    assert pcc(got, ref) > PCC, f"{what}: pcc {pcc(got, ref):.5f}"
+    assert got.argmax() == ref.argmax(), f"{what}: argmax differs"
 
 
 @pytest.fixture  # one mesh per test: a model keeps its traces and KV until the mesh closes
@@ -126,7 +125,7 @@ def test_chunked_prefill_and_prefix_hit(mesh):
         for c in (kv.k, kv.v)
     ]
     assert all(c.abs().max() == 0 for c in null), "prefill wrote the null block"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"must start on the .* block grid"):
         m.prefill(seq[:L], 1088, tables[:, 2])  # off the block grid
 
 
