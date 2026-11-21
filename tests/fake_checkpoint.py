@@ -4,6 +4,7 @@ import zlib
 
 import torch
 from transformers import AutoConfig
+from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 from tt_models.models.gemma4.checkpoint import attention_dims, resolve_snapshot
 
@@ -11,6 +12,9 @@ from tt_models.models.gemma4.checkpoint import attention_dims, resolve_snapshot
 class FakeCheckpoint:
     def __init__(self, layer_types: list[str] | None = None, seed: int = 0):
         cfg = AutoConfig.from_pretrained(resolve_snapshot()).get_text_config()
+        assert isinstance(cfg, Gemma4TextConfig)
+        assert cfg.layer_types is not None
+        assert cfg.per_layer_config is not None
         if layer_types:
             # per_layer_config holds the global layers' head_dim and KV heads by
             # index, so it is rebuilt to follow the new layer types.
@@ -38,6 +42,9 @@ class FakeCheckpoint:
     def _shape(self, name: str):
         c = self.config
         H, E = c.hidden_size, c.num_experts
+        assert E is not None
+        assert c.moe_intermediate_size is not None
+        assert c.layer_types is not None
         if name == "embed_tokens.weight":
             return (c.vocab_size, H), 1.0
         if name == "norm.weight":

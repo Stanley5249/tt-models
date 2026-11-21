@@ -24,6 +24,8 @@ def main():
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--batch4-steps", type=int, default=1000)
     args = ap.parse_args()
+    if min(args.steps, args.batch4_steps) <= 10:
+        ap.error("--steps and --batch4-steps must be at least 11")
     with open_n300(trace_region_size=300_000_000) as mesh:
         m = Gemma4TT(mesh, Checkpoint(), max_batch=4)
         pts = m.allocate_kv_cache(4, 128 + args.steps + 1)
@@ -38,6 +40,7 @@ def main():
             tok = lg.argmax(-1)
             if s == 10:
                 start = used(mesh)
+        assert start is not None
         b1 = used(mesh)
         print(
             f"b1: {args.steps} steps in {time.time() - t0:.0f} s, DRAM {start:.3f} -> "
@@ -45,6 +48,7 @@ def main():
             flush=True,
         )
         tok4 = torch.full((4,), 5)
+        start4 = None
         for s in range(args.batch4_steps):
             lg = m.decode(
                 tok4, torch.full((4,), 128 + s), pts, trace=True
@@ -52,6 +56,7 @@ def main():
             tok4 = lg.argmax(-1)
             if s == 10:
                 start4 = used(mesh)
+        assert start4 is not None
         print(
             f"b4: {args.batch4_steps} steps, DRAM {start4:.3f} -> {used(mesh):.3f} "
             "GiB/chip",

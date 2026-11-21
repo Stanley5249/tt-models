@@ -39,6 +39,8 @@ def matmul_1d_config(
         if shape:
             gx, gy = shape
             break
+    else:
+        raise ValueError(f"cannot place {n_tiles} output tiles on grid {grid}")
     # Large K blocks matter for these DRAM-bound decode shapes: measured in
     # docs/experiments/2026-11-17-decode-round-1.md, down (K=11 tiles) took 154 us at
     # in0_block_w=1 and 92 us at 11; gate_up (K=88) 194 us at 8 and 184 us at 22.

@@ -3,7 +3,7 @@
 from importlib.metadata import entry_points
 
 import pytest
-from vllm.model_executor.models.registry import ModelRegistry
+from vllm.model_executor.models.registry import ModelRegistry, _LazyRegisteredModel
 from vllm.tool_parsers import ToolParserManager
 
 from tt_models.vllm_plugin import MODELS, register
@@ -13,7 +13,9 @@ OTHER = "some.module:OtherClass"
 
 
 def registered(arch: str):
-    return ModelRegistry.models[arch]
+    model = ModelRegistry.models[arch]
+    assert isinstance(model, _LazyRegisteredModel)
+    return model
 
 
 @pytest.fixture(autouse=True)

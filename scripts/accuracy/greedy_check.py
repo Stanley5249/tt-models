@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, BatchEncoding
 
 from tt_models.common.mesh import open_n300
 from tt_models.models.gemma4.checkpoint import Checkpoint
@@ -40,17 +40,22 @@ def main():
     args = ap.parse_args()
     ckpt = Checkpoint()
     tok = AutoTokenizer.from_pretrained(ckpt.root)
+    assert tok is not None
     results = []
     with open_n300(trace_region_size=300_000_000) as mesh:
         model = Gemma4TT(mesh, ckpt, max_batch=1)
         pt = model.allocate_kv_cache(1, 4096)
         for prompt in PROMPTS:
-            ids = tok.apply_chat_template(
+            encoded = tok.apply_chat_template(
                 [{"role": "user", "content": prompt}],
                 add_generation_prompt=True,
                 return_tensors="pt",
             )
-            ids = ids["input_ids"][0] if hasattr(ids, "keys") else ids[0]
+            tokens = (
+                encoded["input_ids"] if isinstance(encoded, BatchEncoding) else encoded
+            )
+            assert isinstance(tokens, torch.Tensor)
+            ids = tokens[0]
             logits = model.prefill(ids, 0, pt[:, 0])
             out = [int(logits.argmax())]
             for step in range(args.tokens - 1):
@@ -63,7 +68,9 @@ def main():
         args.save.parent.mkdir(parents=True, exist_ok=True)
         args.save.write_text(json.dumps(results, indent=1))
     ref = json.loads(args.compare.read_text()) if args.compare else None
-    eos = set(tok.convert_tokens_to_ids(["<turn|>"])) | {tok.eos_token_id}
+    turn_id = tok.convert_tokens_to_ids("<turn|>")
+    assert isinstance(turn_id, int)
+    eos = {turn_id, tok.eos_token_id}
     for i, r in enumerate(results):
         line = repr(r["text"][:100])
         if ref:

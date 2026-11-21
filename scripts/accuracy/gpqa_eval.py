@@ -27,10 +27,11 @@ SEED = 42
 
 
 def load_gpqa(count: int):
-    import datasets
-    from lm_eval.api.task import ConfigurableTask
-    from lm_eval.tasks import TaskManager
-    from lm_eval.utils import load_yaml_config
+    # These packages are installed by gpqa_eval.requirements.txt.
+    import datasets  # pyrefly: ignore [missing-import]
+    from lm_eval.api.task import ConfigurableTask  # pyrefly: ignore [missing-import]
+    from lm_eval.tasks import TaskManager  # pyrefly: ignore [missing-import]
+    from lm_eval.utils import load_yaml_config  # pyrefly: ignore [missing-import]
 
     # Choice permutations must come from this seed, not a previous map cache.
     datasets.disable_caching()

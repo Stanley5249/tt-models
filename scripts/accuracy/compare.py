@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def prompt_tokens(ckpt: Checkpoint, n: int) -> torch.Tensor:
     tok = AutoTokenizer.from_pretrained(ckpt.root)
+    assert tok is not None
     text = (ckpt.root / "README.md").read_text()
     ids = tok(text, return_tensors="pt").input_ids[0]
     while ids.shape[0] < n:
@@ -148,24 +149,27 @@ def main():
         if args.perturb:
             plain = model.embed
 
-            def embed(t: torch.Tensor):
+            def embed(ids: torch.Tensor):
                 # Noise keyed by the call's tokens, so calls the model makes for itself
                 # (trace warm-up) do not shift the noise of the measured steps.
-                x = plain(t)
+                x = plain(ids)
                 gen = torch.Generator().manual_seed(
                     args.perturb * 1_000_003
-                    + int((t.long() * (torch.arange(t.numel()) + 1)).sum())
+                    + int((ids.long() * (torch.arange(ids.numel()) + 1)).sum())
                 )
                 return (
                     x.float() * (1 + 2**-9 * torch.randn(x.shape, generator=gen))
                 ).to(x.dtype)
 
-            model.embed = embed
+            # Perturb embeddings for this diagnostic run only.
+            model.embed = embed  # pyrefly: ignore [method-assign]
         pt = model.allocate_kv_cache(args.batch, total)
         for offset, ids, ref in segments:
             t0 = time.time()
+            logits = None
             for row in range(args.batch):
                 logits = model.prefill(ids[: args.prompt_len], 0, pt[:, row])
+            assert logits is not None
             print(
                 f"prefill {args.prompt_len} tokens at {offset}: "
                 f"{time.time() - t0:.2f}s",

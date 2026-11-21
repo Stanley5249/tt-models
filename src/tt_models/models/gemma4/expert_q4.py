@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from tt_models.common.weights import WeightLoader
-    from tt_models.models.gemma4.checkpoint import Checkpoint
+    from tt_models.models.gemma4.checkpoint import WeightSource
 
 KERNELS_Q4 = "expert_q4_gate_up"
 
@@ -254,7 +254,7 @@ def down_q4_op(
     slots: int,
     kt: int,
     cols: int,
-    banks: Sequence[int],
+    banks: int,
     bank_cols: int,
     n_tiles: int,
     compact_chunk0: int | None = None,
@@ -382,7 +382,7 @@ class Q4Experts:
     def __init__(
         self,
         loader: WeightLoader,
-        ckpt: Checkpoint,
+        ckpt: WeightSource,
         layer_idx: int,
         stream: ExpertStream,
         assemble_gate_up: Callable[[torch.Tensor], torch.Tensor],

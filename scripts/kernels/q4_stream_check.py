@@ -38,6 +38,8 @@ def main():
     ap.add_argument("--layer", type=int, default=0)
     ap.add_argument("--seeds", type=int, default=3)
     args = ap.parse_args()
+    if args.seeds < 1:
+        ap.error("--seeds must be positive")
     ckpt = Checkpoint()
     cfg = ckpt.config
     p = f"layers.{args.layer}."
@@ -50,6 +52,7 @@ def main():
         st = ff.stream
         groups = -(-st.kx // TILE)
         E, H, I, tp = ff.n_experts, ff.hidden, cfg.moe_intermediate_size, ff.tp
+        assert I is not None
         n, pad = ff.expert_local, ff.expert_pad - ff.expert_local
 
         def assembled(
@@ -140,7 +143,11 @@ def main():
         ):  # act per chip [slots, n] -> per chip [H]
             return [
                 sum(
-                    a[j] @ w[e, c * n : (c + 1) * n] for j, e in enumerate(ids.tolist())
+                    (
+                        a[j] @ w[e, c * n : (c + 1) * n]
+                        for j, e in enumerate(ids.tolist())
+                    ),
+                    a.new_zeros(H),
                 )
                 for c, a in enumerate(act_chips)
             ]
@@ -154,6 +161,7 @@ def main():
         def snr(a: torch.Tensor, ref: torch.Tensor):
             return (10 * torch.log10(ref.pow(2).sum() / (a - ref).pow(2).sum())).item()
 
+        timed_ops = None
         for seed in range(args.seeds):
             torch.manual_seed(seed)
             r = ttnn.from_torch(
@@ -244,14 +252,16 @@ def main():
                 f"clamp-only {snr(ref_q4, ref):.1f} dB)",
                 flush=True,
             )
-        runs = {"bfp4": [], "q4": [], "bfp4 down": [], "q4 down": []}
-        for _ in range(5):  # alternate, so drifts hit both alike; report the median
-            for name, fn in (
+            timed_ops = (
                 ("bfp4", bfp4),
                 ("q4", q4),
                 ("bfp4 down", bfp4_down),
                 ("q4 down", q4_down),
-            ):
+            )
+        assert timed_ops is not None
+        runs: dict[str, list[float]] = {name: [] for name, _ in timed_ops}
+        for _ in range(5):  # alternate, so drifts hit both alike; report the median
+            for name, fn in timed_ops:
                 runs[name].append(device_time_us(mesh, fn, iters=20))
         for name, v in runs.items():
             print(f"{name} gate_up us median {sorted(v)[2]} (runs {v})", flush=True)

@@ -13,14 +13,12 @@ import json
 import struct
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import Protocol, TypedDict
 
 import torch
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig
-
-if TYPE_CHECKING:
-    from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
 DEFAULT_MODEL = "google/gemma-4-26B-A4B-it-qat-q4_0-unquantized"
 TEXT_PREFIX = "model.language_model."
@@ -61,6 +59,19 @@ class _TensorHeader(TypedDict):
     data_offsets: tuple[int, int]
 
 
+class WeightSource(Protocol):
+    """Provide the configuration and weights used by the device model."""
+
+    @property
+    def config(self) -> Gemma4TextConfig:
+        """Return the text configuration."""
+        ...
+
+    def get(self, name: str) -> torch.Tensor:
+        """Read a weight by its name relative to the text model."""
+        ...
+
+
 class Checkpoint:
     """Read config and tensors from a Gemma 4 checkpoint."""
 
@@ -74,7 +85,9 @@ class Checkpoint:
     @cached_property
     def config(self) -> Gemma4TextConfig:
         """The text config (Gemma4TextConfig)."""
-        return AutoConfig.from_pretrained(self.root).get_text_config()
+        config = AutoConfig.from_pretrained(self.root).get_text_config()
+        assert isinstance(config, Gemma4TextConfig)
+        return config
 
     def _header(self, filename: str) -> tuple[int, dict[str, _TensorHeader]]:
         if filename not in self._headers:

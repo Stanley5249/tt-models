@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
     from tt_models.models.gemma4.boundary import Boundary
-    from tt_models.models.gemma4.checkpoint import Checkpoint
+    from tt_models.models.gemma4.checkpoint import WeightSource
     from tt_models.models.gemma4.kv_cache import LayerKv
 
 # Chunked prefill attention needs its chunk start on a multiple of the SDPA q and
@@ -64,6 +64,7 @@ class AttnShape:
 
 def attn_shape(cfg: Gemma4TextConfig, layer_idx: int, tp: int) -> AttnShape:
     """Calculate the per-chip attention shape for one layer."""
+    assert cfg.layer_types is not None
     kind = cfg.layer_types[layer_idx]
     head_dim, n_kv = attention_dims(cfg)[kind]
     sliding = kind == "sliding_attention"
@@ -181,7 +182,7 @@ class Attention:
     def __init__(
         self,
         loader: WeightLoader,
-        ckpt: Checkpoint,
+        ckpt: WeightSource,
         cfg: Gemma4TextConfig,
         layer_idx: int,
         dtype: ttnn.DataType | None = ttnn.bfloat8_b,

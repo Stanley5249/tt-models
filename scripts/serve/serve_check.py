@@ -42,6 +42,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 from tt_models.models.gemma4.checkpoint import resolve_snapshot
@@ -57,7 +58,7 @@ LENGTHS = [64, 48, 32, 16]
 GREEDY = {"temperature": 0}
 
 
-def post(url: str, path: str, body: dict[str, object], *, stream: bool = False):
+def post(url: str, path: str, body: Mapping[str, object], *, stream: bool = False):
     # The benchmark operator supplies the server URL.
     req = urllib.request.Request(  # noqa: S310
         f"{url}{path}",
@@ -70,7 +71,10 @@ def post(url: str, path: str, body: dict[str, object], *, stream: bool = False):
 
 
 def chat(
-    url: str, prompt: str | list[dict[str, object]], max_tokens: int, **extra: object
+    url: str,
+    prompt: str | Sequence[Mapping[str, object]],
+    max_tokens: int,
+    **extra: object,
 ) -> list[int]:
     """Token ids of a chat completion; thinking tokens count, since they are sampled
     too.

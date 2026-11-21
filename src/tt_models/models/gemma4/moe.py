@@ -34,20 +34,22 @@ if TYPE_CHECKING:
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
     from tt_models.models.gemma4.boundary import Boundary
-    from tt_models.models.gemma4.checkpoint import Checkpoint
+    from tt_models.models.gemma4.checkpoint import WeightSource
 
-_STREAMS: dict[
-    tuple[str, int] | tuple[str, int, int], ExpertStream | MlpStream | Router
-] = per_mesh_cache()
+_EXPERT_STREAMS: dict[tuple[int, int], ExpertStream] = per_mesh_cache()
+_ROUTERS: dict[tuple[int, int], Router] = per_mesh_cache()
+_MLP_STREAMS: dict[int, MlpStream] = per_mesh_cache()
 
 
 def expert_stream(
     mesh: ttnn.MeshDevice, cfg: Gemma4TextConfig, expert_local: int, rows: int = 1
 ) -> ExpertStream:
     """Share an ExpertStream per mesh and token count across the layers."""
-    key = ("experts", id(mesh), rows)
-    if key not in _STREAMS:
-        _STREAMS[key] = ExpertStream(
+    key = (id(mesh), rows)
+    assert cfg.top_k_experts is not None
+    assert cfg.num_experts is not None
+    if key not in _EXPERT_STREAMS:
+        _EXPERT_STREAMS[key] = ExpertStream(
             mesh,
             cfg.hidden_size,
             expert_local,
@@ -55,28 +57,30 @@ def expert_stream(
             cfg.num_experts,
             rows=rows,
         )
-    return _STREAMS[key]
+    return _EXPERT_STREAMS[key]
 
 
 def router_op(mesh: ttnn.MeshDevice, cfg: Gemma4TextConfig, rows: int = 1) -> Router:
     """Build the router for the given decode row count."""
-    key = ("router", id(mesh), rows)
-    if key not in _STREAMS:
-        _STREAMS[key] = Router(
+    key = (id(mesh), rows)
+    assert cfg.top_k_experts is not None
+    assert cfg.num_experts is not None
+    if key not in _ROUTERS:
+        _ROUTERS[key] = Router(
             mesh, cfg.hidden_size, cfg.num_experts, cfg.top_k_experts, rows=rows
         )
-    return _STREAMS[key]
+    return _ROUTERS[key]
 
 
 def mlp_stream(mesh: ttnn.MeshDevice, cfg: Gemma4TextConfig, mlp_pad: int) -> MlpStream:
     """Build the dense MLP stream for the padded intermediate width."""
-    key = ("mlp", id(mesh))
-    if key not in _STREAMS:
+    key = id(mesh)
+    if key not in _MLP_STREAMS:
         # leaves the router's cores free: router and MLP gate|up run as one merged op
-        _STREAMS[key] = MlpStream(
+        _MLP_STREAMS[key] = MlpStream(
             mesh, cfg.hidden_size, mlp_pad, exclude=router_op(mesh, cfg).cores
         )
-    return _STREAMS[key]
+    return _MLP_STREAMS[key]
 
 
 # HF uses gelu_pytorch_tanh. Fusing GELU_TANH into the multiply halves the mean
@@ -90,7 +94,7 @@ class FeedForward:
     def __init__(
         self,
         loader: WeightLoader,
-        ckpt: Checkpoint,
+        ckpt: WeightSource,
         cfg: Gemma4TextConfig,
         layer_idx: int,
         mlp_dtype: ttnn.DataType = ttnn.bfloat8_b,
@@ -107,6 +111,9 @@ class FeedForward:
         )
         self.cfg = cfg
         self.hidden = H = cfg.hidden_size
+        assert cfg.num_experts is not None
+        assert cfg.top_k_experts is not None
+        assert cfg.moe_intermediate_size is not None
         self.n_experts = E = cfg.num_experts
         self.top_k = cfg.top_k_experts
         self.eps = cfg.rms_norm_eps
@@ -252,6 +259,8 @@ class FeedForward:
             if expert_q4
             else None
         )
+        self.exp_gate_up: ttnn.Tensor | None = None
+        self.exp_down: ttnn.Tensor | None = None
         if self.q4 is None:
             self.exp_gate_up = put(
                 f"L{layer_idx}.exp_gate_up_p{self.expert_pad}",
@@ -367,6 +376,8 @@ class FeedForward:
         inputs (two
         runtime arguments each), and the one-row tensors are freed group by group.
         """
+        q4 = self.q4
+        assert q4 is not None
         groups = []
         for g0 in range(0, x.shape[2], group):
             outs = []
@@ -379,9 +390,9 @@ class FeedForward:
                 )
                 ids, weights = self._route(nr, 1)
                 act = self.stream.act_tensor()
-                self.q4.gate_up_op(xr, ids, weights, self.scale_row, act)
+                q4.gate_up_op(xr, ids, weights, self.scale_row, act)
                 out = self.stream.out_tensor(DRAM)
-                self.q4.down_op(act, ids, out)
+                q4.down_op(act, ids, out)
                 for u in (xr, nr, ids, weights, act):
                     u.deallocate(True)
                 outs.append(out)

@@ -83,7 +83,7 @@ class LayerKv:
         """Return the cache and page table arguments for a prefill fill."""
         return {} if self.geometry is None else {"block_size": self.block_size}
 
-    def sdpa_args(self) -> dict[str, int]:
+    def sdpa_args(self) -> dict[str, ttnn.PagedCacheGeometryOverride]:
         """Return the cache and page table arguments for paged attention."""
         return {} if self.geometry is None else {"paged_cache_geometry": self.geometry}
 

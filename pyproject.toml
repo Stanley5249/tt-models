@@ -94,21 +94,8 @@ python-interpreter-path = ".pixi/envs/default/bin/python"
 # ttnn registers its ops at import time, so static analysis sees few of its
 # attributes; treat it as untyped rather than report every op.
 replace-imports-with-any = ["ttnn", "ttnn.*"]
-# Scripts import their siblings, as Python does when it runs them.
-search-path = ["src", "scripts/accuracy", "scripts/serve"]
-
-# Not yet fixed; remove one kind per change.
-[tool.pyrefly.errors]
-missing-attribute = false
-unbound-name = false
-bad-argument-type = false
-missing-import = false
-bad-assignment = false
-bad-return = false
-not-callable = false
-possibly-uninitialized-attribute = false
-method-assign = false
-unsupported-operation = false
+# Resolve local helpers the same way scripts and pytest do.
+search-path = ["src", "scripts/accuracy", "scripts/serve", "tests"]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not device'"
@@ -135,7 +122,6 @@ ignore = [
   "EM102",  # same
   "S101",  # internal assertions document kernel layout invariants
   "S311",  # benchmark inputs and cache salts need no cryptography
-  # Not yet fixed; remove one family per change.
 ]
 
 [tool.ruff.lint.pydocstyle]

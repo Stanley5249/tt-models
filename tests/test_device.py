@@ -76,10 +76,11 @@ def test_decode_matches_prefill(mesh: ttnn.MeshDevice, prompt_len: int, batch: i
 
 def scheduled(m: Gemma4TT, table: torch.Tensor, start: int, end: int) -> torch.Tensor:
     """table [groups, width] as vLLM sends it for computing [start, end)."""
+    cache = m.require_kv()
     t = table.clone()
-    for g, block in enumerate(m.kv.block_sizes):
+    for g, block in enumerate(cache.block_sizes):
         t[g, -(-end // block) :] = 0  # not allocated yet
-        if m.kv.sliding[g]:
+        if cache.sliding[g]:
             t[g, : max(start - m.window + 1, 0) // block] = (
                 0  # freed: wholly outside the window
             )
@@ -96,6 +97,7 @@ def test_chunked_prefill_and_prefix_hit(mesh: ttnn.MeshDevice):
     other = torch.cat([seq[:P], torch.randint(10, 20000, (L - P,))])
     m = model(mesh, 1)
     tables = m.allocate_kv_cache(4, L + 1)
+    cache = m.require_kv()
     ref = m.prefill(seq[:L], 0, tables[:, 0])
     ref_next = m.prefill(seq[: L + 1], 0, tables[:, 0])
 
@@ -112,7 +114,7 @@ def test_chunked_prefill_and_prefix_hit(mesh: ttnn.MeshDevice):
 
     # Row 3 reads row 0's blocks below P, as a prefix-cache hit would.
     t = tables[:, 3].clone()
-    for g, block in enumerate(m.kv.block_sizes):
+    for g, block in enumerate(cache.block_sizes):
         t[g, : P // block] = tables[g, 0, : P // block]
     hit = m.prefill(other[:L], P, scheduled(m, t, P, L))
     assert_close(hit, m.prefill(other[:L], 0, tables[:, 1]), f"prefix hit at {P}")
@@ -125,7 +127,7 @@ def test_chunked_prefill_and_prefix_hit(mesh: ttnn.MeshDevice):
 
     null = [
         ttnn.to_torch(ttnn.get_device_tensors(c)[0])[0]
-        for kv in m.kv.layers
+        for kv in cache.layers
         for c in (kv.k, kv.v)
     ]
     assert all(c.abs().max() == 0 for c in null), "prefill wrote the null block"

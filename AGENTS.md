@@ -3,7 +3,6 @@
 ## Checks
 
 - `just check` is the gate (format checks, ruff, pyrefly); `just test` runs host tests and `just test-device` the N300 ones.
-- `pyproject.toml` parks ruff rules and pyrefly error kinds that still have findings under "Not yet fixed". Remove one family per change, fix its findings, and keep the gate passing.
 
 ## Observed behaviour (unverified, dated)
 

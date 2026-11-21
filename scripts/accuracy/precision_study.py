@@ -36,6 +36,7 @@ def tokens(ckpt: Checkpoint, n: int):
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(ckpt.root)
+    assert tok is not None
     ids = tok((ckpt.root / "README.md").read_text(), return_tensors="pt").input_ids[0]
     return ids[:n]
 

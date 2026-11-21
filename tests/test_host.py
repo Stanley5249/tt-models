@@ -64,3 +64,16 @@ def test_q4_factor_recovers_the_grid():
     zero_q, zero_s = factor_blocks(torch.zeros(1, 32))
     assert zero_s.item() == 0
     assert torch.all(zero_q == 0)
+
+
+def test_sampler_accepts_a_scalar_seed():
+    from vllm_tt_plugin.model_input import TTSamplingParams
+
+    from tt_models.models.gemma4.vllm_adapter import sample
+
+    logits = torch.zeros(2, 4)
+    positions = torch.tensor([7, 11])
+    params = {"temperature": [1.0, 1.0], "top_k": [4, 4], "top_p": [1.0, 1.0]}
+    scalar, _ = sample(logits, TTSamplingParams(**params, seed=13), positions)
+    per_row, _ = sample(logits, TTSamplingParams(**params, seed=[13, 13]), positions)
+    assert torch.equal(scalar, per_row)

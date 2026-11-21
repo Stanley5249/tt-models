@@ -19,7 +19,7 @@ from tt_models.common.weights import WeightLoader, norm_weight
 if TYPE_CHECKING:
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
-    from tt_models.models.gemma4.checkpoint import Checkpoint
+    from tt_models.models.gemma4.checkpoint import WeightSource
 
 # The LM head is read as LM_SPLITS DRAM-sharded matmuls per chip: 2.5 -> 1.37 ms per
 # decode step against one interleaved matmul
@@ -36,7 +36,7 @@ class LmHead:
         self,
         mesh: ttnn.MeshDevice,
         loader: WeightLoader,
-        ckpt: Checkpoint,
+        ckpt: WeightSource,
         cfg: Gemma4TextConfig,
         dtype: ttnn.DataType,
     ) -> None:
@@ -55,7 +55,7 @@ class LmHead:
         self.lm_in = width_sharded_l1(self.hidden, LM_CORES)
 
     def _weights(
-        self, loader: WeightLoader, ckpt: Checkpoint, dtype: ttnn.DataType
+        self, loader: WeightLoader, ckpt: WeightSource, dtype: ttnn.DataType
     ) -> list[ttnn.Tensor]:
         """Load the tied embedding weights in DRAM-sharded column blocks.
 

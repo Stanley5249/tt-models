@@ -21,7 +21,7 @@ from tt_models.common.config import DRAM
 from tt_models.common.weights import WeightLoader
 from tt_models.models.gemma4.attention import CHUNK_ALIGN, PrefillChunk
 from tt_models.models.gemma4.boundary import Boundary
-from tt_models.models.gemma4.checkpoint import Checkpoint
+from tt_models.models.gemma4.checkpoint import Checkpoint, WeightSource
 from tt_models.models.gemma4.compact import to_compact
 from tt_models.models.gemma4.config import (
     PREFILL_BUCKET,
@@ -42,7 +42,7 @@ class Gemma4TT:
     def __init__(
         self,
         mesh: ttnn.MeshDevice,
-        ckpt: Checkpoint | None = None,
+        ckpt: WeightSource | None = None,
         cache_root: Path = Path("cache"),
         precision: Precision | None = None,
         max_batch: int = 4,
@@ -157,6 +157,7 @@ class Gemma4TT:
         [groups, rows, width]. The adapter builds `kv` from vLLM's plan instead.
         """
         shapes = [layer.attn.shape for layer in self.layers]
+        assert self.cfg.layer_types is not None
         types = self.cfg.layer_types[: self.num_layers]
         self.use_kv(
             KvCache.standalone(
@@ -187,13 +188,19 @@ class Gemma4TT:
             )
         self.kv = kv
 
+    def require_kv(self) -> KvCache:
+        """Return the installed KV cache before running a model step."""
+        kv = self.kv
+        if kv is None:
+            raise RuntimeError("the KV cache must be installed first")
+        return kv
+
     @property
     def table_width(self) -> int:
         """Return the fixed decode page table width so traces can replay."""
         # paged ops need fewer blocks per sequence than blocks in the pool
-        return min(
-            -(-self.max_seq_len // min(self.kv.block_sizes)), self.kv.num_blocks - 1
-        )
+        kv = self.require_kv()
+        return min(-(-self.max_seq_len // min(kv.block_sizes)), kv.num_blocks - 1)
 
     def page_tables(self, rows: int, tokens: int) -> torch.Tensor:
         """Build disjoint page tables for standalone use.
@@ -201,7 +208,9 @@ class Gemma4TT:
         Disjoint page tables [groups, rows, width] for `rows` sequences of up to
         `tokens` positions, for scripts and warmup.
         """
-        return self.kv.tables(rows, tokens, self.table_width, self._ring_tokens)
+        return self.require_kv().tables(
+            rows, tokens, self.table_width, self._ring_tokens
+        )
 
     @property
     def _ring_tokens(self) -> int:
@@ -238,10 +247,11 @@ class Gemma4TT:
         hits and chunk ends are multiples of that grid.
         """
         end = tokens.shape[0]
-        if not 0 <= start < end or start % self.kv.grid:
+        grid = self.require_kv().grid
+        if not 0 <= start < end or start % grid:
             raise ValueError(
                 f"prefill of positions [{start}, {end}) must start on the "
-                f"{self.kv.grid}-token block grid"
+                f"{grid}-token block grid"
             )
         out = []
         for c0 in range(start, end, PREFILL_CHUNK):
@@ -262,6 +272,7 @@ class Gemma4TT:
         Run positions [c0, c1) through every layer, writing their K/V. Returns the
         final hidden rows, padded.
         """
+        cache = self.require_kv()
         n = c1 - c0
         padded = prefill_rows(n, c0)
         ids = torch.zeros(padded, dtype=torch.long)
@@ -285,10 +296,9 @@ class Gemma4TT:
             return self._to_device(row, ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
 
         fill_tables = [
-            table(tables[g, c0 // block :])
-            for g, block in enumerate(self.kv.block_sizes)
+            table(tables[g, c0 // block :]) for g, block in enumerate(cache.block_sizes)
         ]
-        whole = [table(tables[g]) if c0 else None for g in range(self.kv.groups)]
+        whole = [table(tables[g]) if c0 else None for g in range(cache.groups)]
         start = (
             self._to_device(
                 torch.tensor([c0], dtype=torch.int32), ttnn.int32, ttnn.ROW_MAJOR_LAYOUT
@@ -297,12 +307,12 @@ class Gemma4TT:
             else None
         )
         chunk = PrefillChunk(c0, n, start, whole, fill_tables)
-        for layer, kv in zip(self.layers, self.kv.layers):
+        for layer, kv in zip(self.layers, self.require_kv().layers):
             kind = "sliding_attention" if layer.sliding else "full_attention"
             x = layer.prefill(x, ropes[kind], kv, chunk)
         for t in (
             *fill_tables,
-            *filter(None, [*whole, start]),
+            *(table for table in (*whole, start) if table is not None),
             *[r for pair in ropes.values() for r in pair],
         ):
             t.deallocate(True)
@@ -446,7 +456,7 @@ class Gemma4TT:
             host = self._decode_inputs(
                 zeros,
                 zeros,
-                torch.zeros(self.kv.groups, batch, width, dtype=torch.int32),
+                torch.zeros(self.require_kv().groups, batch, width, dtype=torch.int32),
             )
             self._trace_inputs[batch] = {
                 k: ttnn.to_device(v, self.mesh, memory_config=DRAM)
@@ -474,7 +484,8 @@ class Gemma4TT:
         """Host tensors for one decode step; shapes depend only on the batch size."""
         batch = tokens.shape[0]
         width = self.table_width
-        pts = torch.zeros(self.kv.groups, batch, width, dtype=torch.int32)
+        cache = self.require_kv()
+        pts = torch.zeros(cache.groups, batch, width, dtype=torch.int32)
         n = min(width, tables.shape[2])
         pts[:, :, :n] = tables[:, :, :n].to(torch.int32)
         rm = ttnn.ROW_MAJOR_LAYOUT
@@ -493,7 +504,7 @@ class Gemma4TT:
             "cur_pos": self._host(positions.to(torch.int32), ttnn.int32, rm),
         }
         self._pt_src = {}
-        for g in range(self.kv.groups):
+        for g in range(cache.groups):
             inputs[f"pt{g}"] = self._host(pts[g], ttnn.int32, rm)
             self._pt_src[f"pt{g}"] = pts[g]
         pos = positions.clamp(min=0).long()
@@ -539,7 +550,7 @@ class Gemma4TT:
             "full_attention": batch * V + self._cs_tiles["sliding_attention"],
         }
         xc, h = dev["in32"], dev["h0"]
-        for i, (layer, kv) in enumerate(zip(self.layers, self.kv.layers)):
+        for i, (layer, kv) in enumerate(zip(self.layers, self.require_kv().layers)):
             kind = "sliding_attention" if layer.sliding else "full_attention"
             if batch == 1:  # the fused q/k norm + RoPE op reads its tables from in32
                 rope = ("compact", dev["in32"], pages[kind])

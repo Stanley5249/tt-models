@@ -39,7 +39,7 @@ def main():
         )
         report(mesh, "weights")
         tables = model.allocate_kv_cache(args.users, args.context)
-        report(mesh, f"kv {model.kv.num_blocks} blocks")
+        report(mesh, f"kv {model.require_kv().num_blocks} blocks")
         model.decode(
             torch.zeros(args.users, dtype=torch.long),
             torch.zeros(args.users, dtype=torch.long),

@@ -308,7 +308,7 @@ def down_op(
     slots: int,
     kt: int,
     cols: int,
-    banks: Sequence[int],
+    banks: int,
     bank_cols: int,
     n_tiles: int,
     rows: int = 1,

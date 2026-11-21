@@ -100,38 +100,34 @@ DENSE_KEYS = (
 def main():
     out = Path(sys.argv[1])
     modes = sys.argv[2:]
-    state = {"mode": None}
+    mode = "none"
 
     def quantize_layer(
         layer_state: dict[str, torch.Tensor], _quant: dict[str, ttnn.DataType]
     ):
         result = dict(layer_state)
-        if state["mode"] == "none":
+        if mode == "none":
             return result
         for key in (
             "experts.gate_up_proj",
             "experts.down_proj",
         ):  # HF layout [E, out, in]
             w = result[key]
-            if (
-                state["mode"] == "bfp4"
-            ):  # the device stores [in, out]: blocks along the outputs
+            if mode == "bfp4":  # the device stores [in, out]: blocks along the outputs
                 result[key] = (
                     bfp4(w.transpose(-1, -2).contiguous())
                     .transpose(-1, -2)
                     .contiguous()
                 )
             else:
-                result[key] = q4(w, state["mode"])
+                result[key] = q4(w, mode)
         return result
 
     dense_mode = os.environ.get("EMU_DENSE", "")
     plain_quantize = quantize_layer
 
-    def quantize_all(
-        layer_state: dict[str, torch.Tensor], quant: dict[str, ttnn.DataType]
-    ):
-        result = plain_quantize(layer_state, quant)
+    def quantize_all(state: dict[str, torch.Tensor], quant: dict[str, ttnn.DataType]):
+        result = plain_quantize(state, quant)
         if dense_mode:
             for key in DENSE_KEYS:
                 if key in result:
@@ -142,9 +138,12 @@ def main():
     # Reference.logits sends the LM head [H, V] through roundtrip when "lm_head" is
     # quantized
     if dense_mode:
-
-        def roundtrip_head(head_t: torch.Tensor, _dtype: ttnn.DataType) -> torch.Tensor:
-            return dense(head_t.T.contiguous(), dense_mode).T.contiguous()
+        # The caller supplies a dtype, but dense_mode selects the emulation.
+        def roundtrip_head(
+            w: torch.Tensor,
+            ttnn_dtype: ttnn.DataType,  # noqa: ARG001
+        ) -> torch.Tensor:
+            return dense(w.T.contiguous(), dense_mode).T.contiguous()
 
         reference.roundtrip = roundtrip_head
     assert "ttnn" not in sys.modules, "ttnn would start the device cluster"
@@ -155,7 +154,6 @@ def main():
     base = torch.load(ROOT / "cache" / "ref" / f"readme-{n}-fp32-logits.pt")
     results = json.loads(out.read_text()) if out.exists() else {}
     for mode in modes:
-        state["mode"] = mode
         t0 = time.time()
         logits, _ = reference.Reference(
             ck, dtype=dtype, quant={"lm_head": "emulated"} if dense_mode else None

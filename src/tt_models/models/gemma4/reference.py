@@ -149,6 +149,7 @@ class Reference:
         masks: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Run one layer of the teacher-forced reference."""
+        assert self.config.layer_types is not None
         layer_type = self.config.layer_types[layer.layer_idx]
         cos_sin = self.rotary(x, positions[None], layer_type)
         return layer(
@@ -171,7 +172,7 @@ class Reference:
         head = head.to(self.dtype)
         logits = h[0] @ head.T
         cap = self.config.final_logit_softcapping
-        return torch.tanh(logits / cap) * cap
+        return logits if cap is None else torch.tanh(logits / cap) * cap
 
     @torch.no_grad()
     def forward(
@@ -194,6 +195,6 @@ class Reference:
             layer = self.load_layer(idx)
             x = self.layer_forward(layer, x, positions, masks)
             del layer
-            if keep_hidden:
+            if hiddens is not None:
                 hiddens.append(x[0].clone())
         return self.logits(x), hiddens

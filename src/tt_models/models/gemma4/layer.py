@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
     from tt_models.models.gemma4.boundary import Boundary
-    from tt_models.models.gemma4.checkpoint import Checkpoint
+    from tt_models.models.gemma4.checkpoint import WeightSource
     from tt_models.models.gemma4.config import Precision
     from tt_models.models.gemma4.kv_cache import LayerKv
 
@@ -29,7 +29,7 @@ class DecoderLayer:
     def __init__(
         self,
         loader: WeightLoader,
-        ckpt: Checkpoint,
+        ckpt: WeightSource,
         cfg: Gemma4TextConfig,
         idx: int,
         precision: Precision,
@@ -38,6 +38,7 @@ class DecoderLayer:
         p = f"layers.{idx}."
         rm = ttnn.ROW_MAJOR_LAYOUT
         self.idx = idx
+        assert cfg.layer_types is not None
         self.sliding = cfg.layer_types[idx] == "sliding_attention"
         self.eps = cfg.rms_norm_eps
         self.attn = Attention(loader, ckpt, cfg, idx, precision.attention)

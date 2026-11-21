@@ -31,7 +31,7 @@ from tt_models.models.gemma4.kv_cache import KvCache, kv_groups
 from tt_models.models.gemma4.model import Gemma4TT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
     import ttnn
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
@@ -205,6 +205,7 @@ class Gemma4ForCausalLM:
             heads // min(num_devices, heads) * head_dim
             for head_dim, heads in attention_dims(cfg).values()
         )
+        assert cfg.layer_types is not None
         layers_per_group = kv_groups(cfg.layer_types).count(0)
         return int(KV_POOL_BYTES / (layers_per_group * 2 * per_token * BFP8_BYTES))
 
@@ -215,9 +216,12 @@ class Gemma4ForCausalLM:
         One spec per layer, so vLLM forms sliding and global KV-cache groups. The
         dtype only sizes vLLM's page accounting; the device stores BFP8.
         """
+        from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
         from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
         text = vllm_config.model_config.hf_config.get_text_config()
+        assert isinstance(text, Gemma4TextConfig)
+        assert text.layer_types is not None
         dims = attention_dims(text)
         block = vllm_config.cache_config.block_size
         cls._check_chunk_grid(vllm_config, dims)
@@ -229,7 +233,7 @@ class Gemma4ForCausalLM:
                 PREFILL_CHUNK,
                 -(-sched.max_num_batched_tokens // PREFILL_BUCKET) * PREFILL_BUCKET,
             )
-        specs = {}
+        specs: dict[str, KVCacheSpec] = {}
         for i, kind in enumerate(text.layer_types):
             head_dim, heads = dims[kind]
             common = {
@@ -272,43 +276,47 @@ class Gemma4ForCausalLM:
                 )
 
     def allocate_kv_cache_per_layer(
-        self, per_layer_specs: Mapping[str, KVCacheSpec]
-    ) -> KvCache | None:
+        self,
+        per_layer_specs: Sequence[tuple[tuple[int, int, int, int], torch.dtype, int]],
+    ) -> KvCache:
         """per_layer_specs: (shape, dtype, buffer index) per layer from vLLM's plan."""
         m = self.model
+        layer_types = m.cfg.layer_types
+        assert layer_types is not None
         shapes = [tuple(shape) for shape, _, _ in per_layer_specs]
         buffers = [idx for _, _, idx in per_layer_specs]
-        m.use_kv(
-            KvCache(
-                m.mesh,
-                m.cfg.layer_types,
-                shapes,
-                buffers,
-                kv_groups(m.cfg.layer_types),
-                m.precision.kv_cache,
-            )
+        cache = KvCache(
+            m.mesh,
+            layer_types,
+            shapes,
+            buffers,
+            kv_groups(layer_types),
+            m.precision.kv_cache,
         )
+        m.use_kv(cache)
         # one layer of each group, whose vLLM page table stands for the group's
         self._group_layer = [
-            next(i for i, kv in enumerate(m.kv.layers) if kv.group == g)
-            for g in range(m.kv.groups)
+            next(i for i, kv in enumerate(cache.layers) if kv.group == g)
+            for g in range(cache.groups)
         ]
         logger.info(
-            f"Gemma4 N300: KV pool of {m.kv.num_blocks} blocks, {len(set(buffers))} "
+            f"Gemma4 N300: KV pool of {cache.num_blocks} blocks, {len(set(buffers))} "
             "shared K/V buffers, "
-            f"{m.kv.groups} groups with block sizes {m.kv.block_sizes}"
+            f"{cache.groups} groups with block sizes {cache.block_sizes}"
         )
-        return m.kv
+        return cache
 
     def _group_tables(
-        self, per_layer: list[torch.Tensor], rows: int, *, check: bool = False
+        self, per_layer: list[torch.Tensor] | None, rows: int, *, check: bool = False
     ) -> torch.Tensor:
         """VLLM's per-layer page tables as int32 [groups, rows, width]."""
+        if per_layer is None:
+            raise ValueError("Gemma 4 requires per-layer page tables")
         tables = torch.stack([per_layer[i][:rows] for i in self._group_layer]).to(
             torch.int32
         )
         if check:  # the model's grouping must match vLLM's (see kv_groups)
-            for i, kv in enumerate(self.model.kv.layers):
+            for i, kv in enumerate(self.model.require_kv().layers):
                 if not torch.equal(
                     per_layer[i][:rows].to(torch.int32),
                     tables[kv.group, :, : per_layer[i].shape[1]],
@@ -427,7 +435,7 @@ class Gemma4ForCausalLM:
             return
         self._prefill_warmed = True
         m = self.model
-        grid = m.kv.grid
+        grid = m.require_kv().grid
         for longest in range(self.longest_prefill, 0, -PREFILL_BUCKET):
             try:
                 tables = m.page_tables(1, grid + longest)[:, 0]

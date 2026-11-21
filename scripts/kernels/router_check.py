@@ -31,6 +31,8 @@ def main():
     args = ap.parse_args()
     ckpt = Checkpoint()
     cfg = ckpt.config
+    assert cfg.num_experts is not None
+    assert cfg.top_k_experts is not None
     k = cfg.top_k_experts
     with open_n300(trace_region_size=50_000_000) as mesh:
         loader = WeightLoader(

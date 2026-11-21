@@ -1,8 +1,10 @@
 """Gemma 4 model settings: weight precisions, prefill pieces, decode rows."""
 
 from dataclasses import dataclass
+from typing import cast
 
 import ttnn
+from typing_extensions import TypedDict
 
 from tt_models.common.config import TILE
 
@@ -25,6 +27,16 @@ def prefill_rows(tokens: int, start: int) -> int:
     """The rows a prefill piece of `tokens` positions from `start` is padded to."""
     step = TILE if start == 0 and tokens <= SHORT_PIECE else PREFILL_BUCKET
     return -(-tokens // step) * step
+
+
+class _PrecisionOverrides(TypedDict, total=False, closed=True):
+    attention: ttnn.DataType
+    mlp: ttnn.DataType
+    experts: ttnn.DataType
+    lm_head: ttnn.DataType
+    kv_cache: ttnn.DataType
+    expert_fidelity: str
+    expert_q4: bool
 
 
 @dataclass
@@ -55,7 +67,7 @@ class Precision:
                 if key == "expert_q4"
                 else names[value]
             )
-        return cls(**kwargs)
+        return cls(**cast("_PrecisionOverrides", kwargs))
 
     def tag(self) -> str:
         """Return the cache tag for these precision settings."""

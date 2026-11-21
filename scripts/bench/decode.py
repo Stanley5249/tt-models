@@ -33,6 +33,8 @@ def main():
     ap.add_argument("--precision", default="")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
+    if args.batch < 1 or args.steps < 1:
+        ap.error("--batch and --steps must be positive")
 
     ckpt = Checkpoint()
     with open_n300(trace_region_size=300_000_000 if args.trace else 0) as mesh:
@@ -48,8 +50,10 @@ def main():
         pts = model.allocate_kv_cache(args.batch, args.prompt_len + args.steps + 1)
         torch.manual_seed(0)
         ids = torch.randint(100, 20000, (args.prompt_len,))
+        logits = None
         for b in range(args.batch):
             logits = model.prefill(ids, 0, pts[:, b])
+        assert logits is not None
         tok = torch.full((args.batch,), int(logits.argmax()))
         times = []
         for step in range(args.steps + 1):
