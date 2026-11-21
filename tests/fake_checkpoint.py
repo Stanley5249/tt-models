@@ -5,7 +5,7 @@ import zlib
 import torch
 from transformers import AutoConfig
 
-from gemma4_tt.checkpoint import attention_dims, resolve_snapshot
+from tt_models.models.gemma4.checkpoint import attention_dims, resolve_snapshot
 
 
 class FakeCheckpoint:

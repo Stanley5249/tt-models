@@ -11,9 +11,9 @@ import time
 import torch
 import ttnn
 
-from gemma4_tt.checkpoint import Checkpoint
-from gemma4_tt.mesh import open_n300
-from gemma4_tt.tt.model import Gemma4TT, Precision
+from tt_models.common.mesh import open_n300
+from tt_models.models.gemma4.checkpoint import Checkpoint
+from tt_models.models.gemma4.model import Gemma4TT, Precision
 
 
 def signpost(name):

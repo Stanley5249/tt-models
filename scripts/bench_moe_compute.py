@@ -19,7 +19,6 @@ from pathlib import Path
 
 import torch
 import ttnn
-from ttnn.operations.ccl import MoEActivationFunction
 from ttnn.experimental.moe_compute_utils import (
     auto_output_width_shard_dim,
     get_weight_core_shard_maps,
@@ -27,11 +26,12 @@ from ttnn.experimental.moe_compute_utils import (
     prepare_w0_w1_tensor_for_moe_compute,
     prepare_w2_tensor_for_moe_compute,
 )
+from ttnn.operations.ccl import MoEActivationFunction
 
 sys.path.insert(0, str(Path(__file__).parent))
 from bench_norm import timeit  # noqa: E402
 
-from gemma4_tt.mesh import open_n300  # noqa: E402
+from tt_models.common.mesh import open_n300  # noqa: E402
 
 H, N, E, K = 2816, 704, 128, 8
 LOCAL = E // 2

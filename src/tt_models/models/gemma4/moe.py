@@ -16,10 +16,13 @@ for the stream's bank layout; prefill slices the padding off.
 import torch
 import ttnn
 
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, L1, TILE, WeightLoader, all_reduce, compute_config, norm_weight, rms_norm
-from gemma4_tt.tt.boundary import Router
-from gemma4_tt.tt.expert_q4 import Q4Experts
-from gemma4_tt.tt.expert_stream import ExpertStream, MlpStream, pad_down, run
+from tt_models.common.ccl import all_reduce
+from tt_models.common.config import DRAM, HIFI2, HIFI4, L1, TILE, compute_config
+from tt_models.common.norm import rms_norm
+from tt_models.common.weights import WeightLoader, norm_weight
+from tt_models.models.gemma4.boundary import Router
+from tt_models.models.gemma4.expert_q4 import Q4Experts
+from tt_models.models.gemma4.expert_stream import ExpertStream, MlpStream, pad_down, run
 
 _STREAMS: dict[tuple, object] = {}
 

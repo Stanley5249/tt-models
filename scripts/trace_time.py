@@ -1,8 +1,14 @@
 """Blocking trace execution, readback and host softcap of a batch-1 decode step (diagnostic)."""
-import time, statistics, torch, ttnn
-from gemma4_tt.checkpoint import Checkpoint
-from gemma4_tt.mesh import open_n300
-from gemma4_tt.tt.model import Gemma4TT
+import statistics
+import time
+
+import torch
+import ttnn
+
+from tt_models.common.mesh import open_n300
+from tt_models.models.gemma4.checkpoint import Checkpoint
+from tt_models.models.gemma4.model import Gemma4TT
+
 with open_n300(trace_region_size=300_000_000) as mesh:
     m = Gemma4TT(mesh, Checkpoint(), max_batch=1)
     tables = m.allocate_kv_cache(1, 128)

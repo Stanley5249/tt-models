@@ -8,7 +8,7 @@ import time
 import torch
 import ttnn
 
-from gemma4_tt.mesh import open_n300
+from tt_models.common.mesh import open_n300
 
 E, H = 128, 2816
 

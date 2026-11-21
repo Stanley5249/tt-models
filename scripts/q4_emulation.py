@@ -26,8 +26,8 @@ from pathlib import Path
 
 import torch
 
-import gemma4_tt.reference as R
-from gemma4_tt.checkpoint import Checkpoint
+import tt_models.models.gemma4.reference as R
+from tt_models.models.gemma4.checkpoint import Checkpoint
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))

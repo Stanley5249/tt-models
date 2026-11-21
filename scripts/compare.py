@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer
 
-from gemma4_tt.checkpoint import Checkpoint
+from tt_models.models.gemma4.checkpoint import Checkpoint
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,12 +37,12 @@ def reference_logits(ckpt, ids, first, layers, offset=0) -> torch.Tensor:
     path = ROOT / "cache" / "ref" / f"readme{tag}-n{ids.shape[0]}-from{first}-L{layers}.pt"
     if path.exists():
         return torch.load(path)
-    from gemma4_tt.reference import Reference
+    from tt_models.models.gemma4.reference import Reference
 
     t0 = time.time()
     ref = Reference(ckpt)
     positions = torch.arange(ids.shape[0])
-    from gemma4_tt.reference import attention_masks
+    from tt_models.models.gemma4.reference import attention_masks
 
     masks = attention_masks(ids.shape[0], ref.config.sliding_window)
     x = ref.embed(ids)
@@ -83,7 +83,7 @@ def main():
     ap.add_argument(
         "--perturb", type=int, default=0, help="seed of a 2^-9 relative noise on the embeddings (0: none), to sample the noise floor"
     )
-    ap.add_argument("--precision", default="", help='Precision overrides, e.g. "expert_q4=1" (gemma4_tt/tt/model.py)')
+    ap.add_argument("--precision", default="", help='Precision overrides, e.g. "expert_q4=1" (tt_models.models.gemma4.model.Precision)')
     args = ap.parse_args()
     if args.batch < 1:
         ap.error("--batch must be at least 1")
@@ -98,8 +98,8 @@ def main():
 
     import ttnn
 
-    from gemma4_tt.mesh import open_n300
-    from gemma4_tt.tt.model import Gemma4TT, Precision
+    from tt_models.common.mesh import open_n300
+    from tt_models.models.gemma4.model import Gemma4TT, Precision
 
     rows = []
     with open_n300(trace_region_size=200_000_000 if args.trace else 0) as mesh:

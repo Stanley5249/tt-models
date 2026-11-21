@@ -17,9 +17,9 @@ from pathlib import Path
 import torch
 from transformers import AutoTokenizer
 
-from gemma4_tt.checkpoint import Checkpoint
-from gemma4_tt.mesh import open_n300
-from gemma4_tt.tt.model import Gemma4TT
+from tt_models.common.mesh import open_n300
+from tt_models.models.gemma4.checkpoint import Checkpoint
+from tt_models.models.gemma4.model import Gemma4TT
 
 PROMPTS = [
     "What is the capital of Australia? Answer in one sentence.",

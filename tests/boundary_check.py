@@ -1,4 +1,4 @@
-"""Device check of the compact boundary ops (gemma4_tt/tt/boundary.py) against torch.
+"""Device check of the compact boundary ops (tt_models.models.gemma4.boundary) against torch.
 
     pixi run python tests/boundary_check.py
 
@@ -15,9 +15,9 @@ import ttnn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from bench_norm import timeit  # noqa: E402
 
-from gemma4_tt.mesh import open_n300  # noqa: E402
-from gemma4_tt.tt.boundary import Boundary, compact_tensor, from_compact, to_compact  # noqa: E402
-from gemma4_tt.tt.common import init_ccl, _SEMAPHORES  # noqa: E402
+from tt_models.common.ccl import _SEMAPHORES, init_ccl  # noqa: E402
+from tt_models.common.mesh import open_n300  # noqa: E402
+from tt_models.models.gemma4.boundary import Boundary, compact_tensor, from_compact, to_compact  # noqa: E402
 
 H, EPS = 2816, 1e-6
 

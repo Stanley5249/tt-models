@@ -10,7 +10,7 @@ import math
 import torch
 from transformers.models.gemma4 import modeling_gemma4 as hf
 
-from gemma4_tt.checkpoint import Checkpoint
+from tt_models.models.gemma4.checkpoint import Checkpoint
 
 
 def embed_scale(hidden_size: int) -> float:

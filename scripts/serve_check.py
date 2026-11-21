@@ -41,7 +41,8 @@ import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+
+from tt_models.models.gemma4.checkpoint import resolve_snapshot
 
 MODEL = "gemma4"
 PROMPTS = [
@@ -120,9 +121,9 @@ def tokens(url: str, text: str, bos: bool) -> list[int]:
 
 
 def document(n_chars: int) -> str:
-    """Repository source as a long, realistic prompt (an agent reading files)."""
-    root = Path(__file__).resolve().parents[1]
-    text = "".join(p.read_text() for p in sorted((root / "gemma4_tt").rglob("*.py")))
+    """The checkpoint's model card, repeated to n_chars: a long prompt that stays the same as this
+    repository changes (prompts built from the repository's own files moved its near-ties)."""
+    text = (resolve_snapshot() / "README.md").read_text()
     return (text * (n_chars // len(text) + 1))[:n_chars]
 
 

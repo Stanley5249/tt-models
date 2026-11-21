@@ -22,7 +22,7 @@ import ttnn
 sys.path.insert(0, str(Path(__file__).parent))
 from bench_norm import timeit  # noqa: E402
 
-from gemma4_tt.mesh import open_n300  # noqa: E402
+from tt_models.common.mesh import open_n300  # noqa: E402
 
 E, H, N = 128, 2816, 768
 LOFI = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.LoFi, fp32_dest_acc_en=True, packer_l1_acc=True)

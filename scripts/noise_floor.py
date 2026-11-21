@@ -19,9 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from precision_study import score, tokens  # noqa: E402
 
-from gemma4_tt.checkpoint import Checkpoint  # noqa: E402
-from gemma4_tt.mesh import open_n300  # noqa: E402
-from gemma4_tt.tt.model import Gemma4TT  # noqa: E402
+from tt_models.common.mesh import open_n300  # noqa: E402
+from tt_models.models.gemma4.checkpoint import Checkpoint  # noqa: E402
+from tt_models.models.gemma4.model import Gemma4TT  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--tokens", type=int, default=512)

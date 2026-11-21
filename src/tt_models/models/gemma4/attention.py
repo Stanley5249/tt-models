@@ -19,10 +19,12 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
-from gemma4_tt.checkpoint import attention_dims
-from gemma4_tt.tt.boundary import QkRope
-from gemma4_tt.tt.common import DRAM, HIFI2, HIFI4, TILE, WeightLoader, all_reduce, dram_sharded, norm_weight, width_sharded_l1
-from gemma4_tt.tt.kv_cache import LayerKv
+from tt_models.common.ccl import all_reduce
+from tt_models.common.config import DRAM, HIFI2, HIFI4, TILE, dram_sharded, width_sharded_l1
+from tt_models.common.weights import WeightLoader, norm_weight
+from tt_models.models.gemma4.boundary import QkRope
+from tt_models.models.gemma4.checkpoint import attention_dims
+from tt_models.models.gemma4.kv_cache import LayerKv
 
 # Chunked prefill attention needs its chunk start on a multiple of the SDPA q and
 # k chunks, which must also cover every KV block size (64 sliding, 128 global).

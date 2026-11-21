@@ -13,11 +13,11 @@ import ttnn
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from bench_norm import timeit  # noqa: E402
 
-from gemma4_tt.checkpoint import Checkpoint  # noqa: E402
-from gemma4_tt.mesh import open_n300  # noqa: E402
-from gemma4_tt.tt.boundary import Boundary, from_compact  # noqa: E402
-from gemma4_tt.tt.common import WeightLoader  # noqa: E402
-from gemma4_tt.tt.moe import FeedForward  # noqa: E402
+from tt_models.common.mesh import open_n300  # noqa: E402
+from tt_models.common.weights import WeightLoader  # noqa: E402
+from tt_models.models.gemma4.boundary import Boundary, from_compact  # noqa: E402
+from tt_models.models.gemma4.checkpoint import Checkpoint  # noqa: E402
+from tt_models.models.gemma4.moe import FeedForward  # noqa: E402
 
 
 def main():

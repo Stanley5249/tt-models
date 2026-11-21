@@ -1,6 +1,6 @@
 """Gemma 4 tool parser that enforces required and named tool choice.
 
-    vllm serve ... --tool-parser-plugin gemma4_tt/tool_parser.py --tool-call-parser gemma4_tt
+    vllm serve ... --tool-parser-plugin src/tt_models/models/gemma4/tool_parser.py --tool-call-parser gemma4_tt
 
 vLLM 0.32's `gemma4` parser sets no structural tag, so `tool_choice="required"`
 or a named tool only reaches the model as prompt text (vllm-project/vllm#50477,
@@ -20,11 +20,10 @@ argument block at all (`call:name<tool_call|>`), which the gemma4 parser cannot
 read as a call.
 """
 
-from xgrammar.builtin_structural_tag import get_gemma_4_structural_tag
-
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.gemma4_engine_tool_parser import Gemma4EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import register_vllm_structural_tag
+from xgrammar.builtin_structural_tag import get_gemma_4_structural_tag
 
 TAG_MODEL = "gemma_4"
 

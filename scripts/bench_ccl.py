@@ -19,7 +19,7 @@ import ttnn
 sys.path.insert(0, str(Path(__file__).parent))
 from bench_norm import timeit  # noqa: E402
 
-from gemma4_tt.mesh import open_n300  # noqa: E402
+from tt_models.common.mesh import open_n300  # noqa: E402
 
 
 def main():

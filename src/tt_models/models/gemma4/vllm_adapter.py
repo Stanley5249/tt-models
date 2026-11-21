@@ -2,11 +2,11 @@
 
 Register it for a launch with
 
-    TT_MODEL_CLASS_OVERRIDES=TTGemma4ForConditionalGeneration=gemma4_tt.vllm_model:Gemma4ForCausalLM
+    TT_MODEL_CLASS_OVERRIDES=TTGemma4ForConditionalGeneration=tt_models.models.gemma4.vllm_adapter:Gemma4ForCausalLM
 
 vLLM pages all 30 layers through its hybrid KV-cache manager: the sliding
 layers as SlidingWindowSpec, the global ones as FullAttentionSpec (layout in
-gemma4_tt/tt/kv_cache.py). The model keeps no per-request state, so prefix
+kv_cache.py). The model keeps no per-request state, so prefix
 caching, chunked prefill, preemption and row moves need no adapter hooks:
 release_request and slot_remap have nothing to act on.
 
@@ -22,9 +22,9 @@ import time
 import torch
 from loguru import logger
 
-from gemma4_tt.checkpoint import Checkpoint, attention_dims
-from gemma4_tt.tt.kv_cache import KvCache, kv_groups
-from gemma4_tt.tt.model import PREFILL_BUCKET, PREFILL_CHUNK, Gemma4TT, prefill_rows
+from tt_models.models.gemma4.checkpoint import Checkpoint, attention_dims
+from tt_models.models.gemma4.kv_cache import KvCache, kv_groups
+from tt_models.models.gemma4.model import PREFILL_BUCKET, PREFILL_CHUNK, Gemma4TT, prefill_rows
 
 # Device DRAM per chip for the shared KV pool. Weights take 8.0 of 11.87 GiB;
 # the rest holds prefill activations, decode traces and their inputs.

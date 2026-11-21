@@ -1,4 +1,4 @@
-"""Prototype check of the Q4_0 decode gate|up (gemma4_tt/tt/expert_q4.py) against BFP4.
+"""Prototype check of the Q4_0 decode gate|up (tt_models.models.gemma4.expert_q4) against BFP4.
 
     pixi run python scripts/bench_q4_stream.py [--layer 0] [--seeds 3]
 
@@ -17,12 +17,13 @@ import ttnn
 sys.path.insert(0, str(Path(__file__).parent))
 from bench_norm import timeit  # noqa: E402
 
-from gemma4_tt.checkpoint import Checkpoint  # noqa: E402
-from gemma4_tt.mesh import open_n300  # noqa: E402
-from gemma4_tt.tt.common import WeightLoader, rms_norm  # noqa: E402
-from gemma4_tt.tt.expert_q4 import down_q4_op, gate_up_q4_op, q4_factor, step_tiles  # noqa: E402
-from gemma4_tt.tt.expert_stream import TILE, pad_down  # noqa: E402
-from gemma4_tt.tt.moe import FeedForward  # noqa: E402
+from tt_models.common.mesh import open_n300  # noqa: E402
+from tt_models.common.norm import rms_norm  # noqa: E402
+from tt_models.common.weights import WeightLoader  # noqa: E402
+from tt_models.models.gemma4.checkpoint import Checkpoint  # noqa: E402
+from tt_models.models.gemma4.expert_q4 import down_q4_op, gate_up_q4_op, q4_factor, step_tiles  # noqa: E402
+from tt_models.models.gemma4.expert_stream import TILE, pad_down  # noqa: E402
+from tt_models.models.gemma4.moe import FeedForward  # noqa: E402
 
 
 def gelu_tanh(x):

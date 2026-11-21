@@ -13,9 +13,9 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gemma4_tt.mesh import open_n300  # noqa: E402
-from gemma4_tt.tt.model import Gemma4TT  # noqa: E402
 from tests.fake_checkpoint import FakeCheckpoint  # noqa: E402
+from tt_models.common.mesh import open_n300  # noqa: E402
+from tt_models.models.gemma4.model import Gemma4TT  # noqa: E402
 
 
 def pcc(a, b):

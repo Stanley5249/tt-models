@@ -20,7 +20,7 @@ from pathlib import Path
 
 import torch
 
-from gemma4_tt.checkpoint import Checkpoint
+from tt_models.models.gemma4.checkpoint import Checkpoint
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,7 +41,7 @@ def parse_quant(spec: str) -> dict:
 
 
 def run_reference(ckpt, ids, dtype, quant):
-    from gemma4_tt.reference import Reference
+    from tt_models.models.gemma4.reference import Reference
 
     ref = Reference(ckpt, dtype=dtype, quant=quant)
     logits, _ = ref.forward(ids)
@@ -49,8 +49,8 @@ def run_reference(ckpt, ids, dtype, quant):
 
 
 def run_tt(ckpt, ids, args):
-    from gemma4_tt.mesh import open_n300
-    from gemma4_tt.tt.model import Gemma4TT
+    from tt_models.common.mesh import open_n300
+    from tt_models.models.gemma4.model import Gemma4TT
 
     with open_n300() as mesh:
         model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=1, precision=args.precision)
@@ -80,7 +80,7 @@ def main():
     ap.add_argument("--out", type=Path, default=ROOT / "results" / "accuracy" / "precision_study.json")
     args = ap.parse_args()
     spec = args.precision
-    from gemma4_tt.tt.model import Precision
+    from tt_models.models.gemma4.model import Precision
 
     args.precision = Precision.parse(spec)
 

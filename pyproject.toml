@@ -1,0 +1,25 @@
+[project]
+name = "tt-models"
+version = "0.1.0"
+description = "Tenstorrent model implementations served through vLLM and vllm-tt-plugin"
+requires-python = ">=3.12"
+# The runtime stack (ttnn, torch, vLLM, vllm-tt-plugin) is pinned in pixi.toml.
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.9.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["device: needs the N300 (run with `pytest -m device`)"]
+addopts = "-m 'not device'"

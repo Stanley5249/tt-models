@@ -16,23 +16,15 @@ import torch
 import ttnn
 from transformers.models.gemma4 import modeling_gemma4 as hf
 
-from gemma4_tt.checkpoint import Checkpoint
-from gemma4_tt.reference import embed_scale
-from gemma4_tt.tt.attention import CHUNK_ALIGN, Attention, PrefillChunk
-from gemma4_tt.tt.boundary import Boundary, compact_tensor, to_compact
-from gemma4_tt.tt.kv_cache import KvCache
-from gemma4_tt.tt.common import (
-    DRAM,
-    HIFI2,
-    TILE,
-    WeightLoader,
-    all_gather_compact,
-    dram_sharded,
-    init_ccl,
-    norm_weight,
-    rms_norm,
-    width_sharded_l1,
-)
+from tt_models.common.ccl import all_gather_compact, init_ccl
+from tt_models.common.config import DRAM, HIFI2, TILE, dram_sharded, width_sharded_l1
+from tt_models.common.norm import rms_norm
+from tt_models.common.weights import WeightLoader, norm_weight
+from tt_models.models.gemma4.attention import CHUNK_ALIGN, Attention, PrefillChunk
+from tt_models.models.gemma4.boundary import Boundary, compact_tensor, to_compact
+from tt_models.models.gemma4.checkpoint import Checkpoint
+from tt_models.models.gemma4.kv_cache import KvCache
+from tt_models.models.gemma4.reference import embed_scale
 
 # The LM head is read as LM_SPLITS DRAM-sharded matmuls per chip: 2.5 -> 1.37 ms per
 # decode step against one interleaved matmul (scripts/bench_lm_head_dram.py).
@@ -56,7 +48,7 @@ def prefill_rows(tokens: int, start: int) -> int:
     step = TILE if start == 0 and tokens <= SHORT_PIECE else PREFILL_BUCKET
     return -(-tokens // step) * step
 
-from gemma4_tt.tt.moe import STREAM_ROWS, FeedForward  # noqa: E402
+from tt_models.models.gemma4.moe import STREAM_ROWS, FeedForward  # noqa: E402
 
 
 @dataclass

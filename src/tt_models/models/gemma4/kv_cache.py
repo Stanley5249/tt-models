@@ -22,7 +22,7 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
-from gemma4_tt.tt.common import DRAM
+from tt_models.common.config import DRAM
 
 SLIDING = "sliding_attention"
 
