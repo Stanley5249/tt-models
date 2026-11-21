@@ -1,4 +1,5 @@
-"""Device checks with random weights (2 layers, real shapes): run with `pytest -m device`.
+"""Device checks with random weights (2 layers, real shapes): run with `pytest -m
+device`.
 
 Each check compares two device paths that must agree, so the thresholds are
 tight: decode against a fresh prefill of the same positions, chunked and
@@ -32,7 +33,8 @@ def assert_close(got, ref, what):
     assert got.argmax() == ref.argmax(), f"{what}: argmax differs"
 
 
-@pytest.fixture  # one mesh per test: a model keeps its traces and KV until the mesh closes
+# one mesh per test: a model keeps its traces and KV until the mesh closes
+@pytest.fixture
 def mesh():
     with open_n300() as m:
         yield m
@@ -85,7 +87,9 @@ def scheduled(m, table: torch.Tensor, start: int, end: int) -> torch.Tensor:
 
 
 def test_chunked_prefill_and_prefix_hit(mesh):
-    """Chunks, a prefix-cache hit and the null block, with page tables shaped as vLLM sends them."""
+    """Chunks, a prefix-cache hit and the null block, with page tables shaped as vLLM
+    sends them.
+    """
     torch.manual_seed(0)
     L, P = 2900, 1536
     seq = torch.randint(10, 20000, (L + 1,))
@@ -130,7 +134,9 @@ def test_chunked_prefill_and_prefix_hit(mesh):
 
 
 def test_inactive_rows_leave_live_kv_alone(mesh):
-    """Padding rows (position -1) point at user 0's block 0, where an unskipped write would land."""
+    """Padding rows (position -1) point at user 0's block 0, where an unskipped write
+    would land.
+    """
     torch.manual_seed(0)
     n = 40
     seq = torch.randint(10, 20000, (n + 3,))

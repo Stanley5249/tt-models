@@ -1,11 +1,14 @@
-"""Host planning and matmul configs for expert-major prefill (moe.FeedForward._experts_prefill)."""
+"""Host planning and matmul configs for expert-major prefill
+(moe.FeedForward._experts_prefill).
+"""
 
 import torch
 import ttnn
 
 from tt_models.common.config import TILE
 
-# Expert-major prefill rounds its chunk count up to a multiple of this (see _plan_chunks).
+# Expert-major prefill rounds its chunk count up to a multiple of this (see
+# _plan_chunks).
 CHUNK_GRANULE = 16
 
 
@@ -53,7 +56,8 @@ def plan_chunks(ids: torch.Tensor, weights: torch.Tensor, rows: int, n_experts: 
     """Host layout of expert-major prefill for top-k ids/weights [T, k].
 
     Each expert's (token, slot) pairs fill chunks of `rows` rows; padding rows
-    gather token 0 and get weight 0, which zeroes their results. The chunk count rounds up to a
+    gather token 0 and get weight 0, which zeroes their results. The chunk count rounds
+    up to a
     multiple of CHUNK_GRANULE with zero chunks: it depends on the routing, and
     every new count would compile new programs. Returns the gather index into
     the token rows [C * rows], the row weights [C * rows], the expert of every

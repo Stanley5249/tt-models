@@ -76,7 +76,8 @@ class FakeCheckpoint:
     def get(self, name: str) -> torch.Tensor:
         if name not in self._cache:
             shape, std = self._shape(name)
-            # crc32, not hash(): str hashes change per process, and tensors read without the
+            # crc32, not hash(): str hashes change per process, and tensors read without
+            # the
             # weight cache must match the cached ones a previous process built.
             g = torch.Generator().manual_seed(
                 zlib.crc32(f"{self.seed}:{name}".encode())

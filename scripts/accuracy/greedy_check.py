@@ -1,7 +1,9 @@
 """Greedy outputs of a few chat prompts, saved or compared against a saved run.
 
-    pixi run python scripts/accuracy/greedy_check.py --save scripts/accuracy/greedy-base.json
-    pixi run python scripts/accuracy/greedy_check.py --compare scripts/accuracy/greedy-base.json
+    pixi run python scripts/accuracy/greedy_check.py --save \\
+        scripts/accuracy/greedy-base.json
+    pixi run python scripts/accuracy/greedy_check.py --compare \\
+        scripts/accuracy/greedy-base.json
 
 Uses traced decode, as serving does. A comparison reports, per prompt, how
 many leading tokens match up to the reference's first end-of-turn token

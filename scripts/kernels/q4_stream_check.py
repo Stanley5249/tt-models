@@ -1,4 +1,5 @@
-"""Prototype check of the Q4_0 decode gate|up (tt_models.models.gemma4.expert_q4) against BFP4.
+"""Prototype check of the Q4_0 decode gate|up (tt_models.models.gemma4.expert_q4)
+against BFP4.
 
     pixi run python scripts/kernels/q4_stream_check.py [--layer 0] [--seeds 3]
 
@@ -226,12 +227,15 @@ def main():
             d4, dq = down_dev(bfp4_down()), down_dev(q4_down())
             for c in range(tp):
                 print(
-                    f"    down chip {c}: SNR vs checkpoint weights: bfp4 {snr(d4[c], ref_d[c]):.1f} dB, q4 {snr(dq[c], ref_d[c]):.1f} dB",
+                    f"    down chip {c}: SNR vs checkpoint weights: bfp4 "
+                    f"{snr(d4[c], ref_d[c]):.1f} dB, q4 {snr(dq[c], ref_d[c]):.1f} dB",
                     flush=True,
                 )
             print(
-                f"seed {seed}: SNR vs checkpoint weights: bfp4 {snr(a4, ref):.1f} dB, q4 {snr(aq, ref):.1f} dB "
-                f"(q4 vs its own exact weights {snr(aq, ref_q4):.1f} dB, host clamp-only {snr(ref_q4, ref):.1f} dB)",
+                f"seed {seed}: SNR vs checkpoint weights: bfp4 {snr(a4, ref):.1f} dB, "
+                f"q4 {snr(aq, ref):.1f} dB "
+                f"(q4 vs its own exact weights {snr(aq, ref_q4):.1f} dB, host "
+                f"clamp-only {snr(ref_q4, ref):.1f} dB)",
                 flush=True,
             )
         runs = {"bfp4": [], "q4": [], "bfp4 down": [], "q4 down": []}

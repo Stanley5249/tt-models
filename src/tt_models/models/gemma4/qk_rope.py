@@ -1,4 +1,4 @@
-"""Fused q/k RMSNorm, head weights and RoPE of the batch-1 QKV row (kernels/qk_rope_*)."""
+"""Fused q/k RMSNorm, head weights and RoPE for the batch-1 QKV row."""
 
 import torch
 import ttnn
@@ -20,17 +20,22 @@ from tt_models.models.gemma4.generic_op import (
 
 
 def rope_partner(width: int, head_dim: int) -> torch.Tensor:
-    """Index of every fused-row value's rotate_half partner (the other half of its head)."""
+    """Index of every fused-row value's rotate_half partner (the other half of its
+    head).
+    """
     d = torch.arange(width)
     half = head_dim // 2
     return torch.where(d % head_dim < half, d + half, d - half)
 
 
 class QkRope:
-    """q/k RMSNorm, head weights and RoPE of the fused batch-1 QKV row in one op (kernels/qk_rope_*).
+    """q/k RMSNorm, head weights and RoPE of the fused batch-1 QKV row in one op
+    (kernels/qk_rope_*).
 
-    One core per compact tile (4 heads of 256 or 2 of 512); V heads have weight 1, cos 1, sin 0.
-    Replaces reshape, rms_norm, the weight multiply, the rotate_half matmul, three RoPE eltwise ops and the
+    One core per compact tile (4 heads of 256 or 2 of 512); V heads have weight 1, cos
+    1, sin 0.
+    Replaces reshape, rms_norm, the weight multiply, the rotate_half matmul, three RoPE
+    eltwise ops and the
     reshape back (~60 us per layer)."""
 
     def __init__(self, mesh, width: int, head_dim: int, eps: float, core_row: int = 6):
@@ -48,11 +53,15 @@ class QkRope:
         return compact_tensor(self.mesh, torch.stack([w_row, w_row[self.partner]]))
 
     def host_tables(self, cos_row: torch.Tensor, sin_row: torch.Tensor) -> torch.Tensor:
-        """Per-step [cos | sin * rotate_half sign] for one token, as host compact FP32 [1, 1, 32, 2 V 32]."""
+        """Per-step [cos | sin * rotate_half sign] for one token, as host compact FP32
+        [1, 1, 32, 2 V 32].
+        """
         return to_compact(torch.stack([cos_row, sin_row * self.sign]))[None, None]
 
     def __call__(self, x, cs, w, out, cs_page0: int = 0):
-        """x: FP32 row-form QKV matmul output [1, 1, 1, W]; out: BF16 row form [1, 1, 1, W]."""
+        """x: FP32 row-form QKV matmul output [1, 1, 1, W]; out: BF16 row form [1, 1, 1,
+        W].
+        """
         crs = core_range_set(self.cores)
         cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, cb_sq, cb_s1, cb_r, cb_out = (
             0,

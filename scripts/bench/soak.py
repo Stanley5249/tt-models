@@ -40,7 +40,8 @@ def main():
                 start = used(mesh)
         b1 = used(mesh)
         print(
-            f"b1: {args.steps} steps in {time.time() - t0:.0f} s, DRAM {start:.3f} -> {b1:.3f} GiB/chip",
+            f"b1: {args.steps} steps in {time.time() - t0:.0f} s, DRAM {start:.3f} -> "
+            f"{b1:.3f} GiB/chip",
             flush=True,
         )
         tok4 = torch.full((4,), 5)
@@ -52,7 +53,8 @@ def main():
             if s == 10:
                 start4 = used(mesh)
         print(
-            f"b4: {args.batch4_steps} steps, DRAM {start4:.3f} -> {used(mesh):.3f} GiB/chip",
+            f"b4: {args.batch4_steps} steps, DRAM {start4:.3f} -> {used(mesh):.3f} "
+            "GiB/chip",
             flush=True,
         )
         m.release_traces()

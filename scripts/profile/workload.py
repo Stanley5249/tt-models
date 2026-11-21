@@ -1,6 +1,7 @@
 """Fixed workload for tt-scope captures: one prefill, then eager decode steps.
 
-    pixi run tt-scope tracy scripts/profile/workload.py -- --prompt-len 128 --decode-steps 2
+    pixi run tt-scope tracy scripts/profile/workload.py -- --prompt-len 128 \\
+        --decode-steps 2
 
 Signposts mark the phases so the per-op CSV can be split by phase.
 """

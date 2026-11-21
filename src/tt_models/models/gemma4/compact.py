@@ -1,7 +1,9 @@
 """Compact layout of decode hidden vectors (kernels/compact.hpp).
 
-A hidden vector's values as FP32 chunks of 16, 64 chunks per [32, 32] FP32 tile, so 2816 values are 3
-dense tiles instead of one row of 88 mostly empty ones. Vector v of a compact tensor starts at chunk
+A hidden vector's values as FP32 chunks of 16, 64 chunks per [32, 32] FP32 tile, so 2816
+values are 3
+dense tiles instead of one row of 88 mostly empty ones. Vector v of a compact tensor
+starts at chunk
 v * 64 * compact_tiles(H); padding chunks are zero.
 """
 
@@ -19,12 +21,15 @@ def compact_tiles(hidden: int) -> int:
 
 
 def to_compact(v: torch.Tensor) -> torch.Tensor:
-    """[n, H] -> [32, n * V * 32] float32 whose TILE layout puts chunk c of vector i at byte 64 c of its V tiles."""
+    """[n, H] -> [32, n * V * 32] float32 whose TILE layout puts chunk c of vector i at
+    byte 64 c of its V tiles.
+    """
     n, h = v.shape
     tiles = compact_tiles(h)
     chunks = torch.zeros(n, tiles * CHUNKS_PER_TILE, CHUNK)
     chunks[:, : h // CHUNK] = v.float().reshape(n, -1, CHUNK)
-    # chunk q of a tile = face q // 16, face row q % 16 -> tile row (face // 2) * 16 + r, cols (face % 2) * 16 + j
+    # Chunk q of a tile belongs to face q // 16 and face row q % 16.
+    # Tile row: (face // 2) * 16 + r. Tile column: (face % 2) * 16 + j.
     c = chunks.reshape(
         n, tiles, 2, 2, 16, CHUNK
     )  # [n, tile, face_row_half, face_col_half, r, j]

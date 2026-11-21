@@ -1,6 +1,7 @@
 """Check and time the decode expert stream ops for 1-4 token rows.
 
-    pixi run python scripts/kernels/expert_stream_check.py [--rows 4] [--layer 0] [--gate-up-readers 4] [--down-readers 2]
+    pixi run python scripts/kernels/expert_stream_check.py [--rows 4] [--layer \\
+        0] [--gate-up-readers 4] [--down-readers 2]
 
 Real layer weights. The stream and the prefill expert-major path (indexed
 sparse_matmul, an independent implementation) get the same normed rows; the
@@ -128,7 +129,8 @@ def main():
                     )
                     pcc = torch.corrcoef(torch.stack([ta, tb]))[0, 1].item()
                     print(
-                        f"seed {seed} chip {c} row {t}: pcc {pcc:.6f}, max diff {(ta - tb).abs().max():.4f}, ref max {tb.abs().max():.3f}",
+                        f"seed {seed} chip {c} row {t}: pcc {pcc:.6f}, max diff "
+                        f"{(ta - tb).abs().max():.4f}, ref max {tb.abs().max():.3f}",
                         flush=True,
                     )
             out.deallocate(True)

@@ -18,7 +18,7 @@ def registered(arch):
 
 @pytest.fixture(autouse=True)
 def restore_registry(monkeypatch):
-    """Each test seeds the registry through monkeypatch, which restores it afterwards."""
+    """Restore the registry after each test through monkeypatch."""
     monkeypatch.setattr(ModelRegistry, "models", dict(ModelRegistry.models))
 
 

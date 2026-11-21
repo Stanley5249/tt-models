@@ -143,7 +143,6 @@ ignore = [
   # Not yet fixed; remove one family per change.
   "ANN",  # annotations in src/
   "D",  # Google docstrings in src/
-  "E501",  # docstrings and strings over the default width
 ]
 
 [tool.ruff.lint.pydocstyle]

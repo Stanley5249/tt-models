@@ -32,7 +32,9 @@ def attention_masks(seq_len: int, sliding_window: int) -> dict[str, torch.Tensor
 
 
 def roundtrip(w: torch.Tensor, ttnn_dtype) -> torch.Tensor:
-    """Quantize-dequantize `w` exactly as a TILE upload in `ttnn_dtype` would (host only)."""
+    """Quantize-dequantize `w` exactly as a TILE upload in `ttnn_dtype` would (host
+    only).
+    """
     import ttnn
 
     shape = w.shape
@@ -91,7 +93,9 @@ class Reference:
         dtype=torch.float32,
         quant: dict | None = None,
     ):
-        """quant: optional {"attention"|"mlp"|"experts"|"lm_head": ttnn dtype} weight emulation."""
+        """quant: optional {"attention"|"mlp"|"experts"|"lm_head": ttnn dtype} weight
+        emulation.
+        """
         self.ckpt = ckpt or Checkpoint()
         self.dtype = dtype
         self.quant = quant or {}
@@ -149,7 +153,9 @@ class Reference:
         keep_hidden: bool = False,
         num_layers: int | None = None,
     ):
-        """Teacher-forced forward over `ids` (1D). Returns logits [S, V] and optional hiddens."""
+        """Teacher-forced forward over `ids` (1D). Returns logits [S, V] and optional
+        hiddens.
+        """
         positions = torch.arange(ids.shape[0])
         masks = attention_masks(ids.shape[0], self.config.sliding_window)
         x = self.embed(ids)

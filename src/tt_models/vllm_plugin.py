@@ -1,4 +1,5 @@
-"""vLLM general plugin: registers this package's models and parsers in every vLLM process.
+"""vLLM general plugin: registers this package's models and parsers in every vLLM
+process.
 
 vLLM loads it through the `vllm.general_plugins` entry point in pyproject.toml, so
 `vllm serve` needs no `--tool-parser-plugin` flag or `TT_MODEL_CLASS_OVERRIDES` entry.
@@ -10,7 +11,9 @@ the same architecture still takes precedence.
 import os
 
 MODELS = {
-    "TTGemma4ForConditionalGeneration": "tt_models.models.gemma4.vllm_adapter:Gemma4ForCausalLM",
+    (
+        "TTGemma4ForConditionalGeneration"
+    ): "tt_models.models.gemma4.vllm_adapter:Gemma4ForCausalLM",
 }
 
 

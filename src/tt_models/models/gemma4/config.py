@@ -6,7 +6,8 @@ import ttnn
 
 from tt_models.common.config import TILE
 
-# Decode batches up to this many tokens take the expert streams (their scratch holds 32 slots).
+# Decode batches up to this many tokens take the expert streams (their scratch holds 32
+# slots).
 STREAM_ROWS = 4
 # Longest piece of a prompt one prefill pass computes. It bounds activation memory
 # (the expert-major MoE gathers k = 8 rows per token) whatever chunk vLLM schedules.

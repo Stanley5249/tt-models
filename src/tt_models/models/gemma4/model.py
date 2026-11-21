@@ -48,11 +48,13 @@ class Gemma4TT:
     ):
         if max_batch > STREAM_ROWS:
             raise ValueError(
-                f"decode streams the experts of at most {STREAM_ROWS} rows; got max_batch={max_batch}"
+                f"decode streams the experts of at most {STREAM_ROWS} rows; got "
+                f"max_batch={max_batch}"
             )
         if precision is not None and precision.expert_q4 and max_batch > 1:
             raise ValueError(
-                "the experimental Q4_0 experts decode one row; build the model with max_batch=1"
+                "the experimental Q4_0 experts decode one row; build the model with "
+                "max_batch=1"
             )
         self.mesh = mesh
         self.ckpt = ckpt = ckpt or Checkpoint()
@@ -105,7 +107,9 @@ class Gemma4TT:
     # -- host-side tables ----------------------------------------------------
 
     def _rope_tables(self, n: int) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-        """float32 [n, hd] cos/sin per layer type; prefill uploads them as BF16, decode as fp32."""
+        """float32 [n, hd] cos/sin per layer type; prefill uploads them as BF16, decode
+        as fp32.
+        """
         rotary = hf.Gemma4TextRotaryEmbedding(self.cfg)
         pos = torch.arange(n)[None]
         out = {}
@@ -161,13 +165,14 @@ class Gemma4TT:
             or PREFILL_BUCKET % CHUNK_ALIGN
         ):
             raise ValueError(
-                f"a {kv.grid}-token block grid does not fit chunked prefill's {CHUNK_ALIGN}-token SDPA chunks"
+                f"a {kv.grid}-token block grid does not fit chunked prefill's "
+                f"{CHUNK_ALIGN}-token SDPA chunks"
             )
         self.kv = kv
 
     @property
     def table_width(self) -> int:
-        """Blocks per sequence in the decode page tables (fixed, so traces can replay)."""
+        """Return the fixed decode page table width so traces can replay."""
         # paged ops need fewer blocks per sequence than blocks in the pool
         return min(
             -(-self.max_seq_len // min(self.kv.block_sizes)), self.kv.num_blocks - 1
@@ -194,7 +199,8 @@ class Gemma4TT:
         *,
         all_logits: bool = False,
     ) -> torch.Tensor:
-        """Compute positions [start, len(tokens)) of one sequence whose cache holds [0, start).
+        """Compute positions [start, len(tokens)) of one sequence whose cache holds [0,
+        start).
 
         tokens: the sequence from position 0. tables: int32 [groups, width], the
         sequence's page table in every KV-cache group. Returns float logits [V] of
@@ -209,7 +215,8 @@ class Gemma4TT:
         end = tokens.shape[0]
         if not 0 <= start < end or start % self.kv.grid:
             raise ValueError(
-                f"prefill of positions [{start}, {end}) must start on the {self.kv.grid}-token block grid"
+                f"prefill of positions [{start}, {end}) must start on the "
+                f"{self.kv.grid}-token block grid"
             )
         out = []
         for c0 in range(start, end, PREFILL_CHUNK):
@@ -241,8 +248,10 @@ class Gemma4TT:
         }
 
         def table(t: torch.Tensor) -> ttnn.Tensor:
-            # Chunked SDPA with a device chunk start reads rows of a multiple of 32 bytes.
-            # Every table keeps the full width, so a new chunk offset builds no new programs.
+            # Chunked SDPA with a device chunk start reads rows of a multiple of 32
+            # bytes.
+            # Every table keeps the full width, so a new chunk offset builds no new
+            # programs.
             row = torch.zeros(1, -(-tables.shape[1] // 8) * 8, dtype=torch.int32)
             row[0, : t.shape[0]] = t
             return self._to_device(row, ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
@@ -301,11 +310,14 @@ class Gemma4TT:
     def decode_active(
         self, tokens, positions, tables, *, trace: bool = False, softcap: bool = True
     ):
-        """decode() without the inactive rows: (active row indices, float logits [A, V]).
+        """decode() without the inactive rows: (active row indices, float logits [A,
+        V]).
 
-        Building the zero-filled [B, V] result of decode() costs ~1 ms per step; the vLLM
+        Building the zero-filled [B, V] result of decode() costs ~1 ms per step; the
+        vLLM
         adapter samples only the active rows. softcap=False returns the logits before
-        the final softcap (LmHead.softcap), for a caller that caps only what it needs."""
+        the final softcap (LmHead.softcap), for a caller that caps only what it needs.
+        """
         active = torch.nonzero(positions >= 0).flatten()
         if len(active) == tokens.shape[0]:
             return active, self._decode_rows(
@@ -323,7 +335,8 @@ class Gemma4TT:
         """Decode rows that are all active."""
         if tokens.shape[0] > self.max_batch:
             raise ValueError(
-                f"{tokens.shape[0]} active decode rows; the model was built for {self.max_batch}"
+                f"{tokens.shape[0]} active decode rows; the model was built for "
+                f"{self.max_batch}"
             )
         host = self._decode_inputs(tokens, positions, tables)
         if not trace:

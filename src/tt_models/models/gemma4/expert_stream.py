@@ -46,7 +46,9 @@ from tt_models.models.gemma4.generic_op import (
 
 
 def _bankline_cores(mesh, banks, per_bank, exclude=()):
-    """per_bank logical cores per DRAM bank, nearest (Manhattan) to the bank's optimal NOC0 reader."""
+    """per_bank logical cores per DRAM bank, nearest (Manhattan) to the bank's optimal
+    NOC0 reader.
+    """
     opt = mesh.get_optimal_dram_bank_to_logical_worker_assignment(
         ttnn.NOC.NOC_0, ttnn.MeshCoordinate(0, 0)
     )
@@ -81,7 +83,9 @@ def _bankline_cores(mesh, banks, per_bank, exclude=()):
 
 
 def _kernels(cores, name, reader, writer, compute, fidelity=ttnn.MathFidelity.LoFi):
-    """reader / writer / compute: (compile args, runtime args); compute runtime args unused."""
+    """reader / writer / compute: (compile args, runtime args); compute runtime args
+    unused.
+    """
     dm = ttnn.DataMovementConfigDescriptor
     return [
         ttnn.KernelDescriptor(
@@ -111,7 +115,9 @@ def _kernels(cores, name, reader, writer, compute, fidelity=ttnn.MathFidelity.Lo
 
 
 def _const_row(mesh, values, dtype):
-    """Row-major replicated [1, n] constant (the dense MLP's fixed ids, weights and scales)."""
+    """Row-major replicated [1, n] constant (the dense MLP's fixed ids, weights and
+    scales).
+    """
     return ttnn.from_torch(
         torch.tensor(
             [values], dtype=torch.float32 if dtype != ttnn.uint16 else torch.int32
@@ -124,7 +130,7 @@ def _const_row(mesh, values, dtype):
 
 
 def run(parts):
-    """Run (program, io tensors) parts built on disjoint cores as one merged generic op."""
+    """Run program and tensor pairs on disjoint cores as one generic op."""
     if len(parts) == 1:
         return ttnn.generic_op(parts[0][1], parts[0][0])
     tensors, seen = [], set()
@@ -165,12 +171,18 @@ def gate_up_op(
     fidelity=ttnn.MathFidelity.LoFi,
     build=False,
 ):
-    """act[slot, pair] = gelu_tanh(x Wg) * (x Wu) * weights[slot] * scale[ids[slot]] (kernels/expert_gate_up_*).
+    """act[slot, pair] = gelu_tanh(x Wg) * (x Wu) * weights[slot] * scale[ids[slot]]
+    (kernels/expert_gate_up_*).
 
-    assign: (core, bank, r, vc, slot0, pair_j, act_pair) per core. act tile = slot * pairs + act_pair.
-    rows: decode tokens (tile rows); slot s scales row s // slots_per_row only, or every row with 0.
-    split: None for the expert layout (contiguous (gate, up) per k, expert-major), or (k_stride_tiles,
-    up_delta) for the dense layout (one-tile packets at row offsets pair_j and pair_j + up_delta)."""
+    assign: (core, bank, r, vc, slot0, pair_j, act_pair) per core. act tile = slot *
+    pairs + act_pair.
+    rows: decode tokens (tile rows); slot s scales row s // slots_per_row only, or every
+    row with 0.
+    split: None for the expert layout (contiguous (gate, up) per k, expert-major), or
+    (k_stride_tiles,
+    up_delta) for the dense layout (one-tile packets at row offsets pair_j and pair_j +
+    up_delta).
+    """
     cb_x, cb_w, cb_sc, cb_rs, cb_ws, cb_act = 0, 1, 2, 3, 4, 16
     block_k = 11  # k-steps per weight block (22 tiles)
     blocks = kx // block_k
@@ -270,10 +282,13 @@ def down_op(
     compact_chunk0=None,
     fidelity=ttnn.MathFidelity.LoFi,
 ):
-    """out[col] = sum over slots e and K tiles k of act[e, k] . W_{ids[e]}[k, col] (kernels/expert_down_*).
+    """out[col] = sum over slots e and K tiles k of act[e, k] . W_{ids[e]}[k, col]
+    (kernels/expert_down_*).
 
-    w: interleaved [*, slots' K, banks * bank_cols * 32]; bank b holds columns b + banks * j. out: a
-    [1, 1, rows, H] BF16 row-form tensor, or with compact_chunk0 a compact FP32 tensor (boundary.py) whose
+    w: interleaved [*, slots' K, banks * bank_cols * 32]; bank b holds columns b + banks
+    * j. out: a
+    [1, 1, rows, H] BF16 row-form tensor, or with compact_chunk0 a compact FP32 tensor
+    (boundary.py) whose
     vector for row b starts at chunk compact_chunk0 + b * (chunks per vector)."""
     cb_in0, cb_w, cb_rs, cb_zero, cb_out = 0, 1, 3, 4, 16
     tb = tile_bytes(w.dtype)
@@ -352,7 +367,9 @@ def down_op(
 
 
 class ExpertStream:
-    """Routed experts of one layer for `rows` decode tokens (one op pair for all of them)."""
+    """Routed experts of one layer for `rows` decode tokens (one op pair for all of
+    them).
+    """
 
     def __init__(
         self,
@@ -405,7 +422,9 @@ class ExpertStream:
         )
 
     def out_tensor(self, memory_config):
-        """[1, 1, rows, H]: the kernels write the token rows of every tile; padding rows stay unwritten."""
+        """[1, 1, rows, H]: the kernels write the token rows of every tile; padding rows
+        stay unwritten.
+        """
         return ttnn.allocate_tensor_on_device(
             ttnn.Shape([1, 1, self.rows, self.hidden]),
             ttnn.bfloat16,
@@ -415,8 +434,11 @@ class ExpertStream:
         )
 
     def gate_up(self, x, ids, weights, scale, w_gate_up, act):
-        """x [1, 1, rows, H] BF16 tiles; ids / weights: row-major [1, rows * k], token-major (slot 8 t + j);
-        scale: row-major BF16 [1, E] per_expert_scale; w_gate_up: the interleaved [1, E, H, 2 * pad] BFP4 weight."""
+        """x [1, 1, rows, H] BF16 tiles; ids / weights: row-major [1, rows * k],
+        token-major (slot 8 t + j);
+        scale: row-major BF16 [1, E] per_expert_scale; w_gate_up: the interleaved [1, E,
+        H, 2 * pad] BFP4 weight.
+        """
         return gate_up_op(
             self.gu_assign,
             self.gu_cores,
@@ -437,8 +459,11 @@ class ExpertStream:
     def down(self, act, ids, w_down, out, compact_chunk0: int | None = None):
         """act: gate_up's output; w_down: the interleaved [1, E, 352, 3072] BFP4 weight.
 
-        out: a [1, 1, rows, H] BF16 row-form tensor (out_tensor), or with compact_chunk0 a compact FP32
-        tensor (boundary.py) whose vectors from chunk compact_chunk0 receive the rows' sums, padding zeroed."""
+        out: a [1, 1, rows, H] BF16 row-form tensor (out_tensor), or with compact_chunk0
+        a compact FP32
+        tensor (boundary.py) whose vectors from chunk compact_chunk0 receive the rows'
+        sums, padding zeroed.
+        """
         return down_op(
             self.down_assign,
             self.down_cores,
@@ -458,7 +483,9 @@ class ExpertStream:
 
 
 class MlpStream:
-    """The shared dense MLP of one layer for up to 4 decode tokens, through the expert stream kernels."""
+    """The shared dense MLP of one layer for up to 4 decode tokens, through the expert
+    stream kernels.
+    """
 
     def __init__(
         self,
@@ -470,7 +497,9 @@ class MlpStream:
         fidelity=ttnn.MathFidelity.HiFi2,
         exclude=(),
     ):
-        """exclude: cores left free for an op that runs merged with gate_up (the router)."""
+        """exclude: cores left free for an op that runs merged with gate_up (the
+        router).
+        """
         self.mesh = mesh
         self.fidelity = (
             fidelity  # BFP8 weights; the ttnn MLP used HiFi2 (LoFi: PCC 0.99985 vs it)
@@ -528,7 +557,8 @@ class MlpStream:
         )
 
     def gate_up(self, x, w_gate_up, h, rows: int = 1, *, build=False):
-        """h = gelu_tanh(x Wg) * (x Wu) for the token rows of x; w_gate_up: the interleaved per-chip
+        """h = gelu_tanh(x Wg) * (x Wu) for the token rows of x; w_gate_up: the
+        interleaved per-chip
         [2816, 2 * 1152] BFP8 weight."""
         return gate_up_op(
             self.gu_assign,
@@ -551,8 +581,11 @@ class MlpStream:
         )
 
     def down(self, h, w_down, out, compact_chunk0: int | None = 0, rows: int = 1):
-        """out = h @ W_down; w_down: [1152, 3072] BFP8 per chip. out: compact FP32 vectors (one per row) from
-        chunk compact_chunk0, or with compact_chunk0=None a [1, 1, rows, H] BF16 row-form tensor."""
+        """out = h @ W_down; w_down: [1152, 3072] BFP8 per chip. out: compact FP32
+        vectors (one per row) from
+        chunk compact_chunk0, or with compact_chunk0=None a [1, 1, rows, H] BF16
+        row-form tensor.
+        """
         return down_op(
             self.down_assign,
             self.down_cores,
@@ -573,5 +606,7 @@ class MlpStream:
 
 
 def pad_down(down: torch.Tensor, width: int) -> torch.Tensor:
-    """[..., I, H] -> [..., I, width] with zero columns, for the bank-aligned down layout."""
+    """[..., I, H] -> [..., I, width] with zero columns, for the bank-aligned down
+    layout.
+    """
     return torch.nn.functional.pad(down, (0, width - down.shape[-1]))

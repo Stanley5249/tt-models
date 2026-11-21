@@ -93,7 +93,9 @@ _ROTATE = per_mesh_cache()
 
 
 def rotate_half(x: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:
-    """cat(-x2, x1) as one matmul with a constant +-1 matrix (exact in BF16 with fp32 accumulation)."""
+    """cat(-x2, x1) as one matmul with a constant +-1 matrix (exact in BF16 with fp32
+    accumulation).
+    """
     hd = x.shape[-1]
     key = (hd, id(x.device()))
     if key not in _ROTATE:
@@ -121,7 +123,7 @@ def rotate_half(x: ttnn.Tensor, memory_config=DRAM) -> ttnn.Tensor:
 def apply_rope(
     x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor, memory_config=DRAM, dtype=None
 ) -> ttnn.Tensor:
-    """x * cos + rotate_half(x) * sin; intermediates keep x's dtype, the sum is `dtype`."""
+    """Apply RoPE with x's dtype for intermediates and `dtype` for the sum."""
     rot = rotate_half(x, memory_config)
     a = ttnn.mul(x, cos, memory_config=memory_config)
     b = ttnn.mul(rot, sin, memory_config=memory_config)
@@ -182,9 +184,11 @@ class Attention:
         self.wo = loader.put(f"L{layer_idx}.wo", wo, dtype, shard_dim=-2)
         # Decode reads wo DRAM-sharded, fed by the concat-heads output, which is
         # already width-sharded one head per core: 47 -> 34 us (sliding), 86 -> 62 us
-        # (global) in docs/experiments/2026-11-17-decode-round-1.md. Prefill keeps the interleaved copy.
+        # (global) in docs/experiments/2026-11-17-decode-round-1.md. Prefill keeps the
+        # interleaved copy.
         k_local, hidden = s.n_q * s.head_dim, cfg.hidden_size
-        # A cached tensor keeps the memory layout it was saved with, so the copy has its own name.
+        # A cached tensor keeps the memory layout it was saved with, so the copy has its
+        # own name.
         self.wo_dram = loader.put(
             f"L{layer_idx}.wo_dram",
             wo,
@@ -222,7 +226,8 @@ class Attention:
         )
         self._head_w_dev = {}
         self.mesh = loader.mesh
-        # batch-1 decode: fused q/k norm + RoPE (boundary.QkRope) with [w | w permuted] per value
+        # batch-1 decode: fused q/k norm + RoPE (boundary.QkRope) with [w | w permuted]
+        # per value
         self.qk_rope = qk_rope(self.mesh, self.heads * s.head_dim, s.head_dim, self.eps)
         q, k = self._head_w
         w_row = torch.cat(
@@ -235,7 +240,8 @@ class Attention:
     def prefill(
         self, x: ttnn.Tensor, rope, kv: LayerKv, chunk: PrefillChunk
     ) -> ttnn.Tensor:
-        """x [1, 1, S, H] replicated, the chunk's rows. Returns all-reduced attention output [1, 1, S, H].
+        """x [1, 1, S, H] replicated, the chunk's rows. Returns all-reduced attention
+        output [1, 1, S, H].
 
         rope: (cos, sin) [1, 1, S, hd] for this layer type at the chunk's positions.
         """
@@ -300,7 +306,8 @@ class Attention:
         live = -(-chunk.rows // TILE) * TILE
         table = chunk.fill_tables[kv.group]
         for t, cache in ((k, kv.k), (v, kv.v)):
-            # A slice covering the whole tensor returns the input itself; never free k/v.
+            # A slice covering the whole tensor returns the input itself; never free
+            # k/v.
             rows = (
                 t
                 if live == t.shape[2]
@@ -341,7 +348,9 @@ class Attention:
         )
 
     def _sdpa_chunked_config(self):
-        """Chunked SDPA over the paged cache; the chunk start must be a multiple of both chunk sizes."""
+        """Chunked SDPA over the paged cache; the chunk start must be a multiple of both
+        chunk sizes.
+        """
         grid = (8, 4) if self.shape.head_dim >= 512 else (8, 8)
         return ttnn.SDPAProgramConfig(
             compute_with_storage_grid_size=grid,
@@ -381,9 +390,13 @@ class Attention:
     def decode_compact(
         self, x: ttnn.Tensor, rope, kv: LayerKv, page_table, cur_pos, boundary
     ) -> ttnn.Tensor:
-        """1-4 decode tokens: x is the normed row-form input [1, 1, rows, H]. Returns this chip's o_proj
-        partial sums in compact FP32 form (boundary.py, one vector per row), packed straight from the
-        width-sharded matmul output. rope: the batch-1 compact tables or the (cos, sin) rows (decode)."""
+        """1-4 decode tokens: x is the normed row-form input [1, 1, rows, H]. Returns
+        this chip's o_proj
+        partial sums in compact FP32 form (boundary.py, one vector per row), packed
+        straight from the
+        width-sharded matmul output. rope: the batch-1 compact tables or the (cos, sin)
+        rows (decode).
+        """
         rows = x.shape[2]
         heads = self._heads_decode(x, rope, kv, page_table, cur_pos)
         out_sh = ttnn.linear(
@@ -401,7 +414,9 @@ class Attention:
         return out
 
     def _heads_decode(self, x, rope, kv: LayerKv, page_table, cur_pos):
-        """QKV, q/k norm and RoPE, cache update and SDPA: the concatenated heads, one head per core."""
+        """QKV, q/k norm and RoPE, cache update and SDPA: the concatenated heads, one
+        head per core.
+        """
         s = self.shape
         batch = x.shape[2]
         width = self.heads * s.head_dim
@@ -415,9 +430,8 @@ class Attention:
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=ttnn.float32,
         )
-        if (
-            len(rope) == 3
-        ):  # batch 1: ("compact", tensor, first tile) of the step's [cos | sin] (boundary.QkRope)
+        # Batch 1 passes the compact tensor and first tile of [cos | sin].
+        if len(rope) == 3:
             roped = ttnn.allocate_tensor_on_device(
                 ttnn.Shape([1, 1, 1, width]),
                 ttnn.bfloat16,

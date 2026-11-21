@@ -30,7 +30,7 @@ _STREAMS: dict[tuple, object] = per_mesh_cache()
 
 
 def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:
-    """One ExpertStream (core placement) per mesh and token count, shared by the layers."""
+    """Share an ExpertStream per mesh and token count across the layers."""
     key = ("experts", id(mesh), rows)
     if key not in _STREAMS:
         _STREAMS[key] = ExpertStream(
@@ -171,7 +171,8 @@ class FeedForward:
         )
 
         def router():
-            # HF: softmax((rmsnorm(x) * scale * H^-0.5) @ proj.T); fold scale and H^-0.5 into proj.
+            # HF: softmax((rmsnorm(x) * scale * H^-0.5) @ proj.T); fold scale and H^-0.5
+            # into proj.
             w = ckpt.get(p + "router.proj.weight").float()  # [E, H]
             scale = ckpt.get(p + "router.scale").float() * H**-0.5
             return (w * scale[None, :]).T.contiguous()[None, None]
@@ -179,7 +180,9 @@ class FeedForward:
         self.router = put(f"L{layer_idx}.router", router, ttnn.bfloat16)
 
         def assemble_gate_up(t):
-            """[E, H, 2I] (gate columns, then up) -> the device order: per chip, gate c, padding, up c, padding."""
+            """[E, H, 2I] (gate columns, then up) -> the device order: per chip, gate c,
+            padding, up c, padding.
+            """
             inter = cfg.moe_intermediate_size
             g, u = t[..., :inter], t[..., inter:]
             n, pad = self.expert_local, self.expert_pad - self.expert_local
@@ -215,9 +218,12 @@ class FeedForward:
             )  # [E, I, H]
             return pad_down(down, self.down_width)[None]  # [1, E, I, 3072]
 
-        # Experimental (expert_q4.py): the checkpoint's Q4_0 integers and steps, for batch-1 decode.
-        # The prefill sparse matmuls cannot apply the steps and two copies of the experts do not fit,
-        # so prefill then runs the batch-1 streams token by token (slow; for accuracy runs only).
+        # Experimental (expert_q4.py): the checkpoint's Q4_0 integers and steps, for
+        # batch-1 decode.
+        # The prefill sparse matmuls cannot apply the steps and two copies of the
+        # experts do not fit,
+        # so prefill then runs the batch-1 streams token by token (slow; for accuracy
+        # runs only).
         self.q4 = (
             Q4Experts(
                 loader, ckpt, layer_idx, self.stream, assemble_gate_up, self.expert_pad
@@ -232,7 +238,8 @@ class FeedForward:
                 expert_dtype,
                 shard_dim=-1,
             )
-            # per_expert_scale is applied to the routing weights: folding it into the BFP4
+            # per_expert_scale is applied to the routing weights: folding it into the
+            # BFP4
             # down weights changes their block rounding and measurably hurt accuracy.
             self.exp_down = put(
                 f"L{layer_idx}.exp_down_p{self.down_width}",
@@ -293,7 +300,9 @@ class FeedForward:
         return weights, top_i
 
     def decode_constants(self, tokens: int):
-        """Allocate the decode constants for `tokens` rows now (see Gemma4TT._prepare_traces)."""
+        """Allocate the decode constants for `tokens` rows now (see
+        Gemma4TT._prepare_traces).
+        """
         self._bias(tokens)
 
     def _bias(self, tokens: int) -> ttnn.Tensor:
@@ -308,7 +317,9 @@ class FeedForward:
         return self._zero_bias[tokens]
 
     def _route(self, normed: ttnn.Tensor, tokens: int):
-        """topk_router_gpt: row-major [T, k] uint16 ids and BF16 softmax weights over the k logits."""
+        """topk_router_gpt: row-major [T, k] uint16 ids and BF16 softmax weights over
+        the k logits.
+        """
         return ttnn.experimental.topk_router_gpt(
             ttnn.reshape(normed, (tokens, self.hidden)),
             weight_tensor=self.router_2d,
@@ -320,9 +331,11 @@ class FeedForward:
     def _experts_q4_rows(
         self, x: ttnn.Tensor, normed: ttnn.Tensor, group: int = 256
     ) -> ttnn.Tensor:
-        """Q4_0 experts for every row of x [1, 1, T, H], one batch-1 stream pair per row (slow).
+        """Q4_0 experts for every row of x [1, 1, T, H], one batch-1 stream pair per row
+        (slow).
 
-        Rows are concatenated in groups: one ttnn.concat takes at most about 2,000 inputs (two
+        Rows are concatenated in groups: one ttnn.concat takes at most about 2,000
+        inputs (two
         runtime arguments each), and the one-row tensors are freed group by group."""
         groups = []
         for g0 in range(0, x.shape[2], group):
@@ -385,8 +398,10 @@ class FeedForward:
         return self._unpad(out)
 
     def decode_compact(self, normed, mlp_in, exp_in, boundary) -> ttnn.Tensor:
-        """1-4 decode tokens on compact boundaries (boundary.py). normed, mlp_in, exp_in: row form BF16
-        [1, 1, rows, H] from the attention tail. Returns this chip's [mlp rows | expert rows] partial sums,
+        """1-4 decode tokens on compact boundaries (boundary.py). normed, mlp_in,
+        exp_in: row form BF16
+        [1, 1, rows, H] from the attention tail. Returns this chip's [mlp rows | expert
+        rows] partial sums,
         compact FP32 (2 * rows vectors)."""
         rows = normed.shape[2]
         out = boundary.compact(2 * rows)
@@ -394,7 +409,8 @@ class FeedForward:
         h = ms.h_tensor(rows)
         router = router_op(self.mesh, self.cfg, rows)
         ids, weights = router.outputs()
-        # The router is latency-bound and the MLP gate|up DRAM-bound: one merged op on disjoint cores.
+        # The router is latency-bound and the MLP gate|up DRAM-bound: one merged op on
+        # disjoint cores.
         run(
             [
                 router(normed, self.router, ids, weights, build=True),
@@ -403,7 +419,8 @@ class FeedForward:
         )
         ms.down(h, self.mlp_down, out, compact_chunk0=0, rows=rows)
         h.deallocate(True)
-        # At 2-4 rows the router op replaced topk_router_gpt and the reshape and typecast ops that
+        # At 2-4 rows the router op replaced topk_router_gpt and the reshape and
+        # typecast ops that
         # flattened its [T, k] output: a batch-4 step went from 34.8 to 33.8 ms.
         st = (
             self.stream
@@ -430,7 +447,8 @@ class FeedForward:
         if rows not in self._chunk_cfgs:
             m = rows // TILE
             # Few K blocks: with packer L1 accumulation every block boundary rounds the
-            # partial sum to the BF16 output (in0_block_w=8 raised prefill KL 0.32 -> 0.36).
+            # partial sum to the BF16 output (in0_block_w=8 raised prefill KL 0.32 ->
+            # 0.36).
             self._chunk_cfgs[rows] = (
                 matmul_1d_config(
                     m,
@@ -448,7 +466,9 @@ class FeedForward:
 
         One tile of rows wastes the least on padding, and the sparse matmuls' time
         follows their rows: a 2,048-token piece takes 1.28 s with 32-row chunks,
-        1.34 s with 64 and 1.54 s with 128 (README text, docs/experiments/2026-11-21-one-tile-expert-chunks.md)."""
+        1.34 s with 64 and 1.54 s with 128 (README text,
+        docs/experiments/2026-11-21-one-tile-expert-chunks.md).
+        """
         return TILE
 
     def _experts_prefill(self, x: ttnn.Tensor, normed: ttnn.Tensor) -> ttnn.Tensor:
@@ -596,7 +616,8 @@ class FeedForward:
         return out
 
     def __call__(self, residual: ttnn.Tensor) -> ttnn.Tensor:
-        """Prefill: residual [1, 1, T, H] replicated. Returns the block output to add to the residual.
+        """Prefill: residual [1, 1, T, H] replicated. Returns the block output to add to
+        the residual.
         (Decode runs decode_compact.)"""
         t = residual.shape[2]
         normed = rms_norm(residual, None, self.eps)

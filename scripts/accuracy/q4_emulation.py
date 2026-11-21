@@ -1,7 +1,9 @@
 """Teacher-forced accuracy of emulated expert weight formats on the CPU reference.
 
-    pixi run python scripts/accuracy/q4_emulation.py artifacts/q4/emulation.json q4exact q4clamp bfp4 [...]
-    EMU_TOKENS=512 EMU_DTYPE=bfloat16 pixi run python scripts/accuracy/q4_emulation.py out.json none q4clamp
+    pixi run python scripts/accuracy/q4_emulation.py \\
+        artifacts/q4/emulation.json q4exact q4clamp bfp4 [...]
+    EMU_TOKENS=512 EMU_DTYPE=bfloat16 pixi run python \\
+        scripts/accuracy/q4_emulation.py out.json none q4clamp
 
 Every routed-expert weight of the HF reference is replaced by one format, and the
 README logits are scored against the cached fp32 reference (precision_study.py):
@@ -56,7 +58,9 @@ def bfp4(w: torch.Tensor) -> torch.Tensor:
 
 
 def bfp8(w: torch.Tensor) -> torch.Tensor:
-    """Torch BFP8 tile rounding: blocks of 16 along the last dim, sign + 7-bit magnitude."""
+    """Torch BFP8 tile rounding: blocks of 16 along the last dim, sign + 7-bit
+    magnitude.
+    """
     b = w.to(torch.bfloat16).float().reshape(-1, 16)
     e = torch.floor(torch.log2(b.abs().amax(-1, keepdim=True).clamp(min=1e-38)))
     st = torch.exp2(e - 6)
@@ -64,7 +68,9 @@ def bfp8(w: torch.Tensor) -> torch.Tensor:
 
 
 def dense(w: torch.Tensor, mode: str) -> torch.Tensor:
-    """An HF [out, in] weight in `mode`; the device stores [in, out], so BFP blocks run along the outputs."""
+    """An HF [out, in] weight in `mode`; the device stores [in, out], so BFP blocks run
+    along the outputs.
+    """
     if mode == "bfp8":
         return bfp8(w.T.contiguous()).T.contiguous()
     if w.shape[0] > 4096:
@@ -123,7 +129,9 @@ def main():
         return result
 
     reference.quantize_layer = quantize_all
-    if dense_mode:  # Reference.logits sends the LM head [H, V] through roundtrip when "lm_head" is quantized
+    # Reference.logits sends the LM head [H, V] through roundtrip when "lm_head" is
+    # quantized
+    if dense_mode:
         reference.roundtrip = lambda head_t, _dtype: dense(
             head_t.T.contiguous(), dense_mode
         ).T.contiguous()

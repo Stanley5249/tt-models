@@ -20,7 +20,8 @@ def report(mesh, stage):
     used = v.total_bytes_allocated_per_bank * v.num_banks
     free_block = v.largest_contiguous_bytes_free_per_bank * v.num_banks
     print(
-        f"{stage:28s} per chip: {used / 2**30:6.2f} GiB used of {total / 2**30:.2f} GiB, largest free {free_block / 2**30:.2f} GiB",
+        f"{stage:28s} per chip: {used / 2**30:6.2f} GiB used of {total / 2**30:.2f} "
+        f"GiB, largest free {free_block / 2**30:.2f} GiB",
         flush=True,
     )
 

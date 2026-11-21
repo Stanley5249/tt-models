@@ -1,4 +1,6 @@
-"""Cross-chip collectives on the N300 1x2 mesh (async all-gather with double-buffered semaphores)."""
+"""Cross-chip collectives on the N300 1x2 mesh (async all-gather with double-buffered
+semaphores).
+"""
 
 import ttnn
 
@@ -7,7 +9,9 @@ from tt_models.common.mesh import per_mesh_cache
 
 
 class _Semaphores:
-    """Double-buffered global semaphores for the async all-gather, as tt_transformers' TT_CCL."""
+    """Double-buffered global semaphores for the async all-gather, as tt_transformers'
+    TT_CCL.
+    """
 
     def __init__(self, mesh: ttnn.MeshDevice):
         grid = mesh.compute_with_storage_grid_size()
@@ -34,7 +38,9 @@ _SEMAPHORES: dict[int, _Semaphores] = per_mesh_cache()
 
 
 def init_ccl(mesh: ttnn.MeshDevice):
-    """Allocate the CCL semaphores; call before any trace capture (see Gemma4TT._prepare_traces)."""
+    """Allocate the CCL semaphores; call before any trace capture (see
+    Gemma4TT._prepare_traces).
+    """
     if id(mesh) not in _SEMAPHORES:
         _SEMAPHORES[id(mesh)] = _Semaphores(mesh)
 
@@ -44,7 +50,8 @@ def all_reduce(x: ttnn.Tensor) -> ttnn.Tensor:
 
     all_gather_async + fast_reduce_nc takes 34 us on a [32, 2816] decode row and
     58 us on [32, 5632], against 43 and 71 us for ttnn.all_reduce's reduce-scatter
-    plus all-gather (docs/experiments/2026-11-19-decode-round-2.md). Prefill takes the same path in
+    plus all-gather (docs/experiments/2026-11-19-decode-round-2.md). Prefill takes the
+    same path in
     DRAM: ttnn.all_reduce caches semaphores and buffers per new shape, and one
     cached after a decode trace capture is overwritten by the trace's replays.
     """
@@ -67,7 +74,8 @@ def all_reduce(x: ttnn.Tensor) -> ttnn.Tensor:
         num_buffers_per_channel=2,
     )
     x.deallocate(True)
-    # Gather on dim 1: fast_reduce_nc over dim 0 summed only the first row of a [2, 1, 32, W] tile correctly.
+    # Gather on dim 1: fast_reduce_nc over dim 0 summed only the first row of a [2, 1,
+    # 32, W] tile correctly.
     out = ttnn.experimental.fast_reduce_nc(
         g, dims=[1], compute_kernel_config=HIFI4, memory_config=mem
     )
@@ -80,7 +88,9 @@ def all_reduce(x: ttnn.Tensor) -> ttnn.Tensor:
 
 
 def all_gather_compact(x: ttnn.Tensor) -> ttnn.Tensor:
-    """[1, 1, 32, W] compact partials -> [1, 2, 32, W] with both chips' (boundary.py); 10 us for 3 tiles."""
+    """[1, 1, 32, W] compact partials -> [1, 2, 32, W] with both chips' (boundary.py);
+    10 us for 3 tiles.
+    """
     gather_sems, barrier = _SEMAPHORES[id(x.device())].next()
     return ttnn.experimental.all_gather_async(
         x,

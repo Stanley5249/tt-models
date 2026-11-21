@@ -1,4 +1,6 @@
-"""Blocking trace execution, readback and host softcap of a batch-1 decode step (diagnostic)."""
+"""Blocking trace execution, readback and host softcap of a batch-1 decode step
+(diagnostic).
+"""
 
 import statistics
 import time

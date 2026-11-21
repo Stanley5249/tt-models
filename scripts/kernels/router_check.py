@@ -1,4 +1,5 @@
-"""Device check of the router op (boundary.Router) against topk_router_gpt, for 1-4 token rows.
+"""Device check of the router op (boundary.Router) against topk_router_gpt, for 1-4
+token rows.
 
 pixi run python scripts/kernels/router_check.py [--layers 0 5 17] [--rows 1 2 3 4]
 """
@@ -89,8 +90,10 @@ def main():
                                     max(abs(wb[e] - ref.get(e, 0)) for e in bb)
                                 )
                 print(
-                    f"rows {rows} layer {layer}: same id sets {same}/{total}, max weight diff {wdiff:.4f}; "
-                    f"max |w - fp32 ref| router op {max(err_mine):.4f}, topk_router_gpt {max(err_gpt):.4f}",
+                    f"rows {rows} layer {layer}: same id sets {same}/{total}, max "
+                    f"weight diff {wdiff:.4f}; "
+                    f"max |w - fp32 ref| router op {max(err_mine):.4f}, "
+                    f"topk_router_gpt {max(err_gpt):.4f}",
                     flush=True,
                 )
 
@@ -101,7 +104,8 @@ def main():
                 return i
 
             print(
-                f"rows {rows}: topk_router_gpt us {device_time_us(mesh, lambda: ff._route(n, rows)[0])}, "
+                f"rows {rows}: topk_router_gpt us "
+                f"{device_time_us(mesh, lambda: ff._route(n, rows)[0])}, "
                 f"router op us {device_time_us(mesh, mine)}",
                 flush=True,
             )

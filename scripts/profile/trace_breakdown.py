@@ -1,6 +1,7 @@
 """Device time breakdown of traced decode steps from a tt-scope ops CSV.
 
-    pixi run python scripts/profile/trace_breakdown.py artifacts/runs/<run> [--phase decode1] [--layer-ops 73]
+    pixi run python scripts/profile/trace_breakdown.py artifacts/runs/<run> \\
+        [--phase decode1] [--layer-ops 73]
 
 Under trace replay the CSV's OP TO OP LATENCY is host time between replays, so
 gaps are recomputed from device firmware cycles: span = last FW end - first FW
@@ -83,7 +84,8 @@ def main():
             kern = g[KERN].sum() / 1e6
             gaps = ((start[1:] - end[:-1]).clip(min=0) * ns).sum() / 1e6
             print(
-                f"{ph} chip {dev}: {len(g)} ops, span {span:.2f} ms, FW {fw:.2f} ms, kernel {kern:.2f} ms, gaps {gaps:.2f} ms "
+                f"{ph} chip {dev}: {len(g)} ops, span {span:.2f} ms, FW {fw:.2f} ms, "
+                f"kernel {kern:.2f} ms, gaps {gaps:.2f} ms "
                 f"({gaps / len(g) * 1e3:.2f} us/op)"
             )
     if not args.layer_ops:
@@ -116,8 +118,10 @@ def main():
     print(tab.round(1).to_string())
     tail = g.iloc[args.head_ops + n_layers * args.layer_ops :]
     print(
-        f"\nlayer total kernel {tab.kern_us.sum():.0f} us, gaps {tab.gap_us.sum():.0f} us; "
-        f"tail {len(tail)} ops kernel {tail.kern_us.sum():.0f} us, gaps {tail.gap_us.sum():.0f} us"
+        f"\nlayer total kernel {tab.kern_us.sum():.0f} us, gaps {tab.gap_us.sum():.0f} "
+        "us; "
+        f"tail {len(tail)} ops kernel {tail.kern_us.sum():.0f} us, gaps "
+        f"{tail.gap_us.sum():.0f} us"
     )
 
 

@@ -1,18 +1,30 @@
-"""Q4_0 decode experts: the checkpoint's 4-bit integers and learned steps, not BFP4 roundings.
+"""Q4_0 decode experts: the checkpoint's 4-bit integers and learned steps, not BFP4
+roundings.
 
-The QAT checkpoint stores every 32-input block of an expert weight as q * s: integers q in -8..7 and
-one learned BF16 step s per (block, output). BFP4 (a power-of-two step per 16 outputs) cannot hold
-that grid (20 dB weight SNR). Here the device keeps q as BFP4 tiles, which hold -7..7 exactly (the
-rare -8, 0.2% of the values, is clamped to -7: 35 dB), and s as BF16 step tiles. The arithmetic is in
-kernels/expert_q4_gate_up_compute.cpp: a 32-input block is one K tile, so the activation's K tile k
-sits in row k % 32 of a zero tile, each block's partial sum lands in its own dest row, and an SFPU
+The QAT checkpoint stores every 32-input block of an expert weight as q * s: integers q
+in -8..7 and
+one learned BF16 step s per (block, output). BFP4 (a power-of-two step per 16 outputs)
+cannot hold
+that grid (20 dB weight SNR). Here the device keeps q as BFP4 tiles, which hold -7..7
+exactly (the
+rare -8, 0.2% of the values, is clamped to -7: 35 dB), and s as BF16 step tiles. The
+arithmetic is in
+kernels/expert_q4_gate_up_compute.cpp: a 32-input block is one K tile, so the
+activation's K tile k
+sits in row k % 32 of a zero tile, each block's partial sum lands in its own dest row,
+and an SFPU
 multiply by the step tile plus a ones-row matmul finish the sum.
 
-Experimental (Precision.expert_q4): batch-1 decode only. Decode accuracy against fp32 improves from
-KL 0.457 to 0.286 (docs/experiments/2026-11-21-q4-decode-experts.md), at +27% gate|up and +49% down device time. Prefill
-has no Q4 path: ttnn's sparse matmuls cannot apply the steps, and two copies of the experts do not
-fit in DRAM, so moe.FeedForward runs the batch-1 streams token by token, which is only good for
-accuracy runs. The down step tiles keep 11 of 32 rows (25 MB per layer per chip); serving would
+Experimental (Precision.expert_q4): batch-1 decode only. Decode accuracy against fp32
+improves from
+KL 0.457 to 0.286 (docs/experiments/2026-11-21-q4-decode-experts.md), at +27% gate|up
+and +49% down device time. Prefill
+has no Q4 path: ttnn's sparse matmuls cannot apply the steps, and two copies of the
+experts do not
+fit in DRAM, so moe.FeedForward runs the batch-1 streams token by token, which is only
+good for
+accuracy runs. The down step tiles keep 11 of 32 rows (25 MB per layer per chip);
+serving would
 store them compactly.
 """
 
@@ -38,7 +50,8 @@ def q4_factor(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Factor w into integers q (clamped to -7..7) and steps s along 32-blocks of `dim`.
 
-    Returns (q as float with w's shape, s with dim shrunk 32x); see q4.factor_blocks. Works on
+    Returns (q as float with w's shape, s with dim shrunk 32x); see q4.factor_blocks.
+    Works on
     `chunk` slices of dim 0 at a time to bound host memory."""
     if w.dim() > 2 and w.shape[0] > chunk:
         parts = [
@@ -52,7 +65,9 @@ def q4_factor(
 
 
 def step_tiles(s: torch.Tensor, groups: int) -> torch.Tensor:
-    """[..., E, K/32, N] steps -> [..., E, groups * 32, N]: row r of group g is block 32 g + r, zero past K."""
+    """[..., E, K/32, N] steps -> [..., E, groups * 32, N]: row r of group g is block 32
+    g + r, zero past K.
+    """
     kb = s.shape[-2]
     return torch.nn.functional.pad(s, (0, 0, 0, groups * TILE - kb))
 
@@ -75,8 +90,10 @@ def gate_up_q4_op(
     rows=1,
     slots_per_row=8,
 ):
-    """gate|up from Q4_0 tiles (kernels/expert_q4_gate_up_*): as expert_stream.gate_up_op, with the step
-    tensor steps ([1, E, groups * 32, N] BF16, interleaved). Each core's slots must belong to one token
+    """gate|up from Q4_0 tiles (kernels/expert_q4_gate_up_*): as
+    expert_stream.gate_up_op, with the step
+    tensor steps ([1, E, groups * 32, N] BF16, interleaved). Each core's slots must
+    belong to one token
     (slot s to token s // slots_per_row)."""
     cb_x, cb_w, cb_sc, cb_rs, cb_ws, cb_m, cb_r, cb_one, cb_act = (
         0,
@@ -224,8 +241,11 @@ def down_q4_op(
     n_tiles,
     compact_chunk0=None,
 ):
-    """Batch-1 down from Q4_0 tiles (kernels/expert_q4_down_*): as expert_stream.down_op with rows=1, plus
-    the step tensor steps ([1, E, 32, banks * bank_cols * 32] BF16, interleaved, rows 0 .. kt - 1 used)."""
+    """Batch-1 down from Q4_0 tiles (kernels/expert_q4_down_*): as expert_stream.down_op
+    with rows=1, plus
+    the step tensor steps ([1, E, 32, banks * bank_cols * 32] BF16, interleaved, rows 0
+    .. kt - 1 used).
+    """
     cb_in0, cb_w, cb_rs, cb_zero, cb_scr, cb_m, cb_racc, cb_one, cb_out = (
         0,
         1,
@@ -329,9 +349,11 @@ def down_q4_op(
 
 
 class Q4Experts:
-    """One layer's routed experts as Q4_0 tiles and steps, for the batch-1 decode streams.
+    """One layer's routed experts as Q4_0 tiles and steps, for the batch-1 decode
+    streams.
 
-    gate_up and down hold the integers in the layouts of the BFP4 weights (expert_stream.py), so the
+    gate_up and down hold the integers in the layouts of the BFP4 weights
+    (expert_stream.py), so the
     weight readers are unchanged; the step tensors follow the writers' layouts."""
 
     def __init__(

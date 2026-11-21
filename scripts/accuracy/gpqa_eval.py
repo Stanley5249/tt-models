@@ -1,6 +1,7 @@
 """GPQA Diamond accuracy of a running server, as upstream's QB2 release check scores it.
 
-    uv run --no-project --with-requirements scripts/accuracy/gpqa_eval.requirements.txt \\
+    uv run --no-project --with-requirements \\
+        scripts/accuracy/gpqa_eval.requirements.txt \\
         python scripts/accuracy/gpqa_eval.py --count 10 --out artifacts/gpqa/<label>
 
 Needs a running `just serve-gemma4` and Hugging Face access to the gated
@@ -90,7 +91,8 @@ def main():
             log.write(json.dumps(row) + "\n")
             log.flush()
             print(
-                f"GPQA {i}: correct={correct} tokens={row['completion_tokens']} {row['seconds']} s",
+                f"GPQA {i}: correct={correct} tokens={row['completion_tokens']} "
+                f"{row['seconds']} s",
                 flush=True,
             )
     correct = sum(r["correct"] for r in rows)

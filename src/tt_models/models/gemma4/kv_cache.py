@@ -118,7 +118,8 @@ class KvCache:
             _, n_kv, block, head_dim = shape
             if n_kv * block * head_dim != own[1] * own[2] * own[3]:
                 raise ValueError(
-                    f"layer view {shape} and its shared buffer {own} differ in elements per block"
+                    f"layer view {shape} and its shared buffer {own} differ in "
+                    "elements per block"
                 )
             same = shape == own
             geometry = (
@@ -130,7 +131,8 @@ class KvCache:
             )
             self.layers.append(LayerKv(k, v, group, block, n_kv, geometry))
             self.block_sizes[group] = block
-        # vLLM schedules on the lcm of the block sizes: prefix hits and chunk ends fall on it.
+        # vLLM schedules on the lcm of the block sizes: prefix hits and chunk ends fall
+        # on it.
         self.grid = math.lcm(*self.block_sizes)
 
     @classmethod
@@ -191,7 +193,8 @@ class KvCache:
             for r in range(rows):
                 if next_block + own > self.num_blocks or n > width:
                     raise ValueError(
-                        f"{rows} rows of {tokens} tokens do not fit {self.num_blocks} blocks, {width} per row"
+                        f"{rows} rows of {tokens} tokens do not fit {self.num_blocks} "
+                        f"blocks, {width} per row"
                     )
                 blocks = torch.arange(next_block, next_block + own, dtype=torch.int32)
                 out[g, r, :n] = blocks[torch.arange(n) % own]

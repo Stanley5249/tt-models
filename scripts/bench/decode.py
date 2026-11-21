@@ -1,6 +1,7 @@
 """Model decode latency on the device, outside vLLM.
 
-    pixi run python scripts/bench/decode.py --batch 1 --steps 32 [--trace] [--out artifacts/decode/x.json]
+    pixi run python scripts/bench/decode.py --batch 1 --steps 32 [--trace] \\
+        [--out artifacts/decode/x.json]
 
 Prefills every slot with the same prompt, then times `--steps` decode calls
 end to end (host inputs in, float logits out). The first call per mode is a

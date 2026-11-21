@@ -1,7 +1,8 @@
 """Request lifecycle checks against a running server: outputs must not depend on
 what else the server is doing.
 
-    pixi run python scripts/serve/serve_check.py [--url http://127.0.0.1:8000] [check ...]
+    pixi run python scripts/serve/serve_check.py [--url http://127.0.0.1:8000] \\
+        [check ...]
 
 Needs a running `just serve-gemma4`. Every check but tools compares greedy token ids
 with the same request run alone:
@@ -69,7 +70,9 @@ def post(url: str, path: str, body: dict, *, stream: bool = False):
 
 
 def chat(url: str, prompt: str | list[dict], max_tokens: int, **extra) -> list[int]:
-    """Token ids of a chat completion; thinking tokens count, since they are sampled too."""
+    """Token ids of a chat completion; thinking tokens count, since they are sampled
+    too.
+    """
     messages = (
         [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
     )
@@ -168,8 +171,11 @@ def tokens(url: str, text: str, *, bos: bool) -> list[int]:
 
 
 def document(n_chars: int) -> str:
-    """The checkpoint's model card, repeated to n_chars: a long prompt that stays the same as this
-    repository changes (prompts built from the repository's own files moved its near-ties)."""
+    """The checkpoint's model card, repeated to n_chars: a long prompt that stays the
+    same as this
+    repository changes (prompts built from the repository's own files moved its
+    near-ties).
+    """
     text = (resolve_snapshot() / "README.md").read_text()
     return (text * (n_chars // len(text) + 1))[:n_chars]
 
@@ -219,7 +225,8 @@ def check_arrival(url):
         long_ttft = arrived.result()
     gaps = [b - a for a, b in itertools.pairwise(times)]
     print(
-        f"    stream gaps: median {sorted(gaps)[len(gaps) // 2] * 1e3:.1f} ms, max {max(gaps) * 1e3:.0f} ms;"
+        f"    stream gaps: median {sorted(gaps)[len(gaps) // 2] * 1e3:.1f} ms, max "
+        f"{max(gaps) * 1e3:.0f} ms;"
         f" the 8192-token request's first token after {long_ttft:.2f} s",
         flush=True,
     )
@@ -239,7 +246,9 @@ def check_prefix(url):
     turn1 = [
         {
             "role": "user",
-            "content": f"Here is some code:\n\n{doc}\n\nSummarize what the first class does.",
+            (
+                "content"
+            ): f"Here is some code:\n\n{doc}\n\nSummarize what the first class does.",
         }
     ]
     answer = post(
@@ -295,7 +304,8 @@ def check_preempt(url):
     at every step, so batch numerics do not flip it and the outputs must agree."""
     starts = [1, 5000, 20000, 70000]
     prompts = [
-        f"Write every integer from {n} to {n + 700} on its own line. Do not write code; output only the numbers."
+        f"Write every integer from {n} to {n + 700} on its own line. Do not write "
+        "code; output only the numbers."
         for n in starts
     ]
     salts = [
@@ -402,8 +412,10 @@ def check_tools(url):
                 )
             label = choice if isinstance(choice, str) else "named get_time"
             print(
-                f"[{'OK' if good else 'DIFF'}] {label}, thinking {'on' if thinking else 'off'}: "
-                f"{names or repr((choice0['message'].get('content') or '')[:60])} ({choice0['finish_reason']})",
+                f"[{'OK' if good else 'DIFF'}] {label}, thinking "
+                f"{'on' if thinking else 'off'}: "
+                f"{names or repr((choice0['message'].get('content') or '')[:60])} "
+                f"({choice0['finish_reason']})",
                 flush=True,
             )
             ok &= good
@@ -428,7 +440,8 @@ def main():
     ap.add_argument(
         "checks",
         nargs="*",
-        help=f"any of {', '.join(CHECKS | EXTRA_CHECKS)} (default: {', '.join(CHECKS)})",
+        help=f"any of {', '.join(CHECKS | EXTRA_CHECKS)} (default: "
+        f"{', '.join(CHECKS)})",
     )
     args = ap.parse_args()
     known = CHECKS | EXTRA_CHECKS

@@ -1,4 +1,5 @@
-"""Device check of the compact boundary ops (tt_models.models.gemma4.boundary) against torch.
+"""Device check of the compact boundary ops (tt_models.models.gemma4.boundary) against
+torch.
 
     pixi run python scripts/kernels/boundary_check.py
 
@@ -26,7 +27,8 @@ def report(name, got, ref):
     got, ref = got.float().flatten(), ref.float().flatten()
     pcc = torch.corrcoef(torch.stack([got, ref]))[0, 1].item()
     print(
-        f"{name}: max err {(got - ref).abs().max():.5f} (ref max {ref.abs().max():.3f}), pcc {pcc:.6f}",
+        f"{name}: max err {(got - ref).abs().max():.5f} (ref max "
+        f"{ref.abs().max():.3f}), pcc {pcc:.6f}",
         flush=True,
     )
 
@@ -82,7 +84,8 @@ def main():
 
         for R in args.rows:
             print(f"== {R} row(s)", flush=True)
-            # pack: per-chip row-form FP32 rows -> compact vectors, after one vector of offset
+            # pack: per-chip row-form FP32 rows -> compact vectors, after one vector of
+            # offset
             rows = torch.randn(2, 1, R, H)
             src = dev(rows, mapper=shard0)
             dst = b.compact(R + 1)

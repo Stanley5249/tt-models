@@ -60,7 +60,9 @@ class DecoderLayer:
         return self._raw["input_layernorm"]
 
     def boundary_weights(self, mesh, next_norm: torch.Tensor):
-        """Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's input norm (or the final norm)."""
+        """Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's
+        input norm (or the final norm).
+        """
         r = self._raw
         attn = torch.stack(
             [
@@ -108,8 +110,11 @@ class DecoderLayer:
     def decode_compact(
         self, xc, h, rope, kv, page_table, cur_pos, b: Boundary, x_page0: int = 0
     ):
-        """1-4 decode tokens on compact boundaries: xc compact FP32 residuals (one vector per row), h their
-        normed row form [1, 1, rows, H]. Returns the next (xc, h); h of the last layer is final-normed."""
+        """1-4 decode tokens on compact boundaries: xc compact FP32 residuals (one
+        vector per row), h their
+        normed row form [1, 1, rows, H]. Returns the next (xc, h); h of the last layer
+        is final-normed.
+        """
         rows = h.shape[2]
         a = self.attn.decode_compact(h, rope, kv, page_table, cur_pos, b)
         g = all_gather_compact(a)

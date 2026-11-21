@@ -46,7 +46,8 @@ def sample(
 ):
     """Sample one token per row from float logits [B, V] with vLLM's semantics.
 
-    rows_idx: the batch rows these logits belong to (their sampling params); default 0..B-1.
+    rows_idx: the batch rows these logits belong to (their sampling params); default
+    0..B-1.
     softcap: the model's in-place final softcap when `logits` are taken before it.
     The softcap keeps the order, so greedy and top-k work on the raw logits and only
     the k candidates are capped; logprobs need the whole capped row. (Only raw
@@ -126,7 +127,8 @@ class Gemma4ForCausalLM:
         self.model = model
         self._prefill_warmed = False
         self.model_capabilities = dict(type(self).model_capabilities)
-        # GEMMA4_TIMING=1 logs the model's share of every step, to separate it from vLLM's.
+        # GEMMA4_TIMING=1 logs the model's share of every step, to separate it from
+        # vLLM's.
         self.timing = os.environ.get("GEMMA4_TIMING") == "1"
         self._last_return = None
 
@@ -145,14 +147,16 @@ class Gemma4ForCausalLM:
     ):
         if tt_data_parallel != 1:
             raise ValueError(
-                "Gemma 4 26B-A4B on N300 uses one 1x2 mesh; data parallelism is not supported"
+                "Gemma 4 26B-A4B on N300 uses one 1x2 mesh; data parallelism is not "
+                "supported"
             )
         name = getattr(hf_config, "name_or_path", None) or getattr(
             hf_config, "_name_or_path", None
         )
         ckpt = Checkpoint(name) if name else Checkpoint()
         logger.info(
-            f"Gemma4 N300: loading {ckpt.root} for max_batch={max_batch_size} max_seq_len={max_seq_len}"
+            f"Gemma4 N300: loading {ckpt.root} for max_batch={max_batch_size} "
+            f"max_seq_len={max_seq_len}"
         )
         model = Gemma4TT(
             mesh_device, ckpt, max_batch=max_batch_size, max_seq_len=max_seq_len
@@ -220,8 +224,10 @@ class Gemma4ForCausalLM:
             align = get_tt_prefill_chunk_alignment(vllm_config)
             if align == 0 or align % grid:
                 raise ValueError(
-                    f"--block-size {block} puts the KV block grid at {grid} tokens; set "
-                    f"additional_config tt.prefill_chunk_alignment to a multiple of it (now {align})"
+                    f"--block-size {block} puts the KV block grid at {grid} tokens; "
+                    "set "
+                    "additional_config tt.prefill_chunk_alignment to a multiple of it "
+                    f"(now {align})"
                 )
 
     def allocate_kv_cache_per_layer(self, per_layer_specs):
@@ -245,7 +251,8 @@ class Gemma4ForCausalLM:
             for g in range(m.kv.groups)
         ]
         logger.info(
-            f"Gemma4 N300: KV pool of {m.kv.num_blocks} blocks, {len(set(buffers))} shared K/V buffers, "
+            f"Gemma4 N300: KV pool of {m.kv.num_blocks} blocks, {len(set(buffers))} "
+            "shared K/V buffers, "
             f"{m.kv.groups} groups with block sizes {m.kv.block_sizes}"
         )
         return m.kv
@@ -264,7 +271,8 @@ class Gemma4ForCausalLM:
                     tables[kv.group, :, : per_layer[i].shape[1]],
                 ):
                     raise RuntimeError(
-                        f"layer {i} page table differs from its KV-cache group {kv.group}; kv_groups no longer matches vLLM"
+                        f"layer {i} page table differs from its KV-cache group "
+                        f"{kv.group}; kv_groups no longer matches vLLM"
                     )
         return tables
 
@@ -280,7 +288,9 @@ class Gemma4ForCausalLM:
         page_tables_per_layer=None,
         **_,
     ):
-        """Row i computes tokens[i, start_pos[i]:prompt_lens[i]]; the cache holds the positions before."""
+        """Row i computes tokens[i, start_pos[i]:prompt_lens[i]]; the cache holds the
+        positions before.
+        """
         rows = tokens.shape[0]
         tables = self._group_tables(page_tables_per_layer, rows, check=True)
         out = []
@@ -290,7 +300,8 @@ class Gemma4ForCausalLM:
             out.append(self.model.prefill(tokens[i, :end], start, tables[:, i]))
             if self.timing:
                 logger.info(
-                    f"Gemma4 prefill: positions {start}-{end}, {(time.perf_counter() - t0) * 1e3:.0f} ms"
+                    f"Gemma4 prefill: positions {start}-{end}, "
+                    f"{(time.perf_counter() - t0) * 1e3:.0f} ms"
                 )
         return torch.stack(out)[:, None, :]
 
@@ -319,7 +330,8 @@ class Gemma4ForCausalLM:
             )
             n_active = len(active)
             logger.info(
-                f"Gemma4 decode: {n_active} active, model {(t1 - t0) * 1e3:.1f} ms, outside since last {outside:.1f} ms"
+                f"Gemma4 decode: {n_active} active, model {(t1 - t0) * 1e3:.1f} ms, "
+                f"outside since last {outside:.1f} ms"
             )
             self._last_return = t1
         rows = tokens.shape[0]
@@ -384,7 +396,8 @@ class Gemma4ForCausalLM:
             for n in sorted({prefill_rows(n, start) for n in range(1, longest + 1)}):
                 m.prefill(tokens[: start + n], start, tables)
         logger.info(
-            f"Gemma4 N300: prefill programs for pieces up to {longest} tokens built in {time.perf_counter() - t0:.0f} s"
+            f"Gemma4 N300: prefill programs for pieces up to {longest} tokens built in "
+            f"{time.perf_counter() - t0:.0f} s"
         )
 
     def warmup_model_decode(

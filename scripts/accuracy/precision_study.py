@@ -10,7 +10,8 @@ Configurations:
                 spec like experts=bfp4,attention=bfp8,mlp=bfp8,lm_head=bfp8
   tt            the device model prefill (all positions)
 
-    pixi run python scripts/accuracy/precision_study.py --tokens 512 --configs fp32,emu:experts=bfp4,tt
+    pixi run python scripts/accuracy/precision_study.py --tokens 512 --configs \\
+        fp32,emu:experts=bfp4,tt
 """
 
 import argparse

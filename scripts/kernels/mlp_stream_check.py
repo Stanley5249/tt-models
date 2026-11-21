@@ -1,4 +1,5 @@
-"""Device check of the dense MLP stream (expert_stream.MlpStream) against the ttnn MLP path.
+"""Device check of the dense MLP stream (expert_stream.MlpStream) against the ttnn MLP
+path.
 
 pixi run python scripts/kernels/mlp_stream_check.py [--layer 0]
 """
@@ -56,7 +57,8 @@ def main():
             )[0]
             pcc = torch.corrcoef(torch.stack([o, r]))[0, 1].item()
             print(
-                f"chip {c}: pcc {pcc:.6f}, max diff {(o - r).abs().max():.4f}, ref max {r.abs().max():.3f}",
+                f"chip {c}: pcc {pcc:.6f}, max diff {(o - r).abs().max():.4f}, ref max "
+                f"{r.abs().max():.3f}",
                 flush=True,
             )
         print(

@@ -25,7 +25,8 @@ def test_prefill_rows():
 
 
 def test_kv_groups_gemma4():
-    # 25 sliding and 5 global layers: 5 sliding groups of 5 and 1 global group, as vLLM forms them.
+    # 25 sliding and 5 global layers: 5 sliding groups of 5 and 1 global group, as vLLM
+    # forms them.
     types = (["sliding_attention"] * 5 + ["full_attention"]) * 5
     groups = kv_groups(types)
     assert sorted(set(groups)) == list(range(6))

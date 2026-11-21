@@ -1,4 +1,5 @@
-"""Batch-1 decode layer boundaries on a compact hidden vector (kernels/compact*, tail_*).
+"""Batch-1 decode layer boundaries on a compact hidden vector (kernels/compact*,
+tail_*).
 
 At batch 1 a decode hidden vector is row 0 of 88 [32, 32] tiles, and every
 op on it pays for 32 rows: an all-gather of the 88 tiles took 34 us (55 us for
@@ -32,7 +33,9 @@ from tt_models.models.gemma4.generic_op import (
 
 
 class Boundary:
-    """Compact pack and the two tail ops of one mesh (core placement shared by the layers)."""
+    """Compact pack and the two tail ops of one mesh (core placement shared by the
+    layers).
+    """
 
     def __init__(self, mesh, hidden: int, eps: float, tail_cores: int = 6):
         self.mesh = mesh
@@ -79,7 +82,8 @@ class Boundary:
         dst_chunk0: int = 0,
         rows: int = 1,
     ) -> ttnn.Tensor:
-        """Row form FP32 [1, 1, rows, H] (any layout) -> compact vectors (one per row) from chunk dst_chunk0 of
+        """Row form FP32 [1, 1, rows, H] (any layout) -> compact vectors (one per row)
+        from chunk dst_chunk0 of
         dst; zeroes the padding."""
         n_tiles = self.hidden // TILE
         per = -(-n_tiles // len(cores))
@@ -261,9 +265,12 @@ class Boundary:
     def attn_tail(
         self, g, x, w, x_out, n, mlp_in, exp_in, x_page0: int = 0, rows: int = 1
     ):
-        """g: all-gathered compact attention partials [1, 2, 32, rows*V*32]; x: compact residual (rows
-        vectors); w: compact [post_attention | pre_feedforward | pre_feedforward_2] weights. Per row: writes
-        x_out = x + rms(sum g) * w_post_attn (compact) and n = rms(x_out), n * w_pre_ff, n * w_pre_ff2 (row
+        """g: all-gathered compact attention partials [1, 2, 32, rows*V*32]; x: compact
+        residual (rows
+        vectors); w: compact [post_attention | pre_feedforward | pre_feedforward_2]
+        weights. Per row: writes
+        x_out = x + rms(sum g) * w_post_attn (compact) and n = rms(x_out), n * w_pre_ff,
+        n * w_pre_ff2 (row
         form BF16 [1, 1, rows, H])."""
         return self._tail(
             "ATTN_TAIL",
@@ -278,7 +285,11 @@ class Boundary:
         )
 
     def ff_tail(self, g, x, w, x_out, h, scalar: float, rows: int = 1):
-        """g: all-gathered compact [mlp rows | expert rows] partials [1, 2, 32, 2*rows*V*32]; w: compact
-        [post_ff1 | post_ff2 | post_ff | next input norm]. Per row: writes x_out = (x + rms(rms(m) w1 +
-        rms(e) w2) w_ff) * scalar (compact) and h = rms(x_out) * w_in (row form BF16 [1, 1, rows, H])."""
+        """g: all-gathered compact [mlp rows | expert rows] partials [1, 2, 32,
+        2*rows*V*32]; w: compact
+        [post_ff1 | post_ff2 | post_ff | next input norm]. Per row: writes x_out = (x +
+        rms(rms(m) w1 +
+        rms(e) w2) w_ff) * scalar (compact) and h = rms(x_out) * w_in (row form BF16 [1,
+        1, rows, H]).
+        """
         return self._tail("FF_TAIL", g, x, w, x_out, [h], 4, scalar, rows=rows)

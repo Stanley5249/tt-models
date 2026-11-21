@@ -6,8 +6,10 @@ same context on both sides. Reference logits are cached under cache/ref/.
 With several `--offsets`, each one starts a text segment at that token of the
 README and the rows of all segments are pooled (one model load).
 
-    pixi run python scripts/accuracy/compare.py --layers 6 --prompt-len 128 --decode-steps 8
-    pixi run python scripts/accuracy/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace
+    pixi run python scripts/accuracy/compare.py --layers 6 --prompt-len 128 \\
+        --decode-steps 8
+    pixi run python scripts/accuracy/compare.py --decode-steps 128 --offsets 0 \\
+        1024 2048 3072 --trace
 """
 
 import argparse
@@ -87,18 +89,21 @@ def main():
         "--batch",
         type=int,
         default=1,
-        help="decode this many identical rows and score row 0 (the batch-B decode path)",
+        help="decode this many identical rows and score row 0 (the batch-B decode "
+        "path)",
     )
     ap.add_argument(
         "--perturb",
         type=int,
         default=0,
-        help="seed of a 2^-9 relative noise on the embeddings (0: none), to sample the noise floor",
+        help="seed of a 2^-9 relative noise on the embeddings (0: none), to sample the "
+        "noise floor",
     )
     ap.add_argument(
         "--precision",
         default="",
-        help='Precision overrides, e.g. "expert_q4=1" (tt_models.models.gemma4.model.Precision)',
+        help='Precision overrides, e.g. "expert_q4=1" '
+        "(tt_models.models.gemma4.model.Precision)",
     )
     args = ap.parse_args()
     if args.batch < 1:
@@ -160,7 +165,8 @@ def main():
             for row in range(args.batch):
                 logits = model.prefill(ids[: args.prompt_len], 0, pt[:, row])
             print(
-                f"prefill {args.prompt_len} tokens at {offset}: {time.time() - t0:.2f}s",
+                f"prefill {args.prompt_len} tokens at {offset}: "
+                f"{time.time() - t0:.2f}s",
                 flush=True,
             )
             rows.append(
