@@ -35,7 +35,7 @@ A new model goes in `src/tt_models/models/<name>/`, with its adapter class added
 ## Working on it
 
     just test                      # host tests
-    just test-device               # device tests with random weights
+    just test -m device            # device tests with random weights
     just check                     # format checks, lint and type check
     pixi run python scripts/accuracy/greedy_check.py --compare scripts/accuracy/greedy-base.json
 

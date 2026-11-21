@@ -67,7 +67,7 @@ Run what the change can affect, from the repository root. `py` stands for `pixi 
 | --- | --- |
 | Format, lint, types | `just check` |
 | Host logic | `just test` |
-| Device paths, random weights | `just test-device` |
+| Device paths, random weights | `just test -m device` |
 | One kernel against torch or ttnn | `py scripts/kernels/<name>_check.py` |
 | Greedy outputs | `py scripts/accuracy/greedy_check.py --compare scripts/accuracy/greedy-base.json` |
 | Decode accuracy against fp32 | `py scripts/accuracy/compare.py --decode-steps 128 --offsets 0 1024 2048 3072 --trace --perturb <k>` for k = 1..3 |

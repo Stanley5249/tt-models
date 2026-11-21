@@ -68,13 +68,9 @@ typecheck *args:
 [parallel]
 check: (_fmt-ruff "--check") (_fmt-tombi "--check") (_fmt-oxfmt "--check") (_fmt-just "--check") lint typecheck
 
-# Host tests; pytest flags pass through.
+# Host tests by default; `-m device` runs the N300 ones.
 test *args:
     pixi run pytest "$@"
-
-# Device tests on the N300.
-test-device *args:
-    pixi run pytest -m device "$@"
 
 # Everything CI would run: the gate, the lockfile and the host tests.
 ci: check lock-check test
