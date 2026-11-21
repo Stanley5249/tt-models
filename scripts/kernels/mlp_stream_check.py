@@ -1,6 +1,6 @@
 """Device check of the dense MLP stream (expert_stream.MlpStream) against the ttnn MLP path.
 
-    pixi run python scripts/kernels/mlp_stream_check.py [--layer 0]
+pixi run python scripts/kernels/mlp_stream_check.py [--layer 0]
 """
 
 import argparse
@@ -29,8 +29,14 @@ def main():
         b = Boundary(mesh, cfg.hidden_size, cfg.rms_norm_eps)
         ms = ff.mlp_stream
         torch.manual_seed(0)
-        x = ttnn.from_torch(torch.randn(1, 1, 1, cfg.hidden_size), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh,
-                            mesh_mapper=ttnn.ReplicateTensorToMesh(mesh), memory_config=ttnn.L1_MEMORY_CONFIG)
+        x = ttnn.from_torch(
+            torch.randn(1, 1, 1, cfg.hidden_size),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=mesh,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(mesh),
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
         ref = ff._mlp(x, dtype=ttnn.float32)
         h = ms.h_tensor()
         ms.gate_up(x, ff.mlp_gate_up, h)

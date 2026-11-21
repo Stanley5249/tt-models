@@ -138,7 +138,9 @@ class Attention:
         # (global) in docs/experiments/2026-11-17-decode-round-1.md. Prefill keeps the interleaved copy.
         k_local, hidden = s.n_q * s.head_dim, cfg.hidden_size
         # A cached tensor keeps the memory layout it was saved with, so the copy has its own name.
-        self.wo_dram = loader.put(f"L{layer_idx}.wo_dram", wo, dtype, shard_dim=-2, memory_config=dram_sharded(loader.mesh, k_local, hidden))
+        self.wo_dram = loader.put(
+            f"L{layer_idx}.wo_dram", wo, dtype, shard_dim=-2, memory_config=dram_sharded(loader.mesh, k_local, hidden)
+        )
         self.wo_cfg = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
             in0_block_w=k_local // TILE // s.n_q, per_core_M=1, per_core_N=hidden // TILE // s.n_q, fused_activation=None
         )
@@ -302,7 +304,9 @@ class Attention:
         # round to BF16 once, before the head split (BF16 here raised decode KL by 30%).
         xqkv = ttnn.linear(x, self.wqkv, compute_kernel_config=HIFI2, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=ttnn.float32)
         if len(rope) == 3:  # batch 1: ("compact", tensor, first tile) of the step's [cos | sin] (boundary.QkRope)
-            roped = ttnn.allocate_tensor_on_device(ttnn.Shape([1, 1, 1, width]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG)
+            roped = ttnn.allocate_tensor_on_device(
+                ttnn.Shape([1, 1, 1, width]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG
+            )
             self.qk_rope(xqkv, rope[1], self.rope_w, roped, cs_page0=rope[2])
             xqkv.deallocate(True)
             fused = roped

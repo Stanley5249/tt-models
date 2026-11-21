@@ -38,7 +38,6 @@ def matmul_1d_config(m_tiles: int, n: int, k: int, grid=(8, 8), in0_block_w: int
     )
 
 
-
 def plan_chunks(ids: torch.Tensor, weights: torch.Tensor, rows: int, n_experts: int):
     """Host layout of expert-major prefill for top-k ids/weights [T, k].
 

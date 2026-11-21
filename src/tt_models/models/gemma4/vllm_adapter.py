@@ -216,7 +216,9 @@ class Gemma4ForCausalLM:
                 logger.info(f"Gemma4 prefill: positions {start}-{end}, {(time.perf_counter() - t0) * 1e3:.0f} ms")
         return torch.stack(out)[:, None, :]
 
-    def decode_forward(self, tokens, start_pos, page_table, kv_cache, enable_trace=False, page_tables_per_layer=None, sampling_params=None, **_):
+    def decode_forward(
+        self, tokens, start_pos, page_table, kv_cache, enable_trace=False, page_tables_per_layer=None, sampling_params=None, **_
+    ):
         tables = self._group_tables(page_tables_per_layer, tokens.shape[0])
         t0 = time.perf_counter()
         # The model-side sampler caps only what it needs (see sample()).

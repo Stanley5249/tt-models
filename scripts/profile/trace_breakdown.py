@@ -19,8 +19,19 @@ KERN = "DEVICE KERNEL DURATION [ns]"
 
 def load(run: Path) -> pd.DataFrame:
     csv = next(run.glob("reports/*/ops_perf_results_*.csv"))
-    cols = ["OP CODE", "OP TYPE", "DEVICE ID", KERN, "DEVICE FW START CYCLE", "DEVICE FW END CYCLE", "CORE COUNT",
-            "INPUT_0_Y_PAD[LOGICAL]", "INPUT_0_X_PAD[LOGICAL]", "INPUT_1_Y_PAD[LOGICAL]", "INPUT_1_X_PAD[LOGICAL]"]
+    cols = [
+        "OP CODE",
+        "OP TYPE",
+        "DEVICE ID",
+        KERN,
+        "DEVICE FW START CYCLE",
+        "DEVICE FW END CYCLE",
+        "CORE COUNT",
+        "INPUT_0_Y_PAD[LOGICAL]",
+        "INPUT_0_X_PAD[LOGICAL]",
+        "INPUT_1_Y_PAD[LOGICAL]",
+        "INPUT_1_X_PAD[LOGICAL]",
+    ]
     df = pd.read_csv(csv, usecols=lambda c: c in cols, low_memory=False)
     phase, phases = "start", []
     for _, row in df.iterrows():
@@ -52,8 +63,10 @@ def main():
             fw = ((end - start) * ns).sum() / 1e6
             kern = g[KERN].sum() / 1e6
             gaps = ((start[1:] - end[:-1]).clip(min=0) * ns).sum() / 1e6
-            print(f"{ph} chip {dev}: {len(g)} ops, span {span:.2f} ms, FW {fw:.2f} ms, kernel {kern:.2f} ms, gaps {gaps:.2f} ms "
-                  f"({gaps / len(g) * 1e3:.2f} us/op)")
+            print(
+                f"{ph} chip {dev}: {len(g)} ops, span {span:.2f} ms, FW {fw:.2f} ms, kernel {kern:.2f} ms, gaps {gaps:.2f} ms "
+                f"({gaps / len(g) * 1e3:.2f} us/op)"
+            )
     if not args.layer_ops:
         return
     ph = phases[min(1, len(phases) - 1)]
@@ -79,8 +92,10 @@ def main():
     print(f"\nper position, {ph} chip 0, mean over {n_layers} layers:")
     print(tab.round(1).to_string())
     tail = g.iloc[args.head_ops + n_layers * args.layer_ops :]
-    print(f"\nlayer total kernel {tab.kern_us.sum():.0f} us, gaps {tab.gap_us.sum():.0f} us; "
-          f"tail {len(tail)} ops kernel {tail.kern_us.sum():.0f} us, gaps {tail.gap_us.sum():.0f} us")
+    print(
+        f"\nlayer total kernel {tab.kern_us.sum():.0f} us, gaps {tab.gap_us.sum():.0f} us; "
+        f"tail {len(tail)} ops kernel {tail.kern_us.sum():.0f} us, gaps {tail.gap_us.sum():.0f} us"
+    )
 
 
 if __name__ == "__main__":

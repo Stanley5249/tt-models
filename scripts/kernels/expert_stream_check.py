@@ -40,8 +40,14 @@ def main():
         ff.decode_constants(rows)
         p = f"layers.{args.layer}."
         st = ExpertStream(
-            mesh, cfg.hidden_size, ff.expert_local, ff.top_k, ff.n_experts,
-            gate_up_readers=args.gate_up_readers, down_readers=args.down_readers, rows=rows,
+            mesh,
+            cfg.hidden_size,
+            ff.expert_local,
+            ff.top_k,
+            ff.n_experts,
+            gate_up_readers=args.gate_up_readers,
+            down_readers=args.down_readers,
+            rows=rows,
         )
         w_down = loader.put(
             f"L{args.layer}.exp_down_p{st.down_width}",
@@ -60,7 +66,9 @@ def main():
         for seed in range(args.seeds):
             torch.manual_seed(seed)
             res = torch.randn(1, 1, rows, cfg.hidden_size) * 3
-            r = ttnn.from_torch(res, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+            r = ttnn.from_torch(
+                res, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)
+            )
             normed = rms_norm(r, None, ff.eps)
             x = ttnn.mul(normed, ff.pre_ff2, memory_config=ttnn.L1_MEMORY_CONFIG)
             ref = ff._experts(x, normed)
@@ -89,7 +97,10 @@ def main():
                 for t in range(rows):
                     ta, tb = ttnn.to_torch(a).float()[0, 0, t], ttnn.to_torch(b).float()[0, 0, t, : cfg.hidden_size]
                     pcc = torch.corrcoef(torch.stack([ta, tb]))[0, 1].item()
-                    print(f"seed {seed} chip {c} row {t}: pcc {pcc:.6f}, max diff {(ta - tb).abs().max():.4f}, ref max {tb.abs().max():.3f}", flush=True)
+                    print(
+                        f"seed {seed} chip {c} row {t}: pcc {pcc:.6f}, max diff {(ta - tb).abs().max():.4f}, ref max {tb.abs().max():.3f}",
+                        flush=True,
+                    )
             out.deallocate(True)
 
         def routed_stream():

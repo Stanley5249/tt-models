@@ -111,7 +111,9 @@ class KvCache:
         self.grid = math.lcm(*self.block_sizes)
 
     @classmethod
-    def standalone(cls, mesh, layer_types: list[str], attn_shapes, block_size: int, dtype, rows: int, tokens: int, ring_tokens: int) -> "KvCache":
+    def standalone(
+        cls, mesh, layer_types: list[str], attn_shapes, block_size: int, dtype, rows: int, tokens: int, ring_tokens: int
+    ) -> "KvCache":
         """The layout vLLM builds, sized for `rows` sequences of `tokens` positions,
         for scripts and tests that run without vLLM (see tables()).
 

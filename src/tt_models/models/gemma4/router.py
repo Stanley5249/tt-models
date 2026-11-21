@@ -33,6 +33,7 @@ class Router:
     def outputs(self):
         """Row-major ids and weights, token-major (entry t * k + j), at least 16 entries (32 bytes): the
         layout the expert streams take."""
+
         def row(dtype):
             n = max(16, self.rows * self.top_k)
             return ttnn.allocate_tensor_on_device(ttnn.Shape([1, n]), dtype, ttnn.ROW_MAJOR_LAYOUT, self.mesh, L1)
@@ -65,19 +66,37 @@ class Router:
         dm = ttnn.DataMovementConfigDescriptor
         kernels = [
             ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "router_reader.cpp"), core_ranges=crs,
-                compile_time_args=[cb_x, cb_w, cb_j, self.kt, n, self.rows] + accessor(x) + accessor(w), runtime_args=reader_rt,
+                kernel_source=str(KERNELS / "router_reader.cpp"),
+                core_ranges=crs,
+                compile_time_args=[cb_x, cb_w, cb_j, self.kt, n, self.rows] + accessor(x) + accessor(w),
+                runtime_args=reader_rt,
                 config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
             ),
             ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "router_writer.cpp"), core_ranges=crs,
-                compile_time_args=[cb_partial, cb_part, cb_e, cb_out, n, self.parts, self.top_k, sem_id, self.rows, max(32, 2 * self.rows * self.top_k)]
-                + accessor(ids) + accessor(wts),
-                runtime_args=writer_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
+                kernel_source=str(KERNELS / "router_writer.cpp"),
+                core_ranges=crs,
+                compile_time_args=[
+                    cb_partial,
+                    cb_part,
+                    cb_e,
+                    cb_out,
+                    n,
+                    self.parts,
+                    self.top_k,
+                    sem_id,
+                    self.rows,
+                    max(32, 2 * self.rows * self.top_k),
+                ]
+                + accessor(ids)
+                + accessor(wts),
+                runtime_args=writer_rt,
+                config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
             ),
             ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "router_compute.cpp"), core_ranges=crs,
-                compile_time_args=[cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, self.kt, n], runtime_args=compute_rt,
+                kernel_source=str(KERNELS / "router_compute.cpp"),
+                core_ranges=crs,
+                compile_time_args=[cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, self.kt, n],
+                runtime_args=compute_rt,
                 config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True, math_approx_mode=False),
             ),
         ]

@@ -46,10 +46,11 @@ class LmHead:
             cols = [t[:, c * per_chip + i * width : c * per_chip + (i + 1) * width] for c in range(self.tp)]
             return torch.cat(cols, -1).contiguous()[None, None]
 
-        heads = [loader.put(f"lm_head_ds{LM_SPLITS}_{i}", lambda i=i: split(i), dtype, shard_dim=-1, memory_config=mem) for i in range(LM_SPLITS)]
+        heads = [
+            loader.put(f"lm_head_ds{LM_SPLITS}_{i}", lambda i=i: split(i), dtype, shard_dim=-1, memory_config=mem) for i in range(LM_SPLITS)
+        ]
         table.clear()
         return heads
-
 
     def logits(self, x: ttnn.Tensor) -> torch.Tensor:
         rows = x.shape[2]

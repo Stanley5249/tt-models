@@ -61,7 +61,9 @@ def main():
         dn = ckpt.get(p + "experts.down_proj").transpose(1, 2).contiguous()  # [E, I, H]
         qd, sd = q4_factor(dn, dim=-2)  # blocks along I
         kt = st.kt
-        qd_dev = loader.put(f"L{args.layer}.exp_down_q4_p{st.down_width}", lambda: pad_down(qd, st.down_width)[None], ttnn.bfloat4_b, shard_dim=-2)
+        qd_dev = loader.put(
+            f"L{args.layer}.exp_down_q4_p{st.down_width}", lambda: pad_down(qd, st.down_width)[None], ttnn.bfloat4_b, shard_dim=-2
+        )
 
         def down_steps():  # [E, I / 32, W] -> per chip [E, 32, W], rows 0 .. kt - 1
             sp = pad_down(sd, st.down_width).reshape(E, tp, kt, st.down_width)
@@ -94,7 +96,11 @@ def main():
         for seed in range(args.seeds):
             torch.manual_seed(seed)
             r = ttnn.from_torch(
-                torch.randn(1, 1, 1, H) * 3, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=mesh, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh)
+                torch.randn(1, 1, 1, H) * 3,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=mesh,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(mesh),
             )
             normed = rms_norm(r, None, ff.eps)
             x = ttnn.mul(normed, ff.pre_ff2, memory_config=ttnn.L1_MEMORY_CONFIG)
@@ -113,8 +119,19 @@ def main():
             def q4():
                 act = st.act_tensor()
                 gate_up_q4_op(
-                    st.gu_assign, st.gu_cores, x, ids, weights, ff.scale_row, q_dev, s_dev, act,
-                    kx=st.kx, slots_per_core=st.gu_slots, pairs=st.pairs, n_scale=st.n_experts,
+                    st.gu_assign,
+                    st.gu_cores,
+                    x,
+                    ids,
+                    weights,
+                    ff.scale_row,
+                    q_dev,
+                    s_dev,
+                    act,
+                    kx=st.kx,
+                    slots_per_core=st.gu_slots,
+                    pairs=st.pairs,
+                    n_scale=st.n_experts,
                 )
                 return act
 
@@ -131,14 +148,28 @@ def main():
             def q4_down():
                 out = st.out_tensor(ttnn.L1_MEMORY_CONFIG)
                 down_q4_op(
-                    st.down_assign, st.down_cores, act_q, ids, qd_dev, sd_dev, out,
-                    slots=st.slots, kt=kt, cols=st.down_cols, banks=st.banks, bank_cols=st.bank_cols, n_tiles=st.n_tiles,
+                    st.down_assign,
+                    st.down_cores,
+                    act_q,
+                    ids,
+                    qd_dev,
+                    sd_dev,
+                    out,
+                    slots=st.slots,
+                    kt=kt,
+                    cols=st.down_cols,
+                    banks=st.banks,
+                    bank_cols=st.bank_cols,
+                    n_tiles=st.n_tiles,
                 )
                 return out
 
             d4, dq = down_dev(bfp4_down()), down_dev(q4_down())
             for c in range(tp):
-                print(f"    down chip {c}: SNR vs checkpoint weights: bfp4 {snr(d4[c], ref_d[c]):.1f} dB, q4 {snr(dq[c], ref_d[c]):.1f} dB", flush=True)
+                print(
+                    f"    down chip {c}: SNR vs checkpoint weights: bfp4 {snr(d4[c], ref_d[c]):.1f} dB, q4 {snr(dq[c], ref_d[c]):.1f} dB",
+                    flush=True,
+                )
             print(
                 f"seed {seed}: SNR vs checkpoint weights: bfp4 {snr(a4, ref):.1f} dB, q4 {snr(aq, ref):.1f} dB "
                 f"(q4 vs its own exact weights {snr(aq, ref_q4):.1f} dB, host clamp-only {snr(ref_q4, ref):.1f} dB)",

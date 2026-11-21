@@ -1,6 +1,6 @@
 """Device DRAM use per chip at each stage of the serving configuration.
 
-    pixi run python scripts/profile/memory_report.py --users 4 --context 32768
+pixi run python scripts/profile/memory_report.py --users 4 --context 32768
 """
 
 import argparse
@@ -19,7 +19,10 @@ def report(mesh, stage):
     total = v.total_bytes_per_bank * v.num_banks
     used = v.total_bytes_allocated_per_bank * v.num_banks
     free_block = v.largest_contiguous_bytes_free_per_bank * v.num_banks
-    print(f"{stage:28s} per chip: {used / 2**30:6.2f} GiB used of {total / 2**30:.2f} GiB, largest free {free_block / 2**30:.2f} GiB", flush=True)
+    print(
+        f"{stage:28s} per chip: {used / 2**30:6.2f} GiB used of {total / 2**30:.2f} GiB, largest free {free_block / 2**30:.2f} GiB",
+        flush=True,
+    )
 
 
 def main():

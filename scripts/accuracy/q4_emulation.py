@@ -73,8 +73,13 @@ def dense(w: torch.Tensor, mode: str) -> torch.Tensor:
 
 
 DENSE_KEYS = (
-    "self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight", "self_attn.o_proj.weight",
-    "mlp.gate_proj.weight", "mlp.up_proj.weight", "mlp.down_proj.weight",
+    "self_attn.q_proj.weight",
+    "self_attn.k_proj.weight",
+    "self_attn.v_proj.weight",
+    "self_attn.o_proj.weight",
+    "mlp.gate_proj.weight",
+    "mlp.up_proj.weight",
+    "mlp.down_proj.weight",
 )
 
 
@@ -120,7 +125,9 @@ def main():
         state["mode"] = mode
         t0 = time.time()
         logits, _ = R.Reference(ck, dtype=dtype, quant={"lm_head": "emulated"} if dense_mode else None).forward(ids)
-        key = f"{mode}{'+dense-' + dense_mode if dense_mode else ''}@{n}" + ("" if dtype == torch.float32 else f"-{str(dtype).removeprefix('torch.')}")
+        key = f"{mode}{'+dense-' + dense_mode if dense_mode else ''}@{n}" + (
+            "" if dtype == torch.float32 else f"-{str(dtype).removeprefix('torch.')}"
+        )
         results[key] = score(logits.float(), base, ids)
         print(key, results[key], f"{time.time() - t0:.0f}s", flush=True)
         out.parent.mkdir(parents=True, exist_ok=True)

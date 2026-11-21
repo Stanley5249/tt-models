@@ -42,7 +42,10 @@ class QkRope:
         crs = core_range_set(self.cores)
         cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, cb_sq, cb_s1, cb_r, cb_out = 0, 1, 2, 3, 4, 5, 6, 7, 8, 16
         f32 = ttnn.float32
-        cbs = [cb(crs, i, f32, FP32_TILE, n) for i, n in ((cb_x, 1), (cb_xr, 1), (cb_cs, 2), (cb_w, 2), (cb_a, 1), (cb_b, 1), (cb_sq, 2), (cb_s1, 1), (cb_r, 1))]
+        cbs = [
+            cb(crs, i, f32, FP32_TILE, n)
+            for i, n in ((cb_x, 1), (cb_xr, 1), (cb_cs, 2), (cb_w, 2), (cb_a, 1), (cb_b, 1), (cb_sq, 2), (cb_s1, 1), (cb_r, 1))
+        ]
         cbs.append(cb(crs, cb_out, ttnn.bfloat16, 2048, 1))
         reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
         for t, c in enumerate(self.cores):
@@ -54,15 +57,24 @@ class QkRope:
         dm = ttnn.DataMovementConfigDescriptor
         kernels = [
             ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "qk_rope_reader.cpp"), core_ranges=crs, compile_time_args=reader_ct, runtime_args=reader_rt,
+                kernel_source=str(KERNELS / "qk_rope_reader.cpp"),
+                core_ranges=crs,
+                compile_time_args=reader_ct,
+                runtime_args=reader_rt,
                 config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
             ),
             ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "qk_rope_writer.cpp"), core_ranges=crs, compile_time_args=[cb_out] + accessor(out),
-                runtime_args=writer_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
+                kernel_source=str(KERNELS / "qk_rope_writer.cpp"),
+                core_ranges=crs,
+                compile_time_args=[cb_out] + accessor(out),
+                runtime_args=writer_rt,
+                config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
             ),
             ttnn.KernelDescriptor(
-                kernel_source=str(KERNELS / "qk_rope_compute.cpp"), core_ranges=crs, compile_time_args=compute_ct, runtime_args=[],
+                kernel_source=str(KERNELS / "qk_rope_compute.cpp"),
+                core_ranges=crs,
+                compile_time_args=compute_ct,
+                runtime_args=[],
                 config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi4, fp32_dest_acc_en=True, math_approx_mode=False),
             ),
         ]

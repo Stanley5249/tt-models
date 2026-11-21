@@ -1,6 +1,6 @@
 """Device check of the router op (boundary.Router) against topk_router_gpt, for 1-4 token rows.
 
-    pixi run python scripts/kernels/router_check.py [--layers 0 5 17] [--rows 1 2 3 4]
+pixi run python scripts/kernels/router_check.py [--layers 0 5 17] [--rows 1 2 3 4]
 """
 
 import argparse
@@ -42,8 +42,13 @@ def main():
                 err_mine, err_gpt = [], []
                 for seed in range(args.seeds):
                     torch.manual_seed(seed)
-                    r = ttnn.from_torch(torch.randn(1, 1, rows, cfg.hidden_size) * 3, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT,
-                                        device=mesh, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
+                    r = ttnn.from_torch(
+                        torch.randn(1, 1, rows, cfg.hidden_size) * 3,
+                        dtype=ttnn.bfloat16,
+                        layout=ttnn.TILE_LAYOUT,
+                        device=mesh,
+                        mesh_mapper=ttnn.ReplicateTensorToMesh(mesh),
+                    )
                     n = rms_norm(r, None, ff.eps)
                     ids_ref, w_ref = ff._route(n, rows)  # [rows, k]
                     ids, wts = router.outputs()
@@ -66,8 +71,11 @@ def main():
                                 ref = dict(zip(i.tolist(), torch.softmax(v, 0).tolist()))
                                 err_mine.append(max(abs(wa[e] - ref.get(e, 0)) for e in a))
                                 err_gpt.append(max(abs(wb[e] - ref.get(e, 0)) for e in bb))
-                print(f"rows {rows} layer {layer}: same id sets {same}/{total}, max weight diff {wdiff:.4f}; "
-                      f"max |w - fp32 ref| router op {max(err_mine):.4f}, topk_router_gpt {max(err_gpt):.4f}", flush=True)
+                print(
+                    f"rows {rows} layer {layer}: same id sets {same}/{total}, max weight diff {wdiff:.4f}; "
+                    f"max |w - fp32 ref| router op {max(err_mine):.4f}, topk_router_gpt {max(err_gpt):.4f}",
+                    flush=True,
+                )
 
             def mine():
                 i, w = router.outputs()
@@ -75,7 +83,11 @@ def main():
                 w.deallocate(True)
                 return i
 
-            print(f"rows {rows}: topk_router_gpt us {device_time_us(mesh, lambda: ff._route(n, rows)[0])}, router op us {device_time_us(mesh, mine)}", flush=True)
+            print(
+                f"rows {rows}: topk_router_gpt us {device_time_us(mesh, lambda: ff._route(n, rows)[0])}, "
+                f"router op us {device_time_us(mesh, mine)}",
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

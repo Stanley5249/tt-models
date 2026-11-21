@@ -45,7 +45,7 @@ def _bankline_cores(mesh, banks, per_bank, exclude=()):
     grid = mesh.compute_with_storage_grid_size()
     free = {(x, y) for x in range(grid.x) for y in range(grid.y)} - {(c.x, c.y) for c in exclude}
     out = {b: [] for b in banks}
-    for r in range(per_bank):  # one core per bank per round, so no bank takes all the near cores
+    for _ in range(per_bank):  # one core per bank per round, so no bank takes all the near cores
         for b in banks:
             w = opt[b]
             x, y = min(free, key=lambda c: (abs(c[0] - w.x) + abs(c[1] - w.y), abs(c[1] - w.y), c))
@@ -123,8 +123,24 @@ def _id_bytes(slots: int) -> int:
 
 
 def gate_up_op(
-    assign, cores, x, ids, weights, scale, w, act, *, kx, slots_per_core, pairs, n_scale, rows=1, slots_per_row=0,
-    split=None, fidelity=ttnn.MathFidelity.LoFi, build=False
+    assign,
+    cores,
+    x,
+    ids,
+    weights,
+    scale,
+    w,
+    act,
+    *,
+    kx,
+    slots_per_core,
+    pairs,
+    n_scale,
+    rows=1,
+    slots_per_row=0,
+    split=None,
+    fidelity=ttnn.MathFidelity.LoFi,
+    build=False,
 ):
     """act[slot, pair] = gelu_tanh(x Wg) * (x Wu) * weights[slot] * scale[ids[slot]] (kernels/expert_gate_up_*).
 
@@ -159,7 +175,20 @@ def gate_up_op(
     expert_bytes = kx * 2 * tb
     k_stride, up_delta = split or (0, 0)
     id_bytes = _id_bytes(max(a[4] for a in assign) + slots_per_core)
-    reader_ct = [cb_w, cb_rs, slots_per_core, blocks, 2 * block_k, 2, tb, expert_bytes, int(split is not None), k_stride * tb, up_delta, id_bytes]
+    reader_ct = [
+        cb_w,
+        cb_rs,
+        slots_per_core,
+        blocks,
+        2 * block_k,
+        2,
+        tb,
+        expert_bytes,
+        int(split is not None),
+        k_stride * tb,
+        up_delta,
+        id_bytes,
+    ]
     reader_ct += accessor(ids)
     writer_ct = [cb_x, cb_sc, cb_act, cb_ws, kx, slots_per_core, pairs, n_scale, rows, slots_per_row, id_bytes]
     for t in (x, act, ids, weights, scale):
@@ -173,7 +202,22 @@ def gate_up_op(
 
 
 def down_op(
-    assign, cores, act, ids, w, out, *, slots, kt, cols, banks, bank_cols, n_tiles, rows=1, compact_chunk0=None, fidelity=ttnn.MathFidelity.LoFi
+    assign,
+    cores,
+    act,
+    ids,
+    w,
+    out,
+    *,
+    slots,
+    kt,
+    cols,
+    banks,
+    bank_cols,
+    n_tiles,
+    rows=1,
+    compact_chunk0=None,
+    fidelity=ttnn.MathFidelity.LoFi,
 ):
     """out[col] = sum over slots e and K tiles k of act[e, k] . W_{ids[e]}[k, col] (kernels/expert_down_*).
 
@@ -212,7 +256,9 @@ def down_op(
 class ExpertStream:
     """Routed experts of one layer for `rows` decode tokens (one op pair for all of them)."""
 
-    def __init__(self, mesh, hidden: int, expert_local: int, top_k: int, n_experts: int, gate_up_readers=4, down_readers=2, *, rows: int = 1):
+    def __init__(
+        self, mesh, hidden: int, expert_local: int, top_k: int, n_experts: int, gate_up_readers=4, down_readers=2, *, rows: int = 1
+    ):
         self.mesh = mesh
         self.banks = mesh.dram_grid_size().x
         self.hidden, self.top_k, self.n_experts, self.rows = hidden, top_k, n_experts, rows
@@ -239,14 +285,28 @@ class ExpertStream:
 
     def out_tensor(self, memory_config):
         """[1, 1, rows, H]: the kernels write the token rows of every tile; padding rows stay unwritten."""
-        return ttnn.allocate_tensor_on_device(ttnn.Shape([1, 1, self.rows, self.hidden]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, memory_config)
+        return ttnn.allocate_tensor_on_device(
+            ttnn.Shape([1, 1, self.rows, self.hidden]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, memory_config
+        )
 
     def gate_up(self, x, ids, weights, scale, w_gate_up, act):
         """x [1, 1, rows, H] BF16 tiles; ids / weights: row-major [1, rows * k], token-major (slot 8 t + j);
         scale: row-major BF16 [1, E] per_expert_scale; w_gate_up: the interleaved [1, E, H, 2 * pad] BFP4 weight."""
         return gate_up_op(
-            self.gu_assign, self.gu_cores, x, ids, weights, scale, w_gate_up, act,
-            kx=self.kx, slots_per_core=self.gu_slots, pairs=self.pairs, n_scale=self.n_experts, rows=self.rows, slots_per_row=self.top_k,
+            self.gu_assign,
+            self.gu_cores,
+            x,
+            ids,
+            weights,
+            scale,
+            w_gate_up,
+            act,
+            kx=self.kx,
+            slots_per_core=self.gu_slots,
+            pairs=self.pairs,
+            n_scale=self.n_experts,
+            rows=self.rows,
+            slots_per_row=self.top_k,
         )
 
     def down(self, act, ids, w_down, out, compact_chunk0: int | None = None):
@@ -255,9 +315,20 @@ class ExpertStream:
         out: a [1, 1, rows, H] BF16 row-form tensor (out_tensor), or with compact_chunk0 a compact FP32
         tensor (boundary.py) whose vectors from chunk compact_chunk0 receive the rows' sums, padding zeroed."""
         return down_op(
-            self.down_assign, self.down_cores, act, ids, w_down, out,
-            slots=self.slots, kt=self.kt, cols=self.down_cols, banks=self.banks, bank_cols=self.bank_cols,
-            n_tiles=self.n_tiles, rows=self.rows, compact_chunk0=compact_chunk0,
+            self.down_assign,
+            self.down_cores,
+            act,
+            ids,
+            w_down,
+            out,
+            slots=self.slots,
+            kt=self.kt,
+            cols=self.down_cols,
+            banks=self.banks,
+            bank_cols=self.bank_cols,
+            n_tiles=self.n_tiles,
+            rows=self.rows,
+            compact_chunk0=compact_chunk0,
         )
 
 
@@ -297,24 +368,52 @@ class MlpStream:
 
     def out_tensor(self, rows: int):
         """[1, 1, rows, H] row form, for down without compact_chunk0."""
-        return ttnn.allocate_tensor_on_device(ttnn.Shape([1, 1, rows, self.hidden]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG)
+        return ttnn.allocate_tensor_on_device(
+            ttnn.Shape([1, 1, rows, self.hidden]), ttnn.bfloat16, ttnn.TILE_LAYOUT, self.mesh, ttnn.L1_MEMORY_CONFIG
+        )
 
     def gate_up(self, x, w_gate_up, h, rows: int = 1, build=False):
         """h = gelu_tanh(x Wg) * (x Wu) for the token rows of x; w_gate_up: the interleaved per-chip
         [2816, 2 * 1152] BFP8 weight."""
         return gate_up_op(
-            self.gu_assign, self.gu_cores, x, self.ids0, self.ones, self.ones, w_gate_up, h,
-            kx=self.kx, slots_per_core=1, pairs=0, n_scale=16, rows=rows, slots_per_row=0,
-            split=(self.row_tiles, self.per_bank), fidelity=self.fidelity, build=build,
+            self.gu_assign,
+            self.gu_cores,
+            x,
+            self.ids0,
+            self.ones,
+            self.ones,
+            w_gate_up,
+            h,
+            kx=self.kx,
+            slots_per_core=1,
+            pairs=0,
+            n_scale=16,
+            rows=rows,
+            slots_per_row=0,
+            split=(self.row_tiles, self.per_bank),
+            fidelity=self.fidelity,
+            build=build,
         )
 
     def down(self, h, w_down, out, compact_chunk0: int | None = 0, rows: int = 1):
         """out = h @ W_down; w_down: [1152, 3072] BFP8 per chip. out: compact FP32 vectors (one per row) from
         chunk compact_chunk0, or with compact_chunk0=None a [1, 1, rows, H] BF16 row-form tensor."""
         return down_op(
-            self.down_assign, self.down_cores, h, self.ids_down, w_down, out,
-            slots=self.down_slots, kt=self.down_kt, cols=self.down_cols, banks=self.banks, bank_cols=self.bank_cols,
-            n_tiles=self.n_tiles, rows=rows, compact_chunk0=compact_chunk0, fidelity=self.fidelity,
+            self.down_assign,
+            self.down_cores,
+            h,
+            self.ids_down,
+            w_down,
+            out,
+            slots=self.down_slots,
+            kt=self.down_kt,
+            cols=self.down_cols,
+            banks=self.banks,
+            bank_cols=self.bank_cols,
+            n_tiles=self.n_tiles,
+            rows=rows,
+            compact_chunk0=compact_chunk0,
+            fidelity=self.fidelity,
         )
 
 

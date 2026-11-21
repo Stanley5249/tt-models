@@ -28,8 +28,6 @@ from tt_models.models.gemma4.router import Router
 _STREAMS: dict[tuple, object] = {}
 
 
-
-
 def expert_stream(mesh, cfg, expert_local: int, rows: int = 1) -> ExpertStream:
     """One ExpertStream (core placement) per mesh and token count, shared by the layers."""
     key = ("experts", id(mesh), rows)
@@ -60,7 +58,14 @@ GELU_TANH = ttnn.UnaryOpType.GELU_TANH
 
 class FeedForward:
     def __init__(
-        self, loader: WeightLoader, ckpt, cfg, layer_idx: int, mlp_dtype=ttnn.bfloat8_b, expert_dtype=ttnn.bfloat4_b, expert_fidelity="LoFi",
+        self,
+        loader: WeightLoader,
+        ckpt,
+        cfg,
+        layer_idx: int,
+        mlp_dtype=ttnn.bfloat8_b,
+        expert_dtype=ttnn.bfloat4_b,
+        expert_fidelity="LoFi",
         expert_q4: bool = False,
     ):
         tp = loader.tp
@@ -132,7 +137,9 @@ class FeedForward:
             g, u = t[..., :inter], t[..., inter:]
             n, pad = self.expert_local, self.expert_pad - self.expert_local
             zeros = g.new_zeros(*g.shape[:-1], pad)
-            return torch.cat([torch.cat([g[..., c * n : (c + 1) * n], zeros, u[..., c * n : (c + 1) * n], zeros], -1) for c in range(tp)], -1)
+            return torch.cat(
+                [torch.cat([g[..., c * n : (c + 1) * n], zeros, u[..., c * n : (c + 1) * n], zeros], -1) for c in range(tp)], -1
+            )
 
         def experts_gate_up():
             return assemble_gate_up(ckpt.get(p + "experts.gate_up_proj").transpose(1, 2))[None]  # [E, 2I, H] -> [1, E, H, 2I]

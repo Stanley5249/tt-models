@@ -194,7 +194,8 @@ def check_prefix(url):
     t_fresh = time.perf_counter() - t0
     h2 = prefix_hits(url)
     print(
-        f"    turn 2 from the cache: {h1 - h0:.0f} prompt tokens hit, {t_hit:.2f} s; fresh: {h2 - h1:.0f} hit, {t_fresh:.2f} s (48 tokens each)",
+        f"    turn 2 from the cache: {h1 - h0:.0f} prompt tokens hit, {t_hit:.2f} s; "
+        f"fresh: {h2 - h1:.0f} hit, {t_fresh:.2f} s (48 tokens each)",
         flush=True,
     )
     ok = h1 - h0 > 0 and h2 == h1
@@ -274,8 +275,13 @@ def check_tools(url):
     for thinking in (False, True):
         for prompt, choice, want in cases:
             body = {
-                "model": MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": 1024, **GREEDY,
-                "tools": tools, "tool_choice": choice, "chat_template_kwargs": {"enable_thinking": thinking},
+                "model": MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1024,
+                **GREEDY,
+                "tools": tools,
+                "tool_choice": choice,
+                "chat_template_kwargs": {"enable_thinking": thinking},
             }
             choice0 = post(url, "/v1/chat/completions", body)["choices"][0]
             calls = choice0["message"].get("tool_calls") or []
@@ -292,8 +298,11 @@ def check_tools(url):
                 # OpenAI (and vLLM) finish a forced named call with "stop"
                 good &= choice0["finish_reason"] in (("tool_calls",) if isinstance(choice, str) else ("stop", "tool_calls"))
             label = choice if isinstance(choice, str) else "named get_time"
-            print(f"[{'OK' if good else 'DIFF'}] {label}, thinking {'on' if thinking else 'off'}: "
-                  f"{names or repr((choice0['message'].get('content') or '')[:60])} ({choice0['finish_reason']})", flush=True)
+            print(
+                f"[{'OK' if good else 'DIFF'}] {label}, thinking {'on' if thinking else 'off'}: "
+                f"{names or repr((choice0['message'].get('content') or '')[:60])} ({choice0['finish_reason']})",
+                flush=True,
+            )
             ok &= good
     return ok
 

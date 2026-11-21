@@ -1,6 +1,6 @@
 """Prefill latency outside vLLM.
 
-    pixi run python scripts/bench/prefill.py --lens 128 2048 8192
+pixi run python scripts/bench/prefill.py --lens 128 2048 8192
 """
 
 import argparse

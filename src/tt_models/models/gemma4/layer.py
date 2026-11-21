@@ -27,10 +27,18 @@ class DecoderLayer:
             f"L{idx}.post_attn_ln", lambda: norm_weight(ckpt.get(p + "post_attention_layernorm.weight")), layout=rm
         )
         self.scalar = float(ckpt.get(p + "layer_scalar").float().item())
-        self._raw = {n: ckpt.get(p + n + ".weight").float() for n in (
-            "post_attention_layernorm", "pre_feedforward_layernorm", "pre_feedforward_layernorm_2",
-            "post_feedforward_layernorm_1", "post_feedforward_layernorm_2", "post_feedforward_layernorm", "input_layernorm",
-        )}
+        self._raw = {
+            n: ckpt.get(p + n + ".weight").float()
+            for n in (
+                "post_attention_layernorm",
+                "pre_feedforward_layernorm",
+                "pre_feedforward_layernorm_2",
+                "post_feedforward_layernorm_1",
+                "post_feedforward_layernorm_2",
+                "post_feedforward_layernorm",
+                "input_layernorm",
+            )
+        }
 
     def boundary_weights(self, mesh, next_norm: torch.Tensor):
         """Compact FP32 weights of the two batch-1 tails; next_norm: the next layer's input norm (or the final norm)."""

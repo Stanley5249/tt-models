@@ -6,7 +6,6 @@ Random vectors; per-chip inputs differ so the chip sum is exercised. Reports
 max abs error and PCC per output, and times each op by trace replay.
 """
 
-
 import torch
 import ttnn
 
@@ -47,7 +46,14 @@ def main():
         cores = [ttnn.CoreCoord(i, 7) for i in range(8)]
 
         def dev(t, dtype=ttnn.float32, mapper=None, mem=ttnn.L1_MEMORY_CONFIG):
-            return ttnn.from_torch(t, dtype=dtype, layout=ttnn.TILE_LAYOUT, device=mesh, mesh_mapper=mapper or ttnn.ReplicateTensorToMesh(mesh), memory_config=mem)
+            return ttnn.from_torch(
+                t,
+                dtype=dtype,
+                layout=ttnn.TILE_LAYOUT,
+                device=mesh,
+                mesh_mapper=mapper or ttnn.ReplicateTensorToMesh(mesh),
+                memory_config=mem,
+            )
 
         def chip(t, i=0):
             return ttnn.to_torch(ttnn.get_device_tensors(t)[i]).float()
@@ -55,9 +61,18 @@ def main():
         def gather(t):
             s, br = _SEMAPHORES[id(mesh)].next()
             return ttnn.experimental.all_gather_async(
-                t, persistent_output_buffer=None, dim=1, multi_device_global_semaphore=s, num_links=1, cluster_axis=1,
-                topology=ttnn.Topology.Linear, memory_config=ttnn.L1_MEMORY_CONFIG, barrier_semaphore=br, chunks_per_sync=10,
-                num_workers_per_link=2, num_buffers_per_channel=2,
+                t,
+                persistent_output_buffer=None,
+                dim=1,
+                multi_device_global_semaphore=s,
+                num_links=1,
+                cluster_axis=1,
+                topology=ttnn.Topology.Linear,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
+                barrier_semaphore=br,
+                chunks_per_sync=10,
+                num_workers_per_link=2,
+                num_buffers_per_channel=2,
             )
 
         for R in args.rows:

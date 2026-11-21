@@ -74,8 +74,16 @@ def gate_up_q4_op(assign, cores, x, ids, weights, scale, w, steps, act, *, kx, s
         assert (slot0 + slots_per_core - 1) // slots_per_row == row, "a core's slots must belong to one token"
         reader_rt[core.x][core.y] = [w.buffer_address(), ids.buffer_address(), bank, vc, slot0, pair_j]
         writer_rt[core.x][core.y] = [
-            x.buffer_address(), act.buffer_address(), ids.buffer_address(), weights.buffer_address(),
-            scale.buffer_address(), act_pair, slot0, steps.buffer_address(), bank, row,
+            x.buffer_address(),
+            act.buffer_address(),
+            ids.buffer_address(),
+            weights.buffer_address(),
+            scale.buffer_address(),
+            act_pair,
+            slot0,
+            steps.buffer_address(),
+            bank,
+            row,
         ]
     id_bytes = _id_bytes(max(a[4] for a in assign) + slots_per_core)
     reader_ct = [cb_w, cb_rs, slots_per_core, blocks, 2 * block_k, 2, tb, kx * 2 * tb, 0, 0, 0, id_bytes] + accessor(ids)
@@ -86,15 +94,23 @@ def gate_up_q4_op(assign, cores, x, ids, weights, scale, w, steps, act, *, kx, s
     dm = ttnn.DataMovementConfigDescriptor
     kernels = [
         ttnn.KernelDescriptor(
-            kernel_source=str(KERNELS / "expert_gate_up_reader.cpp"), core_ranges=cores, compile_time_args=reader_ct,
-            runtime_args=reader_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
+            kernel_source=str(KERNELS / "expert_gate_up_reader.cpp"),
+            core_ranges=cores,
+            compile_time_args=reader_ct,
+            runtime_args=reader_rt,
+            config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
         ),
         ttnn.KernelDescriptor(
-            kernel_source=str(KERNELS / f"{KERNELS_Q4}_writer.cpp"), core_ranges=cores, compile_time_args=writer_ct,
-            runtime_args=writer_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
+            kernel_source=str(KERNELS / f"{KERNELS_Q4}_writer.cpp"),
+            core_ranges=cores,
+            compile_time_args=writer_ct,
+            runtime_args=writer_rt,
+            config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
         ),
         ttnn.KernelDescriptor(
-            kernel_source=str(KERNELS / f"{KERNELS_Q4}_compute.cpp"), core_ranges=cores, compile_time_args=compute_ct,
+            kernel_source=str(KERNELS / f"{KERNELS_Q4}_compute.cpp"),
+            core_ranges=cores,
+            compile_time_args=compute_ct,
             runtime_args=[],
             config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi3, fp32_dest_acc_en=True, math_approx_mode=False),
         ),
@@ -129,25 +145,57 @@ def down_q4_op(assign, cores, act, ids, w, steps, out, *, slots, kt, cols, banks
         reader_rt[core.x][core.y] = [w.buffer_address(), ids.buffer_address(), bank, vc, j0]
         zero = pad if compact and i == 0 else 0
         writer_rt[core.x][core.y] = [
-            act.buffer_address(), out.buffer_address(), bank, j0, (compact_chunk0 or 0) + chunks, zero, steps.buffer_address(), ids.buffer_address()
+            act.buffer_address(),
+            out.buffer_address(),
+            bank,
+            j0,
+            (compact_chunk0 or 0) + chunks,
+            zero,
+            steps.buffer_address(),
+            ids.buffer_address(),
         ]
     id_bytes = _id_bytes(slots)
     reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, id_bytes] + accessor(ids)
-    writer_ct = [cb_in0, cb_out, slots, cols, banks, n_tiles, int(compact), compact_chunk0 or 0, cb_zero, kt, 1, cb_m, cb_one, cb_scr, id_bytes, bank_cols]
+    writer_ct = [
+        cb_in0,
+        cb_out,
+        slots,
+        cols,
+        banks,
+        n_tiles,
+        int(compact),
+        compact_chunk0 or 0,
+        cb_zero,
+        kt,
+        1,
+        cb_m,
+        cb_one,
+        cb_scr,
+        id_bytes,
+        bank_cols,
+    ]
     writer_ct += accessor(act) + accessor(out) + accessor(ids)
     compute_ct = [cb_in0, cb_w, cb_out, slots, kt, cols, cb_m, cb_racc, cb_one]
     dm = ttnn.DataMovementConfigDescriptor
     kernels = [
         ttnn.KernelDescriptor(
-            kernel_source=str(KERNELS / "expert_down_reader.cpp"), core_ranges=cores, compile_time_args=reader_ct,
-            runtime_args=reader_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
+            kernel_source=str(KERNELS / "expert_down_reader.cpp"),
+            core_ranges=cores,
+            compile_time_args=reader_ct,
+            runtime_args=reader_rt,
+            config=dm(processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0),
         ),
         ttnn.KernelDescriptor(
-            kernel_source=str(KERNELS / "expert_q4_down_writer.cpp"), core_ranges=cores, compile_time_args=writer_ct,
-            runtime_args=writer_rt, config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
+            kernel_source=str(KERNELS / "expert_q4_down_writer.cpp"),
+            core_ranges=cores,
+            compile_time_args=writer_ct,
+            runtime_args=writer_rt,
+            config=dm(processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1),
         ),
         ttnn.KernelDescriptor(
-            kernel_source=str(KERNELS / "expert_q4_down_compute.cpp"), core_ranges=cores, compile_time_args=compute_ct,
+            kernel_source=str(KERNELS / "expert_q4_down_compute.cpp"),
+            core_ranges=cores,
+            compile_time_args=compute_ct,
             runtime_args=[],
             config=ttnn.ComputeConfigDescriptor(math_fidelity=ttnn.MathFidelity.HiFi3, fp32_dest_acc_en=True, math_approx_mode=False),
         ),
@@ -178,7 +226,10 @@ class Q4Experts:
         groups = -(-stream.kx // TILE)
         kt, width = stream.kt, stream.down_width
         self.gate_up = loader.put(
-            f"L{layer_idx}.exp_gate_up_q4_p{expert_pad}", lambda: assemble_gate_up(factored("gate_up")[0])[None], ttnn.bfloat4_b, shard_dim=-1
+            f"L{layer_idx}.exp_gate_up_q4_p{expert_pad}",
+            lambda: assemble_gate_up(factored("gate_up")[0])[None],
+            ttnn.bfloat4_b,
+            shard_dim=-1,
         )
         self.gate_up_steps = loader.put(
             f"L{layer_idx}.exp_gate_up_q4s_p{expert_pad}",
@@ -203,14 +254,36 @@ class Q4Experts:
     def gate_up_op(self, x, ids, weights, scale, act):
         st = self.stream
         return gate_up_q4_op(
-            st.gu_assign, st.gu_cores, x, ids, weights, scale, self.gate_up, self.gate_up_steps, act,
-            kx=st.kx, slots_per_core=st.gu_slots, pairs=st.pairs, n_scale=st.n_experts,
+            st.gu_assign,
+            st.gu_cores,
+            x,
+            ids,
+            weights,
+            scale,
+            self.gate_up,
+            self.gate_up_steps,
+            act,
+            kx=st.kx,
+            slots_per_core=st.gu_slots,
+            pairs=st.pairs,
+            n_scale=st.n_experts,
         )
 
     def down_op(self, act, ids, out, compact_chunk0=None):
         st = self.stream
         return down_q4_op(
-            st.down_assign, st.down_cores, act, ids, self.down, self.down_steps, out,
-            slots=st.slots, kt=st.kt, cols=st.down_cols, banks=st.banks, bank_cols=st.bank_cols, n_tiles=st.n_tiles,
+            st.down_assign,
+            st.down_cores,
+            act,
+            ids,
+            self.down,
+            self.down_steps,
+            out,
+            slots=st.slots,
+            kt=st.kt,
+            cols=st.down_cols,
+            banks=st.banks,
+            bank_cols=st.bank_cols,
+            n_tiles=st.n_tiles,
             compact_chunk0=compact_chunk0,
         )

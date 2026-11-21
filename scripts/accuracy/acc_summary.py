@@ -1,6 +1,6 @@
 """Summarize compare.py JSON results: top-1 and mean KL over the decode rows.
 
-    pixi run python scripts/accuracy/acc_summary.py artifacts/accuracy/*.json
+pixi run python scripts/accuracy/acc_summary.py artifacts/accuracy/*.json
 """
 
 import json

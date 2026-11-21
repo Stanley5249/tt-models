@@ -26,7 +26,6 @@ def prefill_rows(tokens: int, start: int) -> int:
     return -(-tokens // step) * step
 
 
-
 @dataclass
 class Precision:
     attention: ttnn.DataType = ttnn.bfloat8_b

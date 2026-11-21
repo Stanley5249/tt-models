@@ -1,6 +1,6 @@
 """Soak test: many traced decode steps, checking device DRAM use does not grow.
 
-    pixi run python scripts/bench/soak.py --steps 3000
+pixi run python scripts/bench/soak.py --steps 3000
 """
 
 import argparse

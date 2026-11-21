@@ -1,4 +1,5 @@
 """Blocking trace execution, readback and host softcap of a batch-1 decode step (diagnostic)."""
+
 import statistics
 import time
 
@@ -18,7 +19,7 @@ with open_n300(trace_region_size=300_000_000) as mesh:
     print("out", out.shape, out.layout, out.memory_config().memory_layout)
     host = m._decode_inputs(torch.tensor([5]), torch.tensor([70]), tables)
     r, c, e, full, sc, am, sc1 = [], [], [], [], [], [], []
-    for i in range(20):
+    for _ in range(20):
         ttnn.synchronize_device(mesh)
         t0 = time.perf_counter()
         for k, v in host.items():
@@ -29,18 +30,44 @@ with open_n300(trace_region_size=300_000_000) as mesh:
         t2 = time.perf_counter()
         x = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(mesh, dim=-1))
         t3 = time.perf_counter()
-        c.append(t1 - t0); e.append(t2 - t1); r.append(t3 - t2)
+        c.append(t1 - t0)
+        e.append(t2 - t1)
+        r.append(t3 - t2)
         t0 = time.perf_counter()
         for k, v in host.items():
             ttnn.copy_host_to_device_tensor(v, dev[k])
         ttnn.execute_trace(mesh, tid, cq_id=0, blocking=False)
         x = ttnn.to_torch(out, mesh_composer=ttnn.ConcatMeshToTensor(mesh, dim=-1))
         full.append(time.perf_counter() - t0)
-        t0 = time.perf_counter(); y = x.float().reshape(-1, m.vocab).div_(30).tanh_().mul_(30); sc.append(time.perf_counter() - t0)
-        t0 = time.perf_counter(); a = y.argmax(-1); am.append(time.perf_counter() - t0)
+        t0 = time.perf_counter()
+        y = x.float().reshape(-1, m.vocab).div_(30).tanh_().mul_(30)
+        sc.append(time.perf_counter() - t0)
+        t0 = time.perf_counter()
+        a = y.argmax(-1)
+        am.append(time.perf_counter() - t0)
         torch.set_num_threads(1)
-        t0 = time.perf_counter(); y = x.float().reshape(-1, m.vocab).div_(30).tanh_().mul_(30); sc1.append(time.perf_counter() - t0)
+        t0 = time.perf_counter()
+        y = x.float().reshape(-1, m.vocab).div_(30).tanh_().mul_(30)
+        sc1.append(time.perf_counter() - t0)
         torch.set_num_threads(20)
-    f = lambda v: round(statistics.median(v) * 1e3, 3)
-    print("copies+sync", f(c), "execute", f(e), "read", f(r), "pipelined copies+execute+read", f(full), "softcap", f(sc), "argmax", f(am), "softcap 1 thread", f(sc1))
+
+    def f(v):
+        return round(statistics.median(v) * 1e3, 3)
+
+    print(
+        "copies+sync",
+        f(c),
+        "execute",
+        f(e),
+        "read",
+        f(r),
+        "pipelined copies+execute+read",
+        f(full),
+        "softcap",
+        f(sc),
+        "argmax",
+        f(am),
+        "softcap 1 thread",
+        f(sc1),
+    )
     m.release_traces()

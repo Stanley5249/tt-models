@@ -15,6 +15,13 @@ line-length = 140
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+# B905: the zips pair sequences built to the same length. E741: H, I and E
+# name model dimensions, as in the checkpoint config.
+ignore = ["B905", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# The timed lambdas run within their own loop iteration.
+"scripts/kernels/*" = ["B023"]
 
 [tool.ruff.format]
 line-ending = "lf"

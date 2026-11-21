@@ -80,8 +80,4 @@ class Checkpoint:
     def layer(self, idx: int) -> dict[str, torch.Tensor]:
         """All tensors of decoder layer `idx`, keyed relative to the layer."""
         prefix = f"{TEXT_PREFIX}layers.{idx}."
-        return {
-            key[len(prefix) :]: self._read(file, key)
-            for key, file in self.weight_map.items()
-            if key.startswith(prefix)
-        }
+        return {key[len(prefix) :]: self._read(file, key) for key, file in self.weight_map.items() if key.startswith(prefix)}
