@@ -50,7 +50,7 @@ serve-qwen3-8b *args:
 
 # Format every source file.
 [parallel]
-fmt: _fmt-ruff _fmt-tombi _fmt-oxfmt _fmt-just
+fmt: _fmt-ruff _fmt-oxfmt _fmt-just
 
 # Format, then apply the linter's automatic fixes.
 fix: fmt
@@ -66,7 +66,7 @@ typecheck *args:
 
 # Fast local gate: format checks, lint and type check.
 [parallel]
-check: (_fmt-ruff "--check") (_fmt-tombi "--check") (_fmt-oxfmt "--check") (_fmt-just "--check") lint typecheck
+check: (_fmt-ruff "--check") (_fmt-oxfmt "--check") (_fmt-just "--check") lint typecheck
 
 # Host tests by default; `-m device` runs the N300 ones.
 test *args:
@@ -81,9 +81,6 @@ lock-check:
 
 _fmt-ruff *args:
     ruff format --quiet "$@"
-
-_fmt-tombi *args:
-    tombi format --quiet "$@" .
 
 _fmt-oxfmt *args:
     bunx oxfmt "$@"

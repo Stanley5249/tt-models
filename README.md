@@ -4,7 +4,7 @@ TTNN model implementations served through vLLM on Tenstorrent hardware. The one 
 
 ## Setup
 
-The environment is a [pixi](https://pixi.sh) workspace, configured in `pyproject.toml`: Python 3.12, a Tracy-enabled ttnn wheel, CPU torch, vLLM and vllm-tt-plugin, and this package installed editable. [just](https://just.systems) runs every recurring command (`just --list`), and reads machine-specific settings from a git-ignored `.env` (see `.env.example`). The checks call [ruff](https://docs.astral.sh/ruff/), [pyrefly](https://pyrefly.org) and [tombi](https://tombi-toml.github.io/tombi/) from `PATH` and run oxfmt through [bun](https://bun.sh)'s `bunx`, so install those globally, for example with `pixi global install`.
+The environment is a [pixi](https://pixi.sh) workspace, configured in `pyproject.toml`: Python 3.12, a Tracy-enabled ttnn wheel, CPU torch, vLLM and vllm-tt-plugin, and this package installed editable. [just](https://just.systems) runs every recurring command (`just --list`), and reads machine-specific settings from a git-ignored `.env` (see `.env.example`). The checks call [ruff](https://docs.astral.sh/ruff/) and [pyrefly](https://pyrefly.org) from `PATH` and run oxfmt through [bun](https://bun.sh)'s `bunx`, so install those globally, for example with `pixi global install`.
 
     just install
     just serve-gemma4          # OpenAI-compatible server on 127.0.0.1:8000
