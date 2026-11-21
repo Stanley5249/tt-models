@@ -47,4 +47,6 @@ A new model goes in `src/tt_models/models/<name>/`, with its adapter class added
 
 ## License
 
-Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option. Files adapted from Apache-2.0 projects stay Apache-2.0 and say so in an SPDX header: `scripts/accuracy/gpqa_eval.py` and `src/tt_models/models/gemma4/kernels/stream_common.hpp`. `docs/experiments/2026-11-19-official-comparison/official/` holds extracts of tt-inference-server files under its Apache-2.0 license, listed in its README.
+`MIT OR Apache-2.0` ([MIT](LICENSE-MIT), [Apache-2.0](LICENSE-APACHE)). Files adapted from Apache-2.0 projects keep that license in an SPDX header, and `docs/experiments/2026-11-19-official-comparison/official/` holds Apache-2.0 extracts of tt-inference-server.
+
+Commit authorship and the `/home/st418` paths in experiment logs are public on purpose. Never commit tokens, credentials or `.env`.

@@ -5,10 +5,6 @@
 - `just check` runs the format checks, ruff and pyrefly.
 - `just test` runs the host tests, and `just test -m device` the N300 ones.
 
-## Privacy
-
-The repository is public. The author's name and email in commits and the `/home/st418` paths in experiment logs are published on purpose. Never commit tokens, credentials, `.env`, or other people's data.
-
 ## Common mistakes
 
 Seen on this machine; the root causes are unknown.
