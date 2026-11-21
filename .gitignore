@@ -1,5 +1,7 @@
 .pixi/
 cache/
+# Script outputs and profiler runs; results that back a decision move to docs/experiments/.
+artifacts/
 logs/
 build/
 __pycache__/

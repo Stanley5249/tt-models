@@ -4,9 +4,9 @@
 
 ## 測試結果
 
-首次啟動卡在裝置 0 的 ARC 韌體初始化。等候超過 130 秒後，API 仍未就緒。經授權停止測試程序後，使用 `tt-smi --offline --reset /dev/tenstorrent/0` 重設該卡。用同一份設定重啟後，`/v1/models` 成功列出 `gemma4`，上下文上限為 32,768 tokens。首次記錄末尾的 `KeyboardInterrupt: terminated` 由停止程序觸發。ARC 韌體卡住的原因仍未確認。 [首次啟動記錄](../logs/serve-pi-workflow.WehX8d.log#L44)
+首次啟動卡在裝置 0 的 ARC 韌體初始化。等候超過 130 秒後，API 仍未就緒。經授權停止測試程序後，使用 `tt-smi --offline --reset /dev/tenstorrent/0` 重設該卡。用同一份設定重啟後，`/v1/models` 成功列出 `gemma4`，上下文上限為 32,768 tokens。首次記錄末尾的 `KeyboardInterrupt: terminated` 由停止程序觸發。ARC 韌體卡住的原因仍未確認。 首次啟動記錄 (`logs/serve-pi-workflow.WehX8d.log:44`, local only)
 
-Pi 透過 `tt-vllm/gemma4` 讀取暫存檔中的隨機值，修改另一個檔案，再用 Bash 執行驗證腳本。工具順序為 `read → read → edit → bash`，四次都成功。獨立的檔案比對通過，最終回覆也符合驗證腳本的輸出。Pi 收到 5 個非空的 Thinking 區塊。原本的斷言只允許一次 `read`，因此回報失敗。重新檢查同一批事件後，確認多一次讀檔仍符合流程。5 次聊天請求皆回傳 HTTP 200。 [重試記錄](../logs/serve-pi-workflow.rOTdhO.log#L683)
+Pi 透過 `tt-vllm/gemma4` 讀取暫存檔中的隨機值，修改另一個檔案，再用 Bash 執行驗證腳本。工具順序為 `read → read → edit → bash`，四次都成功。獨立的檔案比對通過，最終回覆也符合驗證腳本的輸出。Pi 收到 5 個非空的 Thinking 區塊。原本的斷言只允許一次 `read`，因此回報失敗。重新檢查同一批事件後，確認多一次讀檔仍符合流程。5 次聊天請求皆回傳 HTTP 200。 重試記錄 (`logs/serve-pi-workflow.rOTdhO.log:683`, local only)
 
 ## 重現的警告
 
@@ -17,7 +17,7 @@ Pi 透過 `tt-vllm/gemma4` 讀取暫存檔中的隨機值，修改另一個檔�
 | 推論 | semaphore 回退到一般 L1 共 10 次。fabric 封包大小不理想的警告出現 1 次。 | v0.81.1-conda.8 的 all-gather 路徑會在 `L1_SMALL` bank 大小非零時優先使用該區域。TT plugin 可傳入 `tt.l1_small_size`。尚未做 A/B 測試，本次也未看到 L1 配置失敗。 |
 | 關機 | 程序管理器記錄會強制清理 EngineCore，最後完成關機。 | 若 ARC 卡住再現，保留前一輪關機與下一輪啟動記錄。兩起事件的關聯尚未確認。 |
 
-啟動時也出現主機板辨識回退、缺少 PGD、無法調整執行緒優先權、自訂 scheduler、Inductor 已停用，以及 checkpoint 覆寫預設取樣參數等警告。重試記錄中沒有 HTTP 4xx、5xx 或 traceback。 [啟動記錄](../logs/serve-pi-workflow.rOTdhO.log#L19) · [暖機](../logs/serve-pi-workflow.rOTdhO.log#L634) · [推論](../logs/serve-pi-workflow.rOTdhO.log#L685) · [關機](../logs/serve-pi-workflow.rOTdhO.log#L718)
+啟動時也出現主機板辨識回退、缺少 PGD、無法調整執行緒優先權、自訂 scheduler、Inductor 已停用，以及 checkpoint 覆寫預設取樣參數等警告。重試記錄中沒有 HTTP 4xx、5xx 或 traceback。 啟動記錄 (`logs/serve-pi-workflow.rOTdhO.log:19`, local only) · 暖機 (`logs/serve-pi-workflow.rOTdhO.log:634`, local only) · 推論 (`logs/serve-pi-workflow.rOTdhO.log:685`, local only) · 關機 (`logs/serve-pi-workflow.rOTdhO.log:718`, local only)
 
 ## 目前的 adapter 限制
 
@@ -28,7 +28,7 @@ Pi 透過 `tt-vllm/gemma4` 讀取暫存檔中的隨機值，修改另一個檔�
 | Async decode | adapter 使用舊版 decode 輸入更新介面。此次執行使用同步排程，沒有 decode 重疊。 |
 | 取樣 | `supports_sample_on_device=True` 會走 adapter 的主機端 top-k 取樣器，`max_device_top_k` 為 1,024。裝置端 penalties 和 grammar 均未宣告支援。 |
 
-前三項是本地 Gemma 4 adapter 的能力宣告，由 TT plugin 套用。若要支援 prefix caching，先驗證完整 prefill 和分段 prefill 的 logits 在容許誤差內一致。測資應跨過滑動視窗和 KV page 邊界。 [能力宣告](../gemma4_tt/vllm_model.py#L70) · [Prefill 入口](../gemma4_tt/vllm_model.py#L130) · [Decode 記錄](../logs/serve-pi-workflow.rOTdhO.log#L689)
+前三項是本地 Gemma 4 adapter 的能力宣告，由 TT plugin 套用。若要支援 prefix caching，先驗證完整 prefill 和分段 prefill 的 logits 在容許誤差內一致。測資應跨過滑動視窗和 KV page 邊界。 能力宣告 (`gemma4_tt/vllm_model.py:70` at `a527dad`) · Prefill 入口 (`gemma4_tt/vllm_model.py:130` at `a527dad`) · Decode 記錄 (`logs/serve-pi-workflow.rOTdhO.log:689`, local only)
 
 ## 重現方式
 

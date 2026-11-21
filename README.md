@@ -15,6 +15,11 @@ package installed editable.
     pixi run serve-gemma4          # OpenAI-compatible server on 127.0.0.1:8000
     pixi run serve-qwen3-8b        # tt_transformers' Qwen3-8B
 
+Everything reads the checkpoint from the Hugging Face cache and never
+downloads it, so fetch it once with
+`pixi run hf download google/gemma-4-26B-A4B-it-qat-q4_0-unquantized`. The
+device tests use random weights but still read its `config.json`.
+
 The first start converts the checkpoint into a ttnn weight cache under
 `cache/` and builds the prefill programs, which takes a while; later starts
 load the cache.
