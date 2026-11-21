@@ -24,7 +24,7 @@ from loguru import logger
 
 from gemma4_tt.checkpoint import Checkpoint, attention_dims
 from gemma4_tt.tt.kv_cache import KvCache, kv_groups
-from gemma4_tt.tt.model import PREFILL_BUCKET, PREFILL_CHUNK, Gemma4TT
+from gemma4_tt.tt.model import PREFILL_BUCKET, PREFILL_CHUNK, Gemma4TT, prefill_rows
 
 # Device DRAM per chip for the shared KV pool. Weights take 8.0 of 11.87 GiB;
 # the rest holds prefill activations, decode traces and their inputs.
@@ -245,8 +245,8 @@ class Gemma4ForCausalLM:
     # -- lifecycle -------------------------------------------------------------
 
     def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, **_):
-        """Build the prefill programs of every PREFILL_BUCKET length, for a piece from
-        position 0 and a continuation piece, which reads the paged cache. A program
+        """Build the prefill programs of every padded length (prefill_rows), for a piece
+        from position 0 and a continuation piece, which reads the paged cache. A program
         built later, after the decode traces are captured, would cost the first request
         of that length and could allocate into trace memory. The pool holds no request
         yet; a small pool (GEMMA4_KV_POOL_GIB) warms only the lengths it fits.
@@ -269,9 +269,9 @@ class Gemma4ForCausalLM:
             return
         t0 = time.perf_counter()
         tokens = torch.zeros(grid + longest, dtype=torch.long)
-        for n in range(PREFILL_BUCKET, longest + 1, PREFILL_BUCKET):
-            m.prefill(tokens[:n], 0, tables)
-            m.prefill(tokens[: grid + n], grid, tables)
+        for start in (0, grid):
+            for n in sorted({prefill_rows(n, start) for n in range(1, longest + 1)}):
+                m.prefill(tokens[: start + n], start, tables)
         logger.info(f"Gemma4 N300: prefill programs for pieces up to {longest} tokens built in {time.perf_counter() - t0:.0f} s")
 
     def warmup_model_decode(self, kv_cache, max_batch_size, num_blocks, can_sample_on_device, enable_trace, **_):

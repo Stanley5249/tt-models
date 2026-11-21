@@ -43,10 +43,18 @@ LM_CORES = 8
 # (the expert-major MoE gathers k = 8 rows per token) whatever chunk vLLM schedules.
 PREFILL_CHUNK = 4096
 # Prefill pieces are padded to a multiple of this many rows, so their programs are
-# built once per bucket (32 up to PREFILL_CHUNK, warmed at startup) instead of once
-# per prompt length: a never-seen length cost 0.6 s more on its first prefill. The
-# padding costs about 0.5 ms per row; 256-row buckets cost a 300-token prompt 0.16 s.
+# built once per bucket (warmed at startup) instead of once per prompt length: a
+# never-seen length cost 0.6 s more on its first prefill. The padding costs about
+# 0.5 ms per row, so a short piece from position 0 (up to SHORT_PIECE tokens) pads
+# only to whole tiles; a later piece needs whole 128-row SDPA chunks anyway.
 PREFILL_BUCKET = 128
+SHORT_PIECE = 512
+
+
+def prefill_rows(tokens: int, start: int) -> int:
+    """The rows a prefill piece of `tokens` positions from `start` is padded to."""
+    step = TILE if start == 0 and tokens <= SHORT_PIECE else PREFILL_BUCKET
+    return -(-tokens // step) * step
 
 from gemma4_tt.tt.moe import STREAM_ROWS, FeedForward  # noqa: E402
 
@@ -321,7 +329,7 @@ class Gemma4TT:
         """Run positions [c0, c1) through every layer, writing their K/V. Returns the
         final hidden rows, padded."""
         n = c1 - c0
-        padded = -(-n // PREFILL_BUCKET) * PREFILL_BUCKET  # also whole SDPA q chunks
+        padded = prefill_rows(n, c0)
         ids = torch.zeros(padded, dtype=torch.long)
         ids[:n] = tokens[c0:c1]
         x = self._to_device(self.embed(ids).reshape(1, 1, padded, self.hidden))
