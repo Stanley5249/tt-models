@@ -48,7 +48,7 @@ def main():
                                         device=mesh, mesh_mapper=ttnn.ReplicateTensorToMesh(mesh))
                     n = rms_norm(r, None, ff.eps)
                     ids_ref, w_ref = ff._route(n, rows)  # [rows, k]
-                    ids, wts = router.flat_outputs() if rows > 1 else router.outputs()
+                    ids, wts = router.outputs()
                     router(n, ff.router, ids, wts)
                     nh = host(n).float()[0, 0, :rows]
                     wh = host(ff.router).float()[0, 0]
@@ -72,7 +72,7 @@ def main():
                       f"max |w - fp32 ref| router op {max(err_mine):.4f}, topk_router_gpt {max(err_gpt):.4f}", flush=True)
 
             def mine():
-                i, w = router.flat_outputs() if rows > 1 else router.outputs()
+                i, w = router.outputs()
                 router(n, ff.router, i, w)
                 w.deallocate(True)
                 return i

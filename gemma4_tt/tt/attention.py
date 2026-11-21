@@ -275,36 +275,20 @@ class Attention:
             )
         return self._head_w_dev[batch]
 
-    def decode_b1(self, x: ttnn.Tensor, rope, kv: LayerKv, page_table, cur_pos, boundary) -> ttnn.Tensor:
-        """One decode token: x is the normed row-form input. Returns this chip's o_proj partial sum in
-        compact FP32 form (boundary.py), packed straight from the width-sharded matmul output."""
+    def decode_compact(self, x: ttnn.Tensor, rope, kv: LayerKv, page_table, cur_pos, boundary) -> ttnn.Tensor:
+        """1-4 decode tokens: x is the normed row-form input [1, 1, rows, H]. Returns this chip's o_proj
+        partial sums in compact FP32 form (boundary.py, one vector per row), packed straight from the
+        width-sharded matmul output. rope: the batch-1 compact tables or the (cos, sin) rows (decode)."""
+        rows = x.shape[2]
         heads = self._heads_decode(x, rope, kv, page_table, cur_pos)
         out_sh = ttnn.linear(
             heads, self.wo_dram, program_config=self.wo_cfg, compute_kernel_config=HIFI2, memory_config=self.wo_out, dtype=ttnn.float32
         )
         heads.deallocate(True)
-        out = boundary.compact()
-        boundary.pack(out_sh, out, self.wo_cores)
+        out = boundary.compact(rows)
+        boundary.pack(out_sh, out, self.wo_cores, rows=rows)
         out_sh.deallocate(True)
         return out
-
-    def decode(self, x: ttnn.Tensor, rope, kv: LayerKv, page_table, cur_pos) -> ttnn.Tensor:
-        """x [1, 1, B, H] replicated. Returns all-reduced attention output [1, 1, B, H].
-
-        rope: (cos, sin) [1, 1, B * heads, hd] in fused QKV row order, cos 1 and
-        sin 0 on the V rows, so one rotation covers Q and K and leaves V alone.
-        page_table: this layer's group table [B, width].
-        cur_pos: int32 [B] absolute positions, -1 for inactive rows.
-        """
-        heads = self._heads_decode(x, rope, kv, page_table, cur_pos)
-        batch = x.shape[2]
-        out_sh = ttnn.linear(heads, self.wo_dram, program_config=self.wo_cfg, compute_kernel_config=HIFI2, memory_config=self.wo_out)
-        heads.deallocate(True)
-        out = ttnn.sharded_to_interleaved(out_sh, DRAM)
-        out_sh.deallocate(True)
-        if out.shape[2] != batch:
-            out = ttnn.slice(out, [0, 0, 0, 0], [1, 1, batch, out.shape[3]])
-        return all_reduce(out)
 
     def _heads_decode(self, x, rope, kv: LayerKv, page_table, cur_pos):
         """QKV, q/k norm and RoPE, cache update and SDPA: the concatenated heads, one head per core."""

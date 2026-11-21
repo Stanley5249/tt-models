@@ -136,32 +136,26 @@ class DecoderLayer:
         h.deallocate(True)
         return self._finish(x, a)
 
-    def decode_b1(self, xc, h, rope, kv, page_table, cur_pos, b: Boundary, x_page0: int = 0):
-        """One decode token on compact boundaries: xc compact FP32 residual, h its normed row form.
-        Returns the next (xc, h); h of the last layer is final-normed."""
-        a = self.attn.decode_b1(h, rope, kv, page_table, cur_pos, b)
+    def decode_compact(self, xc, h, rope, kv, page_table, cur_pos, b: Boundary, x_page0: int = 0):
+        """1-4 decode tokens on compact boundaries: xc compact FP32 residuals (one vector per row), h their
+        normed row form [1, 1, rows, H]. Returns the next (xc, h); h of the last layer is final-normed."""
+        rows = h.shape[2]
+        a = self.attn.decode_compact(h, rope, kv, page_table, cur_pos, b)
         g = all_gather_compact(a)
         a.deallocate(True)
-        x2, n, m_in, e_in = b.compact(), b.row(), b.row(), b.row()
-        b.attn_tail(g, xc, self.w_attn_c, x2, n, m_in, e_in, x_page0=x_page0)
+        x2, n, m_in, e_in = b.compact(rows), b.row(rows), b.row(rows), b.row(rows)
+        b.attn_tail(g, xc, self.w_attn_c, x2, n, m_in, e_in, x_page0=x_page0, rows=rows)
         g.deallocate(True)
-        f = self.ff.decode_b1(n, m_in, e_in, b)
+        f = self.ff.decode_compact(n, m_in, e_in, b)
         for t in (n, m_in, e_in):
             t.deallocate(True)
         g = all_gather_compact(f)
         f.deallocate(True)
-        x3, h2 = b.compact(), b.row()
-        b.ff_tail(g, x2, self.w_ff_c, x3, h2, self.scalar)
+        x3, h2 = b.compact(rows), b.row(rows)
+        b.ff_tail(g, x2, self.w_ff_c, x3, h2, self.scalar, rows=rows)
         g.deallocate(True)
         x2.deallocate(True)
         return x3, h2
-
-    def decode(self, x, rope, kv, page_table, cur_pos):
-        h = self._rms(x, self.input_ln)
-        a = self.attn.decode(h, rope, kv, page_table, cur_pos)
-        h.deallocate(True)
-        return self._finish(x, a)
-
 
 class Gemma4TT:
     def __init__(
@@ -177,6 +171,8 @@ class Gemma4TT:
     ):
         if max_batch > STREAM_ROWS:
             raise ValueError(f"decode streams the experts of at most {STREAM_ROWS} rows; got max_batch={max_batch}")
+        if precision is not None and precision.expert_q4 and max_batch > 1:
+            raise ValueError("the experimental Q4_0 experts decode one row; build the model with max_batch=1")
         self.mesh = mesh
         self.ckpt = ckpt = ckpt or Checkpoint()
         self.cfg = cfg = ckpt.config
@@ -463,15 +459,12 @@ class Gemma4TT:
         pts[:, :, :n] = tables[:, :, :n].to(torch.int32)
         rm = ttnn.ROW_MAJOR_LAYOUT
         emb = self.embed(tokens.long())
-        if batch == 1:
-            # compact FP32 residual and layer 0's normed input (host RMSNorm in FP32)
-            xf = emb.float()
-            h0 = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.cfg.rms_norm_eps) * self.input_ln0
-            first = {"h0": self._host(h0.reshape(1, 1, 1, self.hidden))}
-            f32 = [to_compact(xf)[None, None]]  # one FP32 input [xc | sliding cs | full cs]: fewer host copies
-        else:
-            first = {"x": self._host(emb.reshape(1, 1, batch, self.hidden))}
-        inputs = {**first, "cur_pos": self._host(positions.to(torch.int32), ttnn.int32, rm)}
+        # compact FP32 residuals and layer 0's normed input (host RMSNorm in FP32)
+        xf = emb.float()
+        h0 = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.cfg.rms_norm_eps) * self.input_ln0
+        # one FP32 input [xc | (batch 1) sliding cs | full cs]: fewer host copies
+        f32 = [to_compact(xf)[None, None]]
+        inputs = {"h0": self._host(h0.reshape(1, 1, batch, self.hidden)), "cur_pos": self._host(positions.to(torch.int32), ttnn.int32, rm)}
         self._pt_src = {}
         for g in range(self.kv.groups):
             inputs[f"pt{g}"] = self._host(pts[g], ttnn.int32, rm)
@@ -490,35 +483,30 @@ class Gemma4TT:
             else:
                 for name, rows in tables.items():
                     inputs[f"{kind}.{name}"] = self._host(rows.reshape(1, 1, batch * attn.heads, -1), ttnn.float32)
-        if batch == 1:
-            inputs["in32"] = self._host(torch.cat(f32, dim=-1), ttnn.float32)
+        inputs["in32"] = self._host(torch.cat(f32, dim=-1), ttnn.float32)
         return inputs
 
     def _decode_device(self, dev: dict[str, ttnn.Tensor]) -> ttnn.Tensor:
         """Device decode graph. Never frees its inputs, so it can be traced."""
-        if "in32" in dev:  # batch 1: compact boundaries
-            V = self.boundary.V
-            pages = {"sliding_attention": V, "full_attention": V + self._cs_tiles["sliding_attention"]}
-            xc, h = dev["in32"], dev["h0"]
-            for i, (layer, kv) in enumerate(zip(self.layers, self.kv.layers)):
-                kind = "sliding_attention" if layer.sliding else "full_attention"
-                rope = ("compact", dev["in32"], pages[kind])
-                xn, hn = layer.decode_b1(xc, h, rope, kv, dev[f"pt{kv.group}"], dev["cur_pos"], self.boundary, x_page0=0)
-                if i:  # never free the step inputs
-                    xc.deallocate(True)
-                    h.deallocate(True)
-                xc, h = xn, hn
-            out = self._logits_device(h, normed=True)
-            xc.deallocate(True)
-            h.deallocate(True)
-            return out
-        x = ttnn.clone(dev["x"])
-        for layer, kv in zip(self.layers, self.kv.layers):
+        # Compact boundaries at every batch size (boundary.py).
+        batch = dev["h0"].shape[2]
+        V = self.boundary.V
+        pages = {"sliding_attention": batch * V, "full_attention": batch * V + self._cs_tiles["sliding_attention"]}
+        xc, h = dev["in32"], dev["h0"]
+        for i, (layer, kv) in enumerate(zip(self.layers, self.kv.layers)):
             kind = "sliding_attention" if layer.sliding else "full_attention"
-            rope = (dev[f"{kind}.cos"], dev[f"{kind}.sin"])
-            x = layer.decode(x, rope, kv, dev[f"pt{kv.group}"], dev["cur_pos"])
-        out = self._logits_device(x)
-        x.deallocate(True)
+            if batch == 1:  # the fused q/k norm + RoPE op reads its tables from in32
+                rope = ("compact", dev["in32"], pages[kind])
+            else:
+                rope = (dev[f"{kind}.cos"], dev[f"{kind}.sin"])
+            xn, hn = layer.decode_compact(xc, h, rope, kv, dev[f"pt{kv.group}"], dev["cur_pos"], self.boundary, x_page0=0)
+            if i:  # never free the step inputs
+                xc.deallocate(True)
+                h.deallocate(True)
+            xc, h = xn, hn
+        out = self._logits_device(h, normed=True)
+        xc.deallocate(True)
+        h.deallocate(True)
         return out
 
     # -- head ----------------------------------------------------------------

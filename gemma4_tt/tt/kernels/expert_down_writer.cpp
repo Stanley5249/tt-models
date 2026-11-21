@@ -3,9 +3,9 @@
 // 1. Copies the token rows (0 .. rows - 1) of each slot's 11 act tiles (already scaled by the routing
 //    weights) into cb_in0, one slot at a time, so the buffer holds two slots whatever the batch.
 // 2. For each output column tile n = bank + 12 j < n_tiles: with compact = 0, writes the token rows of the
-//    BF16 output tile to tile n of a [32, H] BF16 tensor; with compact = 1 (one row), writes the two FP32
-//    chunks of row 0 to compact chunks chunk0 + 2 n + f (compact.hpp), and the core with zero_chunks > 0
-//    also writes the vector's zero padding chunks.
+//    BF16 output tile to tile n of a [32, H] BF16 tensor; with compact = 1, writes the two FP32 chunks of
+//    token row b to compact chunks chunk0 + b * stride + 2 n + f (compact.hpp), and the core with
+//    zero_chunks > 0 also writes every row's zero padding chunks.
 //
 // runtime args: [act_addr, out_addr, bank, j0, zero_chunk0, zero_chunks]
 
@@ -31,7 +31,8 @@ void kernel_main() {
     constexpr uint32_t cb_zero = get_compile_time_arg_val(8);
     constexpr uint32_t kt = get_compile_time_arg_val(9);  // act tiles per slot
     constexpr uint32_t rows = get_compile_time_arg_val(10);
-    constexpr auto act_args = TensorAccessorArgs<11>();
+    constexpr uint32_t stride = get_compile_time_arg_val(11);  // compact chunks per vector
+    constexpr auto act_args = TensorAccessorArgs<12>();
     constexpr uint32_t row_bytes = rows * ROW0_FACE_BYTES;
     constexpr auto out_args = TensorAccessorArgs<act_args.next_compile_time_args_offset()>();
 
@@ -59,8 +60,10 @@ void kernel_main() {
             for (uint32_t i = 0; i < COMPACT_CHUNK / 4; ++i) {
                 zp[i] = 0;
             }
-            for (uint32_t c = 0; c < zero_chunks; ++c) {
-                noc_async_write(z, compact_chunk_addr(s_out, zero_chunk0 + c), COMPACT_CHUNK);
+            for (uint32_t b = 0; b < rows; ++b) {
+                for (uint32_t c = 0; c < zero_chunks; ++c) {
+                    noc_async_write(z, compact_chunk_addr(s_out, zero_chunk0 + b * stride + c), COMPACT_CHUNK);
+                }
             }
         }
     }
@@ -71,8 +74,11 @@ void kernel_main() {
             const uint32_t src = get_read_ptr(cb_out);
             if constexpr (compact) {
                 using RF = RowForm<4>;
-                noc_async_write(src, compact_chunk_addr(s_out, chunk0 + 2 * n), COMPACT_CHUNK);
-                noc_async_write(src + RF::face_bytes, compact_chunk_addr(s_out, chunk0 + 2 * n + 1), COMPACT_CHUNK);
+                for (uint32_t b = 0; b < rows; ++b) {
+                    const uint32_t c0 = chunk0 + b * stride + 2 * n;
+                    noc_async_write(src + b * RF::chunk_bytes, compact_chunk_addr(s_out, c0), COMPACT_CHUNK);
+                    noc_async_write(src + RF::face_bytes + b * RF::chunk_bytes, compact_chunk_addr(s_out, c0 + 1), COMPACT_CHUNK);
+                }
             } else {
                 const uint64_t dst = s_out.get_noc_addr(n);
                 noc_async_write(src, dst, row_bytes);

@@ -199,9 +199,8 @@ def down_op(
     """out[col] = sum over slots e and K tiles k of act[e, k] . W_{ids[e]}[k, col] (kernels/expert_down_*).
 
     w: interleaved [*, slots' K, banks * bank_cols * 32]; bank b holds columns b + banks * j. out: a
-    [1, 1, rows, H] BF16 row-form tensor, or with compact_chunk0 (one row) a compact FP32 tensor
-    (boundary.py)."""
-    assert compact_chunk0 is None or rows == 1
+    [1, 1, rows, H] BF16 row-form tensor, or with compact_chunk0 a compact FP32 tensor (boundary.py) whose
+    vector for row b starts at chunk compact_chunk0 + b * (chunks per vector)."""
     cb_in0, cb_w, cb_rs, cb_zero, cb_out = 0, 1, 3, 4, 16
     tb = _tile_bytes(w.dtype)
     compact = compact_chunk0 is not None
@@ -214,7 +213,7 @@ def down_op(
         _cb(cores, cb_out, out_dtype, 2 * BF16_TILE if compact else BF16_TILE, cols),
     ]
     chunks = 2 * n_tiles
-    pad = -(-chunks // 64) * 64 - chunks
+    pad = -(-chunks // 64) * 64 - chunks  # chunks + pad: one compact vector
     reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
     for i, (core, bank, r, vc) in enumerate(assign):
         j0 = r * cols
@@ -222,7 +221,7 @@ def down_op(
         zero = pad if compact and i == 0 else 0
         writer_rt[core.x][core.y] = [act.buffer_address(), out.buffer_address(), bank, j0, (compact_chunk0 or 0) + chunks, zero]
     reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, _id_bytes(slots)] + _accessor(ids)
-    writer_ct = [cb_in0, cb_out, slots, cols, banks, n_tiles, int(compact), compact_chunk0 or 0, cb_zero, kt, rows]
+    writer_ct = [cb_in0, cb_out, slots, cols, banks, n_tiles, int(compact), compact_chunk0 or 0, cb_zero, kt, rows, chunks + pad]
     writer_ct += _accessor(act) + _accessor(out)
     compute_ct = [cb_in0, cb_w, cb_out, slots, kt, cols]
     program = ttnn.ProgramDescriptor(
@@ -274,8 +273,8 @@ class ExpertStream:
     def down(self, act, ids, w_down, out, compact_chunk0: int | None = None):
         """act: gate_up's output; w_down: the interleaved [1, E, 352, 3072] BFP4 weight.
 
-        out: a [1, 1, rows, H] BF16 row-form tensor (out_tensor), or with compact_chunk0 (one row) a
-        compact FP32 tensor (boundary.py) whose chunks compact_chunk0 .. receive the sum, padding chunks zeroed."""
+        out: a [1, 1, rows, H] BF16 row-form tensor (out_tensor), or with compact_chunk0 a compact FP32
+        tensor (boundary.py) whose vectors from chunk compact_chunk0 receive the rows' sums, padding zeroed."""
         return down_op(
             self.down_assign, self.down_cores, act, ids, w_down, out,
             slots=self.slots, kt=self.kt, cols=self.down_cols, banks=self.banks, bank_cols=self.bank_cols,
@@ -331,8 +330,8 @@ class MlpStream:
         )
 
     def down(self, h, w_down, out, compact_chunk0: int | None = 0, rows: int = 1):
-        """out = h @ W_down; w_down: [1152, 3072] BFP8 per chip. out: compact FP32 chunks compact_chunk0..
-        (one row), or with compact_chunk0=None a [1, 1, rows, H] BF16 row-form tensor."""
+        """out = h @ W_down; w_down: [1152, 3072] BFP8 per chip. out: compact FP32 vectors (one per row) from
+        chunk compact_chunk0, or with compact_chunk0=None a [1, 1, rows, H] BF16 row-form tensor."""
         return down_op(
             self.down_assign, self.down_cores, h, self.ids_down, w_down, out,
             slots=self.down_slots, kt=self.down_kt, cols=self.down_cols, banks=self.banks, bank_cols=self.bank_cols,
