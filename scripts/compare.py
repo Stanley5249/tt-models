@@ -83,6 +83,7 @@ def main():
     ap.add_argument(
         "--perturb", type=int, default=0, help="seed of a 2^-9 relative noise on the embeddings (0: none), to sample the noise floor"
     )
+    ap.add_argument("--precision", default="", help='Precision overrides, e.g. "expert_q4=1" (gemma4_tt/tt/model.py)')
     args = ap.parse_args()
     if args.batch < 1:
         ap.error("--batch must be at least 1")
@@ -98,12 +99,14 @@ def main():
     import ttnn
 
     from gemma4_tt.mesh import open_n300
-    from gemma4_tt.tt.model import Gemma4TT
+    from gemma4_tt.tt.model import Gemma4TT, Precision
 
     rows = []
     with open_n300(trace_region_size=200_000_000 if args.trace else 0) as mesh:
         t0 = time.time()
-        model = Gemma4TT(mesh, ckpt, cache_root=ROOT / "cache", max_batch=args.batch, num_layers=args.layers)
+        model = Gemma4TT(
+            mesh, ckpt, cache_root=ROOT / "cache", max_batch=args.batch, num_layers=args.layers, precision=Precision.parse(args.precision)
+        )
         print(f"model loaded in {time.time() - t0:.0f}s", flush=True)
         if args.perturb:
             plain = model.embed
