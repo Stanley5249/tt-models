@@ -86,6 +86,11 @@ pyrefly = "*"
 [tool.pixi.environments]
 tools = { features = ["tools"], no-default-feature = true }
 
+[tool.pytest.ini_options]
+addopts = "-m 'not device'"
+markers = ["device: needs the N300 (run with `pytest -m device`)"]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 140
 
@@ -101,8 +106,3 @@ ignore = ["B905", "E741"]
 
 [tool.ruff.format]
 line-ending = "lf"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = ["device: needs the N300 (run with `pytest -m device`)"]
-addopts = "-m 'not device'"
