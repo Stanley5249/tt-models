@@ -318,7 +318,8 @@ def down_op(
         bank_cols,
         tb,
         _id_bytes(slots),
-    ] + accessor(ids)
+        *accessor(ids),
+    ]
     writer_ct = [
         cb_in0,
         cb_out,

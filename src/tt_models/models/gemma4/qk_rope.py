@@ -36,7 +36,7 @@ class QkRope:
     def __init__(self, mesh, width: int, head_dim: int, eps: float, core_row: int = 6):
         self.mesh, self.width, self.head_dim, self.eps = mesh, width, head_dim, eps
         self.V = width // (CHUNK * CHUNKS_PER_TILE)
-        assert self.V * CHUNK * CHUNKS_PER_TILE == width
+        assert width == self.V * CHUNK * CHUNKS_PER_TILE
         self.cores = [ttnn.CoreCoord(i, core_row) for i in range(self.V)]
         self.partner = rope_partner(width, head_dim)
         self.sign = torch.where(
@@ -93,12 +93,19 @@ class QkRope:
             ]
             writer_rt[c.x][c.y] = [out.buffer_address(), t]
         head_chunks = self.head_dim // CHUNK
-        reader_ct = (
-            [cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, head_chunks, self.V]
-            + accessor(x)
-            + accessor(cs)
-            + accessor(w)
-        )
+        reader_ct = [
+            cb_x,
+            cb_xr,
+            cb_cs,
+            cb_w,
+            cb_a,
+            cb_b,
+            head_chunks,
+            self.V,
+            *accessor(x),
+            *accessor(cs),
+            *accessor(w),
+        ]
         compute_ct = [
             cb_x,
             cb_xr,
@@ -127,7 +134,7 @@ class QkRope:
             ttnn.KernelDescriptor(
                 kernel_source=str(KERNELS / "qk_rope_writer.cpp"),
                 core_ranges=crs,
-                compile_time_args=[cb_out] + accessor(out),
+                compile_time_args=[cb_out, *accessor(out)],
                 runtime_args=writer_rt,
                 config=dm(
                     processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1

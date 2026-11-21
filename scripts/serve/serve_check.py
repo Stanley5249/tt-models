@@ -244,7 +244,8 @@ def check_prefix(url):
         "/v1/chat/completions",
         {"model": MODEL, "messages": turn1, "max_tokens": 64, **GREEDY},
     )["choices"][0]["message"]
-    turn2 = turn1 + [
+    turn2 = [
+        *turn1,
         {"role": "assistant", "content": answer.get("content") or ""},
         {"role": "user", "content": "Now name one function that touches the KV cache."},
     ]

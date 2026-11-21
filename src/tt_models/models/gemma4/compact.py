@@ -28,8 +28,7 @@ def to_compact(v: torch.Tensor) -> torch.Tensor:
     c = chunks.reshape(
         n, tiles, 2, 2, 16, CHUNK
     )  # [n, tile, face_row_half, face_col_half, r, j]
-    out = c.permute(2, 4, 0, 1, 3, 5).reshape(TILE, n * tiles * TILE)
-    return out
+    return c.permute(2, 4, 0, 1, 3, 5).reshape(TILE, n * tiles * TILE)
 
 
 def from_compact(t: torch.Tensor, n: int, h: int) -> torch.Tensor:

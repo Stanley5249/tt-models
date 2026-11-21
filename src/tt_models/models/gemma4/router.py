@@ -101,9 +101,16 @@ class Router:
             ttnn.KernelDescriptor(
                 kernel_source=str(KERNELS / "router_reader.cpp"),
                 core_ranges=crs,
-                compile_time_args=[cb_x, cb_w, cb_j, self.kt, n, self.rows]
-                + accessor(x)
-                + accessor(w),
+                compile_time_args=[
+                    cb_x,
+                    cb_w,
+                    cb_j,
+                    self.kt,
+                    n,
+                    self.rows,
+                    *accessor(x),
+                    *accessor(w),
+                ],
                 runtime_args=reader_rt,
                 config=dm(
                     processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0
@@ -123,9 +130,9 @@ class Router:
                     sem_id,
                     self.rows,
                     max(32, 2 * self.rows * self.top_k),
-                ]
-                + accessor(ids)
-                + accessor(wts),
+                    *accessor(ids),
+                    *accessor(wts),
+                ],
                 runtime_args=writer_rt,
                 config=dm(
                     processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1

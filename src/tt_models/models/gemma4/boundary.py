@@ -105,9 +105,13 @@ class Boundary:
         kernel = ttnn.KernelDescriptor(
             kernel_source=str(KERNELS / "compact_pack.cpp"),
             core_ranges=crs,
-            compile_time_args=[cb_scr, rows, self.V * CHUNKS_PER_TILE]
-            + accessor(src)
-            + accessor(dst),
+            compile_time_args=[
+                cb_scr,
+                rows,
+                self.V * CHUNKS_PER_TILE,
+                *accessor(src),
+                *accessor(dst),
+            ],
             runtime_args=rt,
             config=ttnn.DataMovementConfigDescriptor(
                 processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1
@@ -184,13 +188,20 @@ class Boundary:
                 c1,
                 row,
             ] + [r.buffer_address() for r in outs]
-        reader_ct = (
-            [cb_g, cb_x, cb_w, cb_j, w_vectors * V, V, rows, vecs]
-            + accessor(g)
-            + accessor(x)
-            + accessor(w)
-        )
-        writer_ct = [cb_xo, cb_row0, V, len(outs)] + accessor(x_out) + accessor(outs[0])
+        reader_ct = [
+            cb_g,
+            cb_x,
+            cb_w,
+            cb_j,
+            w_vectors * V,
+            V,
+            rows,
+            vecs,
+            *accessor(g),
+            *accessor(x),
+            *accessor(w),
+        ]
+        writer_ct = [cb_xo, cb_row0, V, len(outs), *accessor(x_out), *accessor(outs[0])]
         compute_ct = [
             cb_g,
             cb_x,

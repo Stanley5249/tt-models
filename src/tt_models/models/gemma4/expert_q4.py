@@ -145,7 +145,8 @@ def gate_up_q4_op(
         0,
         0,
         id_bytes,
-    ] + accessor(ids)
+        *accessor(ids),
+    ]
     writer_ct = [
         cb_x,
         cb_sc,
@@ -274,7 +275,7 @@ def down_q4_op(
             ids.buffer_address(),
         ]
     id_bytes = _id_bytes(slots)
-    reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, id_bytes] + accessor(ids)
+    reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, id_bytes, *accessor(ids)]
     writer_ct = [
         cb_in0,
         cb_out,

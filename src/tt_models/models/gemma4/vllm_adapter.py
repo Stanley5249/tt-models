@@ -75,7 +75,7 @@ def sample(
     top_ks = [
         int(params.top_k[r]) if int(params.top_k[r]) > 0 else MAX_TOP_K for r in idx
     ]
-    k_max = min(max(top_ks + [1]), MAX_TOP_K)
+    k_max = min(max([*top_ks, 1]), MAX_TOP_K)
     vals, ids = logits.topk(k_max, dim=-1)  # sorted, largest first
     if softcap is not None:
         vals = softcap(vals.contiguous())

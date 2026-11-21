@@ -75,7 +75,7 @@ def main():
                             same += set(a) == set(bb)
                             total += 1
                             wdiff = max(
-                                wdiff, max(abs(wa[e] - wb[e]) for e in set(a) & set(bb))
+                                wdiff, *(abs(wa[e] - wb[e]) for e in set(a) & set(bb))
                             )
                             if c == 0:  # FP32 reference on the device's BF16 inputs
                                 v, i = (nh[b] @ wh).topk(k)
