@@ -4,7 +4,7 @@
   "ignorePatterns": [
     "**/*.toml",
     "pixi.lock",
-    "docs/experiments/*/**",
+    "docs/experiments/*/**/*.json",
     "scripts/accuracy/greedy-base.json"
   ]
 }

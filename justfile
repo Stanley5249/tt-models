@@ -1,8 +1,6 @@
-set minimum-version := "1.53.0"
-set unstable
-set lists
 set default-list
 set dotenv-load
+set positional-arguments
 
 # Fail on a stale pixi.lock instead of re-solving it.
 export PIXI_LOCKED := "true"
@@ -34,7 +32,7 @@ serve-gemma4 *args:
         --default-chat-template-kwargs '{"enable_thinking": true}' \
         --limit-mm-per-prompt '{"image": 0, "audio": 0, "video": 0}' \
         --additional-config '{"tt": {"trace_region_size": 200000000, "sample_on_device_mode": "decode_only", "decode_interleave_prefill_steps": 1}}' \
-        {{ args }}
+        "$@"
 
 # tt_transformers reads HF_MODEL, so keep it in sync with the model ID.
 [doc("Serve tt_transformers' Qwen3-8B; extra vllm serve flags pass through.")]
@@ -48,7 +46,7 @@ serve-qwen3-8b *args:
         --max-model-len 32768 \
         --enable-auto-tool-choice --tool-call-parser hermes \
         --reasoning-parser qwen3 \
-        {{ args }}
+        "$@"
 
 # Format every source file.
 [parallel]
@@ -60,11 +58,11 @@ fix: fmt
 
 # Lint Python, warnings as errors.
 lint *args:
-    ruff check --quiet {{ args }}
+    ruff check --quiet "$@"
 
 # Type-check Python against the runtime environment.
 typecheck *args:
-    pixi run pyrefly check {{ args }}
+    pixi run pyrefly check "$@"
 
 # Fast local gate: format checks, lint and type check.
 [parallel]
@@ -72,11 +70,11 @@ check: (_fmt-ruff "--check") (_fmt-tombi "--check") (_fmt-oxfmt "--check") (_fmt
 
 # Host tests; pytest flags pass through.
 test *args:
-    pixi run pytest {{ args }}
+    pixi run pytest "$@"
 
 # Device tests on the N300.
 test-device *args:
-    pixi run pytest -m device {{ args }}
+    pixi run pytest -m device "$@"
 
 # Everything CI would run: the gate, the lockfile and the host tests.
 ci: check lock-check test
@@ -86,13 +84,13 @@ lock-check:
     pixi lock --check --dry-run
 
 _fmt-ruff *args:
-    ruff format --quiet {{ args }}
+    ruff format --quiet "$@"
 
 _fmt-tombi *args:
-    tombi format --quiet {{ args }} .
+    tombi format --quiet "$@" .
 
 _fmt-oxfmt *args:
-    bunx oxfmt {{ args }}
+    bunx oxfmt "$@"
 
 _fmt-just *args:
-    just --fmt {{ args }}
+    just --fmt "$@"

@@ -10,7 +10,7 @@ The environment is a [pixi](https://pixi.sh) workspace, configured in `pyproject
     just serve-gemma4          # OpenAI-compatible server on 127.0.0.1:8000
     just serve-qwen3-8b        # tt_transformers' Qwen3-8B
 
-Everything reads the checkpoint from the Hugging Face cache and never downloads it, so fetch it once with `pixi run hf download google/gemma-4-26B-A4B-it-qat-q4_0-unquantized`. The device tests use random weights but still read its `config.json`.
+The Gemma 4 code reads its checkpoint from the Hugging Face cache and never downloads it, so fetch it once with `pixi run hf download google/gemma-4-26B-A4B-it-qat-q4_0-unquantized`. The device tests use random weights but still read its `config.json`. `serve-qwen3-8b` loads through vLLM, which downloads Qwen3-8B on first use.
 
 The first start converts the checkpoint into a ttnn weight cache under `cache/` and builds the prefill programs, which takes a while; later starts load the cache.
 
