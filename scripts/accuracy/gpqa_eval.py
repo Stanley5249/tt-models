@@ -1,12 +1,19 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#   # upstream's QB2 tests/requirements-eval.txt
+#   "lm-eval[r1_evals] @ git+https://github.com/tstescoTT/lm-evaluation-harness.git@321e3bb68cb750a58c76606ab57832533302be73",
+#   "datasets==5.0.1",
+#   "httpx==0.28.1",
+# ]
+# ///
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 # Adapted from tenstorrent/tt-metal@d1a102793682817a4c12c572c44e6ad0277b5fe0
 # models/demos/gemma4_26b_a4b_qb2/tests/benchmark.py.
 """GPQA Diamond accuracy of a running server, as upstream's QB2 release check scores it.
 
-    uv run --no-project --with-requirements \\
-        scripts/accuracy/gpqa_eval.requirements.txt \\
-        python scripts/accuracy/gpqa_eval.py --count 10 --out artifacts/gpqa/<label>
+    pixi run --script scripts/accuracy/gpqa_eval.py --count 10 --out artifacts/gpqa/<label>
 
 Needs a running `just serve-gemma4` and Hugging Face access to the gated
 Idavidrein/gpqa dataset. Port of tt-metal's
@@ -31,7 +38,7 @@ SEED = 42
 
 
 def load_gpqa(count: int):
-    # These packages are installed by gpqa_eval.requirements.txt.
+    # The script header installs these; the project environment does not.
     import datasets  # pyrefly: ignore [missing-import]
     from lm_eval.api.task import ConfigurableTask  # pyrefly: ignore [missing-import]
     from lm_eval.tasks import TaskManager  # pyrefly: ignore [missing-import]
