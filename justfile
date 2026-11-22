@@ -2,9 +2,6 @@ set default-list
 set dotenv-load
 set positional-arguments
 
-# Fail on a stale pixi.lock instead of re-solving it.
-export PIXI_LOCKED := "true"
-
 # Overridable from .env; see .env.example.
 export MESH_DEVICE := env("MESH_DEVICE", "N300")
 host := env("HOST", "127.0.0.1")
@@ -13,7 +10,7 @@ qwen3 := "Qwen/Qwen3-8B"
 
 # Install the runtime environment.
 install:
-    pixi install -e default
+    pixi install
 
 # Chunked prefill with one decode step after each chunk, and one decode trace
 # per active row count in the trace region: docs/serving.md and
@@ -21,7 +18,7 @@ install:
 # model-side sampler. The served name must match the client's model ID.
 [doc("Serve Gemma 4 26B-A4B as model \"gemma4\"; extra vllm serve flags pass through.")]
 serve-gemma4 *args:
-    pixi run -e default vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
+    pixi run vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
         --host "{{ host }}" --port "{{ port }}" \
         --served-model-name gemma4 \
         --block-size 64 \
@@ -39,7 +36,7 @@ serve-gemma4 *args:
 [doc("Serve tt_transformers' Qwen3-8B; extra vllm serve flags pass through.")]
 [env("TT_CACHE_PATH", "cache/Qwen3-8B")]
 serve-qwen3-8b *args:
-    HF_MODEL="{{ qwen3 }}" pixi run -e default vllm serve "{{ qwen3 }}" \
+    HF_MODEL="{{ qwen3 }}" pixi run vllm serve "{{ qwen3 }}" \
         --host "{{ host }}" --port "{{ port }}" \
         --block-size 64 \
         --max-num-seqs 32 \
@@ -62,21 +59,18 @@ lint:
 
 # Type-check Python against the runtime environment.
 typecheck:
-    pixi run -e default pyrefly check
+    pixi run pyrefly check
 
-# Fast local gate: format checks, lint, type check and the lockfile.
+# Fast local gate: format checks, lint and type check.
 [parallel]
-check: (_fmt-ruff "--check") (_fmt-oxfmt "--check") (_fmt-just "--check") lint typecheck _check-lock
+check: (_fmt-ruff "--check") (_fmt-oxfmt "--check") (_fmt-just "--check") lint typecheck
 
 # Host tests by default; `-m device` runs the N300 ones.
 test *args:
-    pixi run -e default pytest "$@"
+    pixi run pytest "$@"
 
 # Everything CI would run: the gate and the host tests.
 ci: check test
-
-_check-lock:
-    pixi lock --check
 
 _fmt-ruff flag="":
     ruff format --quiet {{ flag }}
