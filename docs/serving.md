@@ -74,7 +74,7 @@ Run what the change can affect, from the repository root. `py` stands for `pixi 
 | Standalone speed | `py scripts/bench/decode.py --batch <B> --steps 128 --trace`, `py scripts/bench/prefill.py` |
 | Serving lifecycle | `py scripts/serve/serve_check.py` against a running server |
 | Preemption | `GEMMA4_KV_POOL_GIB=0.2 just serve-gemma4 --max-model-len 4096`, then `py scripts/serve/serve_check.py preempt` |
-| Serving speed | `pixi run bash scripts/serve/bench_tis.sh <label> c1-128-128-n8 c4-128-128-n16` |
+| Serving speed | `pixi run python scripts/serve/bench_tis.py <label> c1-128-128-n8 c4-128-128-n16` |
 
 All kernel checks, one process each:
 

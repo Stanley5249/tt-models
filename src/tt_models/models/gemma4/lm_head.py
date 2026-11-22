@@ -102,8 +102,8 @@ class LmHead:
         """Compute and read the final logits."""
         rows = x.shape[2]
         if rows > TILE:
-            # ttnn.linear segfaults on the host for M > 32 against the 131072-wide
-            # LM head shard (ttnn 0.81), so multi-row logits go one tile at a time.
+            # ttnn.linear segfaults on the host for M > 32 against the 131072-wide LM
+            # head shard (seen on ttnn 0.81), so multi-row logits go one tile at a time.
             parts = []
             for start in range(0, rows, TILE):
                 part = ttnn.slice(

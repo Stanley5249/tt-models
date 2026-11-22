@@ -141,7 +141,7 @@ def main():
         # The caller supplies a dtype, but dense_mode selects the emulation.
         def roundtrip_head(
             w: torch.Tensor,
-            ttnn_dtype: ttnn.DataType,  # noqa: ARG001
+            ttnn_dtype: ttnn.DataType,  # noqa: ARG001 - same signature as the other roundtrips
         ) -> torch.Tensor:
             return dense(w.T.contiguous(), dense_mode).T.contiguous()
 

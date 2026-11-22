@@ -4,8 +4,6 @@ set positional-arguments
 
 # Fail on a stale pixi.lock instead of re-solving it.
 export PIXI_LOCKED := "true"
-# Select the runtime even when another environment is active.
-runtime_cmd := "pixi run -e default"
 
 # Overridable from .env; see .env.example.
 export MESH_DEVICE := env("MESH_DEVICE", "N300")
@@ -23,7 +21,7 @@ install:
 # model-side sampler. The served name must match the client's model ID.
 [doc("Serve Gemma 4 26B-A4B as model \"gemma4\"; extra vllm serve flags pass through.")]
 serve-gemma4 *args:
-    {{ runtime_cmd }} vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
+    pixi run -e default vllm serve google/gemma-4-26B-A4B-it-qat-q4_0-unquantized \
         --host "{{ host }}" --port "{{ port }}" \
         --served-model-name gemma4 \
         --block-size 64 \
@@ -41,7 +39,7 @@ serve-gemma4 *args:
 [doc("Serve tt_transformers' Qwen3-8B; extra vllm serve flags pass through.")]
 [env("TT_CACHE_PATH", "cache/Qwen3-8B")]
 serve-qwen3-8b *args:
-    HF_MODEL="{{ qwen3 }}" {{ runtime_cmd }} vllm serve "{{ qwen3 }}" \
+    HF_MODEL="{{ qwen3 }}" pixi run -e default vllm serve "{{ qwen3 }}" \
         --host "{{ host }}" --port "{{ port }}" \
         --block-size 64 \
         --max-num-seqs 32 \
@@ -59,33 +57,32 @@ fix: fmt
     ruff check --fix --quiet
 
 # Lint Python, warnings as errors.
-lint *args:
-    ruff check --quiet "$@"
+lint:
+    ruff check --quiet
 
 # Type-check Python against the runtime environment.
-typecheck *args:
-    {{ runtime_cmd }} pyrefly check "$@"
+typecheck:
+    pixi run -e default pyrefly check
 
-# Fast local gate: format checks, lint and type check.
+# Fast local gate: format checks, lint, type check and the lockfile.
 [parallel]
-check: (_fmt-ruff "--check") (_fmt-oxfmt "--check") (_fmt-just "--check") lint typecheck
+check: (_fmt-ruff "--check") (_fmt-oxfmt "--check") (_fmt-just "--check") lint typecheck _check-lock
 
 # Host tests by default; `-m device` runs the N300 ones.
 test *args:
-    {{ runtime_cmd }} pytest "$@"
+    pixi run -e default pytest "$@"
 
-# Everything CI would run: the gate, the lockfile and the host tests.
-ci: check lock-check test
+# Everything CI would run: the gate and the host tests.
+ci: check test
 
-# Fail when pixi.lock does not match pyproject.toml.
-lock-check:
-    pixi lock --check --dry-run
+_check-lock:
+    pixi lock --check
 
-_fmt-ruff *args:
-    ruff format --quiet "$@"
+_fmt-ruff flag="":
+    ruff format --quiet {{ flag }}
 
-_fmt-oxfmt *args:
-    bunx oxfmt@latest "$@"
+_fmt-oxfmt flag="":
+    bunx oxfmt@latest {{ flag }}
 
-_fmt-just *args:
-    just --fmt "$@"
+_fmt-just flag="":
+    just --fmt {{ flag }}
