@@ -13,7 +13,7 @@
 # models/demos/gemma4_26b_a4b_qb2/tests/benchmark.py.
 """GPQA Diamond accuracy of a running server, as upstream's QB2 release check scores it.
 
-    pixi run --script scripts/accuracy/gpqa_eval.py \\
+    pixi run --script scripts/accuracy/gpqa_eval.py -- \\
         --count 10 --out artifacts/gpqa/<label>
 
 Needs a running `just serve-gemma4` and Hugging Face access to the gated
