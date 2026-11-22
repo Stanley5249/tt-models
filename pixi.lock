@@ -51,7 +51,7 @@ environments:
       - pypi: direct+https://download.pytorch.org/whl/cpu/torch-2.11.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: direct+https://download.pytorch.org/whl/cpu/torchvision-0.26.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: direct+https://github.com/Stanley5249/tt-metal/releases/download/v0.82.0-conda.1/ttnn-0.82.0%2Bconda.1-cp312-cp312-linux_x86_64.whl
-      - pypi: git+https://github.com/Stanley5249/tt-scope.git?tag=v0.5.0#8039751089a6162d48cf38d02eae3044d8be1c07
+      - pypi: git+https://github.com/Stanley5249/tt-scope.git?tag=v0.5.0#85cf8bb9eea4e4677b27fa777d030292c0698a44
       - pypi: git+https://github.com/tenstorrent/vllm-tt-plugin.git?rev=0c12fd04f7a9b8d96169f5df4f0928e544e12fa9#0c12fd04f7a9b8d96169f5df4f0928e544e12fa9
       - pypi: git+https://github.com/vllm-project/vllm.git?rev=v0.32.0#5df63a7203cdb9328d824a27b682e77c7b9928be
       - pypi: https://files.pythonhosted.org/packages/02/be/5d2d47b1fb58943194fb59dcf222f7c4e35122ec0ffe8c36e18b5d728f0b/tblib-3.2.2-py3-none-any.whl
@@ -739,7 +739,7 @@ packages:
   - seaborn>=0.13.2
   - ml-dtypes
   requires_python: '>=3.10'
-- pypi: git+https://github.com/Stanley5249/tt-scope.git?tag=v0.5.0#8039751089a6162d48cf38d02eae3044d8be1c07
+- pypi: git+https://github.com/Stanley5249/tt-scope.git?tag=v0.5.0#85cf8bb9eea4e4677b27fa777d030292c0698a44
   name: tt-scope
   version: 0.5.0
   requires_dist:
