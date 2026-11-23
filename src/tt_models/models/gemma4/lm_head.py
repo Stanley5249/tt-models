@@ -21,7 +21,7 @@ import ttnn
 from tt_models.common.config import DRAM, TILE
 from tt_models.common.norm import rms_norm
 from tt_models.common.weights import WeightLoader, norm_weight
-from tt_models.models.gemma4.expert_stream import bankline_cores
+from tt_models.models.gemma4.expert_stream import bankline_cores, run_on_chips
 from tt_models.models.gemma4.generic_op import (
     BF16_TILE,
     FP32_TILE,
@@ -199,15 +199,9 @@ class LmHead:
             self.mesh,
             DRAM,
         )
-        program = ttnn.MeshProgramDescriptor(
-            {
-                ttnn.MeshCoordinateRange(
-                    ttnn.MeshCoordinate(0, c), ttnn.MeshCoordinate(0, c)
-                ): self._program(c, h, out)
-                for c in range(self.tp)
-            }
+        run_on_chips(
+            [(self._program(c, h, out), [self.weight, h, out]) for c in range(self.tp)]
         )
-        ttnn.generic_op([self.weight, h, out], program)
         if not normed:
             h.deallocate(True)
         return out

@@ -56,13 +56,17 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
+# One chip's stream cores: per-core assignment tuples and their range set.
+type Placement = tuple[list[tuple[ttnn.CoreCoord, int, int, int]], ttnn.CoreRangeSet]
+
+
 def bankline_cores(
     mesh: ttnn.MeshDevice,
     banks: Sequence[int],
     per_bank: int,
     exclude: Sequence[ttnn.CoreCoord] = (),
     chip: ttnn.MeshCoordinate | None = None,
-) -> tuple[list[tuple[ttnn.CoreCoord, int, int, int]], ttnn.CoreRangeSet]:
+) -> Placement:
     """Choose logical cores near each DRAM bank's optimal reader.
 
     per_bank logical cores per DRAM bank, nearest (Manhattan) to the bank's optimal
@@ -177,6 +181,20 @@ def run(
     return ttnn.generic_op(
         tensors, ttnn.merge_program_descriptors([p for p, _ in parts])
     )
+
+
+def run_on_chips(parts: Sequence[ProgramParts]) -> ttnn.Tensor:
+    """Run one program per chip (part c on mesh column c) over the same tensors.
+
+    The chips are harvested differently, so each needs its own cores next to its DRAM
+    banks; a program placed from chip 0's map ran slower on chip 1.
+    """
+    chip = ttnn.MeshCoordinate
+    programs = {
+        ttnn.MeshCoordinateRange(chip(0, c), chip(0, c)): program
+        for c, (program, _) in enumerate(parts)
+    }
+    return ttnn.generic_op(parts[0][1], ttnn.MeshProgramDescriptor(programs))
 
 
 def row_bytes(entries: int) -> int:
@@ -325,7 +343,8 @@ def down_op(
     rows: int = 1,
     compact_chunk0: int | None = None,
     fidelity: ttnn.MathFidelity = ttnn.MathFidelity.LoFi,
-) -> ttnn.Tensor:
+    build: bool = False,
+) -> ProgramParts | ttnn.Tensor:
     """Build the streamed expert down operation.
 
     out[col] = sum over slots e and K tiles k of act[e, k] . W_{ids[e]}[k, col]
@@ -418,7 +437,8 @@ def down_op(
         semaphores=[],
         cbs=cbs,
     )
-    return ttnn.generic_op([w, act, ids, out], program)
+    ios = [w, act, ids, out]
+    return (program, ios) if build else ttnn.generic_op(ios, program)
 
 
 class ExpertStream:
@@ -462,13 +482,28 @@ class ExpertStream:
         self.gu_slots = -(-self.slots // gate_up_readers)  # the most one core takes
         self.down_cols = self.bank_cols // down_readers
         assert self.down_cols <= 4, "fp32 dest holds 4 tiles"
-        gu, self.gu_cores = bankline_cores(
-            mesh, list(range(self.pairs)), gate_up_readers
-        )
-        self.gu_assign = [(c, b, r, v, r, 0, b) for c, b, r, v in gu]
-        self.down_assign, self.down_cores = bankline_cores(
-            mesh, list(range(self.banks)), down_readers
-        )
+        # (assignment, cores) per chip, each next to its own DRAM banks
+        self.gu_chips: list[
+            tuple[
+                list[tuple[ttnn.CoreCoord, int, int, int, int, int, int]],
+                ttnn.CoreRangeSet,
+            ]
+        ] = []
+        self.down_chips: list[Placement] = []
+        for i in range(mesh.get_num_devices()):
+            chip = ttnn.MeshCoordinate(0, i)
+            gu, gu_cores = bankline_cores(
+                mesh, list(range(self.pairs)), gate_up_readers, chip=chip
+            )
+            self.gu_chips.append(
+                ([(c, b, r, v, r, 0, b) for c, b, r, v in gu], gu_cores)
+            )
+            self.down_chips.append(
+                bankline_cores(mesh, list(range(self.banks)), down_readers, chip=chip)
+            )
+        # chip 0's placement, for expert_q4's ops
+        self.gu_assign, self.gu_cores = self.gu_chips[0]
+        self.down_assign, self.down_cores = self.down_chips[0]
         self.act_mem = ttnn.L1_MEMORY_CONFIG
 
     def act_tensor(self) -> ttnn.Tensor:
@@ -510,22 +545,28 @@ class ExpertStream:
         scale: row-major BF16 [1, E] per_expert_scale; w_gate_up: the interleaved [1, E,
         H, 2 * pad] BFP4 weight.
         """
-        return gate_up_op(
-            self.gu_assign,
-            self.gu_cores,
-            x,
-            ids,
-            weights,
-            scale,
-            w_gate_up,
-            act,
-            kx=self.kx,
-            slots=self.slots,
-            readers=self.gate_up_readers,
-            pairs=self.pairs,
-            n_scale=self.n_experts,
-            rows=self.rows,
-            row_weights=True,
+        return run_on_chips(
+            [
+                gate_up_op(
+                    assign,
+                    cores,
+                    x,
+                    ids,
+                    weights,
+                    scale,
+                    w_gate_up,
+                    act,
+                    kx=self.kx,
+                    slots=self.slots,
+                    readers=self.gate_up_readers,
+                    pairs=self.pairs,
+                    n_scale=self.n_experts,
+                    rows=self.rows,
+                    row_weights=True,
+                    build=True,
+                )
+                for assign, cores in self.gu_chips
+            ]
         )
 
     def down(
@@ -543,21 +584,27 @@ class ExpertStream:
         tensor (boundary.py) whose vectors from chunk compact_chunk0 receive the rows'
         sums, padding zeroed.
         """
-        return down_op(
-            self.down_assign,
-            self.down_cores,
-            act,
-            ids,
-            w_down,
-            out,
-            slots=self.slots,
-            kt=self.kt,
-            cols=self.down_cols,
-            banks=self.banks,
-            bank_cols=self.bank_cols,
-            n_tiles=self.n_tiles,
-            rows=self.rows,
-            compact_chunk0=compact_chunk0,
+        return run_on_chips(
+            [
+                down_op(
+                    assign,
+                    cores,
+                    act,
+                    ids,
+                    w_down,
+                    out,
+                    slots=self.slots,
+                    kt=self.kt,
+                    cols=self.down_cols,
+                    banks=self.banks,
+                    bank_cols=self.bank_cols,
+                    n_tiles=self.n_tiles,
+                    rows=self.rows,
+                    compact_chunk0=compact_chunk0,
+                    build=True,
+                )
+                for assign, cores in self.down_chips
+            ]
         )
 
 
