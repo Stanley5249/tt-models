@@ -56,19 +56,20 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-def _bankline_cores(
+def bankline_cores(
     mesh: ttnn.MeshDevice,
     banks: Sequence[int],
     per_bank: int,
     exclude: Sequence[ttnn.CoreCoord] = (),
+    chip: ttnn.MeshCoordinate | None = None,
 ) -> tuple[list[tuple[ttnn.CoreCoord, int, int, int]], ttnn.CoreRangeSet]:
     """Choose logical cores near each DRAM bank's optimal reader.
 
     per_bank logical cores per DRAM bank, nearest (Manhattan) to the bank's optimal
-    NOC0 reader.
+    NOC0 reader on `chip` (default chip 0; the chips are harvested differently).
     """
     opt = mesh.get_optimal_dram_bank_to_logical_worker_assignment(
-        ttnn.NOC.NOC_0, ttnn.MeshCoordinate(0, 0)
+        ttnn.NOC.NOC_0, chip or ttnn.MeshCoordinate(0, 0)
     )
     grid = mesh.compute_with_storage_grid_size()
     free = {(x, y) for x in range(grid.x) for y in range(grid.y)} - {
@@ -461,11 +462,11 @@ class ExpertStream:
         self.gu_slots = -(-self.slots // gate_up_readers)  # the most one core takes
         self.down_cols = self.bank_cols // down_readers
         assert self.down_cols <= 4, "fp32 dest holds 4 tiles"
-        gu, self.gu_cores = _bankline_cores(
+        gu, self.gu_cores = bankline_cores(
             mesh, list(range(self.pairs)), gate_up_readers
         )
         self.gu_assign = [(c, b, r, v, r, 0, b) for c, b, r, v in gu]
-        self.down_assign, self.down_cores = _bankline_cores(
+        self.down_assign, self.down_cores = bankline_cores(
             mesh, list(range(self.banks)), down_readers
         )
         self.act_mem = ttnn.L1_MEMORY_CONFIG
@@ -596,7 +597,7 @@ class MlpStream:
         self.per_bank = half // banks  # 3 pairs per bank
         self.row_tiles = 2 * self.per_bank  # 6 tiles per bank per K row
         self.h_tiles = half
-        gu, self.gu_cores = _bankline_cores(
+        gu, self.gu_cores = bankline_cores(
             mesh, list(range(banks)), self.per_bank, exclude=exclude
         )
         # pair j of bank b: gate column b + 12 j -> h tile b + 12 j
@@ -610,7 +611,7 @@ class MlpStream:
             half // down_slots,
         )  # 4 slots of 9 K tiles
         self.down_cols = self.bank_cols // down_readers
-        self.down_assign, self.down_cores = _bankline_cores(
+        self.down_assign, self.down_cores = bankline_cores(
             mesh, list(range(banks)), down_readers
         )
         # ids rows as the router's: the slots, then their count

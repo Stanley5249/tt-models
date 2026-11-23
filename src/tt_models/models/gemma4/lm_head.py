@@ -1,7 +1,13 @@
-"""The tied LM head split across chips and DRAM banks.
+"""The tied LM head, split over the vocabulary across chips.
 
-The tied LM head: the embedding table as a DRAM-sharded matmul split over the
-vocabulary.
+Each chip streams its half of the tied embedding (BFP8, 131072 columns) with
+generic-op kernels (kernels/lm_head_*), as the expert streams do: the columns
+are padded to a multiple of the 12 DRAM banks, so bank b holds tile columns
+b + 12 j of every K row, and 3 cores next to each bank read its columns in
+groups of 3 tiles, accumulate all 88 K tiles in FP32 dest and write the FP32
+logits straight into row-major rows. The ttnn version (16 DRAM-sharded matmuls,
+an untilize each and a concat) placed its readers from chip 0's DRAM map, which
+cost chip 1 0.5 ms per step.
 """
 
 from __future__ import annotations
@@ -12,21 +18,29 @@ import numpy as np
 import torch
 import ttnn
 
-from tt_models.common.config import DRAM, HIFI2, TILE, dram_sharded, width_sharded_l1
+from tt_models.common.config import DRAM, TILE
 from tt_models.common.norm import rms_norm
 from tt_models.common.weights import WeightLoader, norm_weight
+from tt_models.models.gemma4.expert_stream import bankline_cores
+from tt_models.models.gemma4.generic_op import (
+    BF16_TILE,
+    FP32_TILE,
+    KERNELS,
+    accessor,
+    cb,
+    tile_bytes,
+)
 
 if TYPE_CHECKING:
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
     from tt_models.models.gemma4.checkpoint import WeightSource
 
-# The LM head is read as LM_SPLITS DRAM-sharded matmuls per chip: 2.5 -> 1.37 ms per
-# decode step against one interleaved matmul
-# (docs/experiments/2026-11-19-decode-round-2.md).
-# A single DRAM-sharded matmul over all 65536 columns does not fit L1.
-LM_SPLITS = 16
-LM_CORES = 8
+# Cores per DRAM bank by token rows: two read faster, but past a few rows their 64-byte
+# logit writes slow the reads (1 row: 1.68 against 1.79 ms; 16 rows: 1.92 against 1.78).
+READERS = {rows: 2 if rows <= 4 else 1 for rows in range(1, 33)}
+GROUP = 3  # output tiles per FP32 dest pass
+BLOCK_K = 11  # K rows per streamed block
 
 
 class LmHead:
@@ -40,7 +54,7 @@ class LmHead:
         cfg: Gemma4TextConfig,
         dtype: ttnn.DataType,
     ) -> None:
-        """Load the sharded embedding weight and final normalization weight."""
+        """Load the embedding weight in the bank layout and the final norm."""
         self.mesh = mesh
         self.cfg = cfg
         self.tp = mesh.get_num_devices()
@@ -51,59 +65,111 @@ class LmHead:
             lambda: norm_weight(ckpt.get("norm.weight")),
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
-        self.weights = self._weights(loader, ckpt, dtype)
-        self.lm_in = width_sharded_l1(self.hidden, LM_CORES)
-
-    def _weights(
-        self, loader: WeightLoader, ckpt: WeightSource, dtype: ttnn.DataType
-    ) -> list[ttnn.Tensor]:
-        """Load the tied embedding weights in DRAM-sharded column blocks.
-
-        LM_SPLITS DRAM-sharded column blocks per chip; chip c split i holds vocab
-        columns c * V/tp + i * width onwards, so concatenating the splits on each chip
-        and then the chips gives the vocabulary order.
-        """
+        self.banks = banks = mesh.dram_grid_size().x
+        self.n_tiles = self.vocab // self.tp // TILE  # 4096 real column tiles per chip
+        per_core = 2 * GROUP  # every READERS count divides the bank's columns
+        self.bank_cols = -(-self.n_tiles // banks // per_core) * per_core  # 342
+        width = banks * self.bank_cols * TILE
         per_chip = self.vocab // self.tp
-        width = per_chip // LM_SPLITS
-        mem = dram_sharded(self.mesh, self.hidden, width)
-        self.lm_cfg = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
-            in0_block_w=self.hidden // TILE // LM_CORES,
-            per_core_M=1,
-            per_core_N=width // TILE // LM_CORES,
-            fused_activation=None,
-        )
-        self.lm_out = width_sharded_l1(width, LM_CORES)
-        table: dict[str, torch.Tensor] = {}
 
-        def split(i: int) -> torch.Tensor:
-            if "t" not in table:
-                table["t"] = ckpt.get("embed_tokens.weight").T  # [H, V]
-            t = table["t"]
-            cols = [
-                t[:, c * per_chip + i * width : c * per_chip + (i + 1) * width]
+        def weight() -> torch.Tensor:
+            t = ckpt.get("embed_tokens.weight").T  # [H, V]
+            pad = t.new_zeros(self.hidden, width - per_chip)
+            parts = [
+                torch.cat([t[:, c * per_chip : (c + 1) * per_chip], pad], -1)
                 for c in range(self.tp)
             ]
-            return torch.cat(cols, -1).contiguous()[None, None]
+            return torch.cat(parts, -1).contiguous()[None, None]
 
-        heads = [
-            loader.put(
-                f"lm_head_ds{LM_SPLITS}_{i}",
-                lambda i=i: split(i),
-                dtype,
-                shard_dim=-1,
-                memory_config=mem,
+        self.weight = loader.put(f"lm_head_banks{width}", weight, dtype, shard_dim=-1)
+        # Each chip's cores sit next to its own DRAM banks.
+        self.placement = {
+            (c, readers): bankline_cores(
+                mesh, list(range(banks)), readers, chip=ttnn.MeshCoordinate(0, c)
             )
-            for i in range(LM_SPLITS)
+            for c in range(self.tp)
+            for readers in set(READERS.values())
+        }
+
+    def _program(
+        self, chip: int, x: ttnn.Tensor, out: ttnn.Tensor
+    ) -> ttnn.ProgramDescriptor:
+        readers = READERS[x.shape[2]]
+        assign, cores = self.placement[chip, readers]
+        cb_in0, cb_w, cb_out = 0, 1, 16
+        kt = self.hidden // TILE
+        tb = tile_bytes(self.weight.dtype)
+        cbs = [
+            cb(cores, cb_in0, ttnn.bfloat16, BF16_TILE, kt),
+            cb(cores, cb_w, self.weight.dtype, tb, 3 * BLOCK_K * GROUP),
+            cb(cores, cb_out, ttnn.float32, FP32_TILE, 2 * GROUP),
         ]
-        table.clear()
-        return heads
+        groups = self.bank_cols // readers // GROUP
+        reader_rt, writer_rt, compute_rt = (
+            ttnn.RuntimeArgs(),
+            ttnn.RuntimeArgs(),
+            ttnn.RuntimeArgs(),
+        )
+        for core, bank, r, vc in assign:
+            j0 = r * groups * GROUP
+            reader_rt[core.x][core.y] = [
+                self.weight.buffer_address(),
+                bank,
+                vc,
+                j0,
+                groups,
+            ]
+            writer_rt[core.x][core.y] = [
+                x.buffer_address(),
+                out.buffer_address(),
+                bank,
+                j0,
+                groups,
+            ]
+            compute_rt[core.x][core.y] = [groups]
+        reader_ct = [cb_w, kt, self.bank_cols, tb, BLOCK_K, GROUP]
+        writer_ct = [cb_in0, cb_out, kt, x.shape[2], GROUP, self.banks, self.n_tiles]
+        writer_ct += accessor(x) + accessor(out)
+        compute_ct = [cb_in0, cb_w, cb_out, kt, BLOCK_K, GROUP]
+        dm = ttnn.DataMovementConfigDescriptor
+        kernels = [
+            ttnn.KernelDescriptor(
+                kernel_source=str(KERNELS / "lm_head_reader.cpp"),
+                core_ranges=cores,
+                compile_time_args=reader_ct,
+                runtime_args=reader_rt,
+                config=dm(
+                    processor=ttnn.DataMovementProcessor.RISCV_1, noc=ttnn.NOC.NOC_0
+                ),
+            ),
+            ttnn.KernelDescriptor(
+                kernel_source=str(KERNELS / "lm_head_writer.cpp"),
+                core_ranges=cores,
+                compile_time_args=writer_ct,
+                runtime_args=writer_rt,
+                config=dm(
+                    processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1
+                ),
+            ),
+            ttnn.KernelDescriptor(
+                kernel_source=str(KERNELS / "lm_head_compute.cpp"),
+                core_ranges=cores,
+                compile_time_args=compute_ct,
+                runtime_args=compute_rt,
+                config=ttnn.ComputeConfigDescriptor(
+                    math_fidelity=ttnn.MathFidelity.HiFi2,
+                    fp32_dest_acc_en=True,
+                    math_approx_mode=False,
+                ),
+            ),
+        ]
+        return ttnn.ProgramDescriptor(kernels=kernels, semaphores=[], cbs=cbs)
 
     def logits(self, x: ttnn.Tensor) -> torch.Tensor:
         """Compute and read the final logits."""
         rows = x.shape[2]
         if rows > TILE:
-            # ttnn.linear segfaults on the host for M > 32 against the 131072-wide LM
-            # head shard (seen on ttnn 0.81), so multi-row logits go one tile at a time.
+            # The stream op takes one tile of rows; longer inputs go a tile at a time.
             parts = []
             for start in range(0, rows, TILE):
                 part = ttnn.slice(
@@ -121,39 +187,29 @@ class LmHead:
     def device(self, x: ttnn.Tensor, *, normed: bool = False) -> ttnn.Tensor:
         """Compute raw FP32 logits on the device.
 
-        Raw fp32 logits, row-major; the host applies the final softcap
-        (three fp32 ops over the tile-padded [32, 65536] took 0.63 ms here).
+        x: row form [1, 1, rows <= 32, H]. Returns raw FP32 logits, row-major [1, 1,
+        rows, V / tp] per chip; the host applies the final softcap.
         """
         h = x if normed else rms_norm(x, self.final_norm, self.cfg.rms_norm_eps)
-        hs = ttnn.to_memory_config(h, self.lm_in)
+        rows = x.shape[2]
+        out = ttnn.allocate_tensor_on_device(
+            ttnn.Shape([1, 1, rows, self.vocab // self.tp]),
+            ttnn.float32,
+            ttnn.ROW_MAJOR_LAYOUT,
+            self.mesh,
+            DRAM,
+        )
+        program = ttnn.MeshProgramDescriptor(
+            {
+                ttnn.MeshCoordinateRange(
+                    ttnn.MeshCoordinate(0, c), ttnn.MeshCoordinate(0, c)
+                ): self._program(c, h, out)
+                for c in range(self.tp)
+            }
+        )
+        ttnn.generic_op([self.weight, h, out], program)
         if not normed:
             h.deallocate(True)
-        rows = x.shape[2]
-        parts = []
-        for w in self.weights:
-            o = ttnn.linear(
-                hs,
-                w,
-                program_config=self.lm_cfg,
-                compute_kernel_config=HIFI2,
-                memory_config=self.lm_out,
-                dtype=ttnn.float32,
-            )
-            # Untilizing straight from L1 drops the tile padding, so the host reads
-            # B rows instead of 32 (9 ms -> under 1 ms for 131072 fp32 logits), and
-            # the row-major concat below only moves those rows.
-            parts.append(
-                ttnn.untilize_with_unpadding(
-                    o,
-                    output_tensor_end=[0, 0, rows - 1, o.shape[3] - 1],
-                    memory_config=DRAM,
-                )
-            )
-            o.deallocate(True)
-        hs.deallocate(True)
-        out = ttnn.concat(parts, dim=-1)
-        for o in parts:
-            o.deallocate(True)
         return out
 
     def read(self, out: ttnn.Tensor, *, softcap: bool = True) -> torch.Tensor:
