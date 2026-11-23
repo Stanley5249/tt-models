@@ -552,7 +552,7 @@ class Attention:
             program_config=ttnn.SDPAProgramConfig(
                 compute_with_storage_grid_size=grid,
                 q_chunk_size=32,
-                k_chunk_size=64,
+                k_chunk_size=128,  # 64: 0.3 ms slower per step at 2k-8k positions
                 exp_approx_mode=False,
             ),
             compute_kernel_config=HIFI4,
