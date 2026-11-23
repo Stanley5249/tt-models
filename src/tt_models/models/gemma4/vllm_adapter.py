@@ -346,17 +346,45 @@ class Gemma4ForCausalLM:
         """
         rows = tokens.shape[0]
         tables = self._group_tables(page_tables_per_layer, rows, check=True)
-        out = []
-        for i in range(rows):
-            start, end = int(start_pos[i]), int(prompt_lens[i])
+        spans = [(int(start_pos[i]), int(prompt_lens[i])) for i in range(rows)]
+        out: list[torch.Tensor | None] = [None] * rows
+        # Requests whose piece fits PREFILL_CHUNK rows run together, in groups of at
+        # most PREFILL_CHUNK padded rows (Gemma4TT.prefill_batch); longer ones alone.
+        groups: list[list[int]] = []
+        rows_in: list[int] = []  # padded rows of each open group; 0 when closed
+        for i, (start, end) in enumerate(spans):
+            rows_i = prefill_rows(end - start, start)
+            if end - start > PREFILL_CHUNK:
+                groups.append([i])
+                rows_in.append(0)
+            elif rows_in and rows_in[-1] and rows_in[-1] + rows_i <= PREFILL_CHUNK:
+                groups[-1].append(i)
+                rows_in[-1] += rows_i
+            else:
+                groups.append([i])
+                rows_in.append(rows_i)
+        for group in groups:
             t0 = time.perf_counter()
-            out.append(self.model.prefill(tokens[i, :end], start, tables[:, i]))
+            if len(group) == 1:
+                i = group[0]
+                start, end = spans[i]
+                out[i] = self.model.prefill(tokens[i, :end], start, tables[:, i])
+            else:
+                logits = self.model.prefill_batch(
+                    [
+                        (tokens[i, : spans[i][1]], spans[i][0], tables[:, i])
+                        for i in group
+                    ]
+                )
+                for j, i in enumerate(group):
+                    out[i] = logits[j]
             if self.timing:
+                tokens_in = sum(spans[i][1] - spans[i][0] for i in group)
                 logger.info(
-                    f"Gemma4 prefill: positions {start}-{end}, "
+                    f"Gemma4 prefill: {len(group)} requests, {tokens_in} tokens, "
                     f"{(time.perf_counter() - t0) * 1e3:.0f} ms"
                 )
-        return torch.stack(out)[:, None, :]
+        return torch.stack([o for o in out if o is not None])[:, None, :]
 
     def decode_forward(
         self,

@@ -11,6 +11,7 @@ moved, preempted, resumed and share cached prefixes without telling the model.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 import ttnn
@@ -34,6 +35,9 @@ from tt_models.models.gemma4.kv_cache import KvCache
 from tt_models.models.gemma4.layer import DecoderLayer
 from tt_models.models.gemma4.lm_head import LmHead
 from tt_models.models.gemma4.reference import embed_scale
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class Gemma4TT:
@@ -247,16 +251,11 @@ class Gemma4TT:
         hits and chunk ends are multiples of that grid.
         """
         end = tokens.shape[0]
-        grid = self.require_kv().grid
-        if not 0 <= start < end or start % grid:
-            raise ValueError(
-                f"prefill of positions [{start}, {end}) must start on the "
-                f"{grid}-token block grid"
-            )
+        self._check_start(start, end)
         out = []
         for c0 in range(start, end, PREFILL_CHUNK):
             c1 = min(c0 + PREFILL_CHUNK, end)
-            x = self._prefill_chunk(tokens, c0, c1, tables)
+            x = self._prefill_pieces([(tokens, c0, c1, tables)])
             if all_logits or c1 == end:
                 lo = 0 if all_logits else c1 - 1 - c0
                 last = ttnn.slice(x, [0, 0, lo, 0], [1, 1, c1 - c0, self.hidden])
@@ -264,57 +263,115 @@ class Gemma4TT:
             x.deallocate(True)  # `last` can be x itself or a view of it
         return torch.cat(out) if all_logits else out[-1][-1]
 
-    def _prefill_chunk(
-        self, tokens: torch.Tensor, c0: int, c1: int, tables: torch.Tensor
-    ) -> ttnn.Tensor:
-        """Run a prefill chunk through every layer and write its K/V.
+    def prefill_batch(
+        self, pieces: Sequence[tuple[torch.Tensor, int, torch.Tensor]]
+    ) -> torch.Tensor:
+        """Prefill several sequences in one pass; logits [n, V] of their last rows.
 
-        Run positions [c0, c1) through every layer, writing their K/V. Returns the
-        final hidden rows, padded.
+        pieces: (tokens, start, tables) as prefill() takes them, each computing
+        positions [start, len(tokens)) in one piece, with at most PREFILL_CHUNK padded
+        rows in all (batch_rows). The layers' projections, MLP and experts run on
+        every piece's rows at once, so their weights are read once for all pieces:
+        fifteen 144-token prompts took 3.1 s one by one.
+        """
+        spans: list[tuple[torch.Tensor, int, int, torch.Tensor]] = []
+        for tokens, start, tables in pieces:
+            self._check_start(start, tokens.shape[0])
+            spans.append((tokens, start, tokens.shape[0], tables))
+        if self.batch_rows([(t.shape[0], s) for t, s, _ in pieces]) > PREFILL_CHUNK:
+            raise ValueError(f"a batched prefill holds at most {PREFILL_CHUNK} rows")
+        x = self._prefill_pieces(spans)
+        lasts: list[ttnn.Tensor] = []
+        row0 = 0
+        for _, c0, c1, _ in spans:
+            last = row0 + c1 - c0 - 1
+            lasts.append(ttnn.slice(x, [0, 0, last, 0], [1, 1, last + 1, self.hidden]))
+            row0 += prefill_rows(c1 - c0, c0)
+        rows = ttnn.concat(lasts, dim=2) if len(lasts) > 1 else lasts[0]
+        logits = self.head.logits(rows)
+        x.deallocate(True)  # the slices can be views of x
+        for t in {id(t): t for t in (*lasts, rows)}.values():
+            t.deallocate(True)
+        return logits
+
+    @staticmethod
+    def batch_rows(pieces: Sequence[tuple[int, int]]) -> int:
+        """Padded rows of a batched prefill of (end, start) pieces."""
+        return sum(prefill_rows(end - start, start) for end, start in pieces)
+
+    def _check_start(self, start: int, end: int) -> None:
+        grid = self.require_kv().grid
+        if not 0 <= start < end or start % grid:
+            raise ValueError(
+                f"prefill of positions [{start}, {end}) must start on the "
+                f"{grid}-token block grid"
+            )
+
+    def _prefill_pieces(
+        self, pieces: Sequence[tuple[torch.Tensor, int, int, torch.Tensor]]
+    ) -> ttnn.Tensor:
+        """Run prefill pieces through every layer and write their K/V.
+
+        pieces: (tokens, c0, c1, tables), positions [c0, c1) of a sequence, each
+        padded to prefill_rows and laid one after another. Returns the final hidden
+        rows, padded.
         """
         cache = self.require_kv()
-        n = c1 - c0
-        padded = prefill_rows(n, c0)
-        ids = torch.zeros(padded, dtype=torch.long)
-        ids[:n] = tokens[c0:c1]
-        x = self._to_device(self.embed(ids).reshape(1, 1, padded, self.hidden))
-        ropes = {
-            kind: (
-                self._to_device(cos[c0 : c0 + padded][None, None]),
-                self._to_device(sin[c0 : c0 + padded][None, None]),
-            )
-            for kind, (cos, sin) in self.rope.items()
-        }
 
-        def table(t: torch.Tensor) -> ttnn.Tensor:
+        def table(t: torch.Tensor, width: int) -> ttnn.Tensor:
             # Chunked SDPA with a device chunk start reads rows of a multiple of 32
             # bytes.
             # Every table keeps the full width, so a new chunk offset builds no new
             # programs.
-            row = torch.zeros(1, -(-tables.shape[1] // 8) * 8, dtype=torch.int32)
+            row = torch.zeros(1, -(-width // 8) * 8, dtype=torch.int32)
             row[0, : t.shape[0]] = t
             return self._to_device(row, ttnn.int32, ttnn.ROW_MAJOR_LAYOUT)
 
-        fill_tables = [
-            table(tables[g, c0 // block :]) for g, block in enumerate(cache.block_sizes)
-        ]
-        whole = [table(tables[g]) if c0 else None for g in range(cache.groups)]
-        start = (
-            self._to_device(
-                torch.tensor([c0], dtype=torch.int32), ttnn.int32, ttnn.ROW_MAJOR_LAYOUT
+        ids: list[torch.Tensor] = []
+        positions: list[torch.Tensor] = []
+        chunks: list[PrefillChunk] = []
+        inputs: list[ttnn.Tensor] = []
+        row0 = 0
+        for tokens, c0, c1, tables in pieces:
+            n = c1 - c0
+            padded = prefill_rows(n, c0)
+            piece = torch.zeros(padded, dtype=torch.long)
+            piece[:n] = tokens[c0:c1]
+            ids.append(piece)
+            positions.append(torch.arange(c0, c0 + padded))
+            width = tables.shape[1]
+            fill_tables = [
+                table(tables[g, c0 // block :], width)
+                for g, block in enumerate(cache.block_sizes)
+            ]
+            whole = [
+                table(tables[g], width) if c0 else None for g in range(cache.groups)
+            ]
+            start = (
+                self._to_device(
+                    torch.tensor([c0], dtype=torch.int32),
+                    ttnn.int32,
+                    ttnn.ROW_MAJOR_LAYOUT,
+                )
+                if c0
+                else None
             )
-            if c0
-            else None
-        )
-        chunk = PrefillChunk(c0, n, start, whole, fill_tables)
-        for layer, kv in zip(self.layers, self.require_kv().layers):
+            chunks.append(PrefillChunk(c0, n, row0, padded, start, whole, fill_tables))
+            inputs += [*fill_tables, *(t for t in (*whole, start) if t is not None)]
+            row0 += padded
+        ids_all, pos = torch.cat(ids), torch.cat(positions)
+        x = self._to_device(self.embed(ids_all).reshape(1, 1, row0, self.hidden))
+        ropes = {
+            kind: (
+                self._to_device(cos[pos][None, None]),
+                self._to_device(sin[pos][None, None]),
+            )
+            for kind, (cos, sin) in self.rope.items()
+        }
+        for layer, kv in zip(self.layers, cache.layers):
             kind = "sliding_attention" if layer.sliding else "full_attention"
-            x = layer.prefill(x, ropes[kind], kv, chunk)
-        for t in (
-            *fill_tables,
-            *(table for table in (*whole, start) if table is not None),
-            *[r for pair in ropes.values() for r in pair],
-        ):
+            x = layer.prefill(x, ropes[kind], kv, chunks)
+        for t in (*inputs, *[r for pair in ropes.values() for r in pair]):
             t.deallocate(True)
         return x
 

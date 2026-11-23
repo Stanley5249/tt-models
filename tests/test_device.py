@@ -137,6 +137,30 @@ def test_chunked_prefill_and_prefix_hit(mesh: ttnn.MeshDevice):
         m.prefill(seq[:L], 1088, tables[:, 2])  # off the block grid
 
 
+def test_prefill_batch_matches_prefill(mesh: ttnn.MeshDevice):
+    """A batched prefill of several requests, one of them a continuation piece, gives
+    each request's logits and K/V as its own prefill does."""
+    torch.manual_seed(0)
+    lens = [70, 144, 33, 300]
+    seqs = [torch.randint(10, 20000, (n + 1,)) for n in lens]
+    m = model(mesh, 4)
+    tables = m.allocate_kv_cache(4, max(lens) + 1)
+    grid = m.require_kv().grid
+    m.prefill(seqs[3][:grid], 0, tables[:, 3])  # request 3 continues from `grid`
+    starts = [0, 0, 0, grid]
+    got = m.prefill_batch(
+        [(seqs[i][: lens[i]], starts[i], tables[:, i]) for i in range(4)]
+    )
+    steps = m.decode(
+        torch.stack([s[n] for s, n in zip(seqs, lens)]), torch.tensor(lens), tables
+    )
+    for i in range(4):
+        ref = m.prefill(seqs[i][: lens[i]], 0, tables[:, i])
+        assert_close(got[i], ref, f"request {i}")
+        ref_next = m.prefill(seqs[i][: lens[i] + 1], 0, tables[:, i])
+        assert_close(steps[i], ref_next, f"decode after batched prefill, request {i}")
+
+
 def test_inactive_rows_leave_live_kv_alone(mesh: ttnn.MeshDevice):
     """Padding rows (position -1) point at user 0's block 0, where an unskipped write
     would land.

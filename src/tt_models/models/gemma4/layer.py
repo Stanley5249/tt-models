@@ -130,11 +130,11 @@ class DecoderLayer:
         x: ttnn.Tensor,
         rope: tuple[ttnn.Tensor, ttnn.Tensor],
         kv: LayerKv,
-        chunk: PrefillChunk,
+        chunks: list[PrefillChunk],
     ) -> ttnn.Tensor:
-        """Run one decoder layer over a prefill chunk."""
+        """Run one decoder layer over the prefill chunks in x."""
         h = self._rms(x, self.input_ln)
-        a = self.attn.prefill(h, rope, kv, chunk)
+        a = self.attn.prefill(h, rope, kv, chunks)
         h.deallocate(True)
         return self._finish(x, a)
 

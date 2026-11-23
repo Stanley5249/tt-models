@@ -83,11 +83,15 @@ class PrefillChunk:
 
     start is a multiple of every block size and of the SDPA chunk. tables holds
     each group's page table of the sequence (None for a chunk at 0, which reads
-    no cache), fill_tables the same tables from the block holding `start`.
+    no cache), fill_tables the same tables from the block holding `start`. A batched
+    prefill (Gemma4TT.prefill_batch) puts several sequences' pieces in one x: this
+    one is rows [row0, row0 + padded).
     """
 
     start: int
     rows: int
+    row0: int
+    padded: int
     start_tensor: (
         ttnn.Tensor | None
     )  # start on the device, so new offsets reuse the compiled programs
@@ -271,14 +275,15 @@ class Attention:
         x: ttnn.Tensor,
         rope: tuple[ttnn.Tensor, ttnn.Tensor],
         kv: LayerKv,
-        chunk: PrefillChunk,
+        chunks: list[PrefillChunk],
     ) -> ttnn.Tensor:
-        """Compute prefill attention over a replicated chunk.
+        """Compute prefill attention over replicated chunks of one or more sequences.
 
-        X [1, 1, S, H] replicated, the chunk's rows. Returns all-reduced attention
-        output [1, 1, S, H].
+        X [1, 1, S, H] replicated, the chunks' rows. Returns all-reduced attention
+        output [1, 1, S, H]. The projections, norms and RoPE run on all rows; each
+        chunk writes its own cache rows and attends over its own sequence.
 
-        rope: (cos, sin) [1, 1, S, hd] for this layer type at the chunk's positions.
+        rope: (cos, sin) [1, 1, S, hd] for this layer type at the rows' positions.
         """
         s = self.shape
         xqkv = ttnn.linear(
@@ -295,10 +300,54 @@ class Attention:
         q = self._norm_rope(q, self.q_norm, rope)
         k = self._norm_rope(k, self.k_norm, rope)
         v = head_norm(v, None, self.eps)
+        parts = []
+        for chunk in chunks:
+            if len(chunks) == 1:
+                qc, kc, vc = q, k, v
+            else:
+                qc, kc, vc = (
+                    ttnn.slice(
+                        t,
+                        [0, 0, chunk.row0, 0],
+                        [1, t.shape[1], chunk.row0 + chunk.padded, t.shape[3]],
+                    )
+                    for t in (q, k, v)
+                )
+            parts.append(self._attend(qc, kc, vc, kv, chunk))
+            if len(chunks) > 1:
+                for t in (qc, kc, vc):
+                    t.deallocate(True)
+        for t in (q, k, v):
+            t.deallocate(True)
+        attn = parts[0] if len(parts) == 1 else ttnn.concat(parts, dim=2)
+        if len(parts) > 1:
+            for t in parts:
+                t.deallocate(True)
+        out = ttnn.experimental.nlp_concat_heads(attn, memory_config=DRAM)
+        attn.deallocate(True)
+        out2 = ttnn.linear(
+            out, self.wo, compute_kernel_config=HIFI2, memory_config=DRAM
+        )
+        out.deallocate(True)
+        return all_reduce(out2)
+
+    def _attend(
+        self,
+        q: ttnn.Tensor,
+        k: ttnn.Tensor,
+        v: ttnn.Tensor,
+        kv: LayerKv,
+        chunk: PrefillChunk,
+    ) -> ttnn.Tensor:
+        """Write one chunk's K/V and attend over its sequence."""
         self._fill(k, v, kv, chunk)
-        window = {} if s.window is None else {"sliding_window_size": s.window}
+        window = (
+            {}
+            if self.shape.window is None
+            else {"sliding_window_size": self.shape.window}
+        )
         if chunk.start == 0:
-            attn = ttnn.transformer.scaled_dot_product_attention(
+            return ttnn.transformer.scaled_dot_product_attention(
                 q,
                 k,
                 v,
@@ -309,29 +358,19 @@ class Attention:
                 memory_config=DRAM,
                 **window,
             )
-        else:
-            attn = ttnn.transformer.chunked_scaled_dot_product_attention(
-                q,
-                kv.k,
-                kv.v,
-                chunk.tables[kv.group],
-                chunk_start_idx_tensor=chunk.start_tensor,
-                scale=1.0,
-                program_config=self._sdpa_chunked_config(),
-                compute_kernel_config=HIFI4,
-                memory_config=DRAM,
-                **window,
-                **kv.sdpa_args(),
-            )
-        for t in (q, k, v):
-            t.deallocate(True)
-        out = ttnn.experimental.nlp_concat_heads(attn, memory_config=DRAM)
-        attn.deallocate(True)
-        out2 = ttnn.linear(
-            out, self.wo, compute_kernel_config=HIFI2, memory_config=DRAM
+        return ttnn.transformer.chunked_scaled_dot_product_attention(
+            q,
+            kv.k,
+            kv.v,
+            chunk.tables[kv.group],
+            chunk_start_idx_tensor=chunk.start_tensor,
+            scale=1.0,
+            program_config=self._sdpa_chunked_config(),
+            compute_kernel_config=HIFI4,
+            memory_config=DRAM,
+            **window,
+            **kv.sdpa_args(),
         )
-        out.deallocate(True)
-        return all_reduce(out2)
 
     @staticmethod
     def _fill(k: ttnn.Tensor, v: ttnn.Tensor, kv: LayerKv, chunk: PrefillChunk) -> None:
