@@ -21,9 +21,9 @@ Prefix caching is vLLM's automatic prefix caching. Chunked prefill uses the plug
 
 ### Decode
 
-Decode captures one metal trace per active row count (1 to `STREAM_ROWS`). Every row count runs the same fused path: compact FP32 boundaries with one tail op per boundary (`boundary.py`), the router op (`router.py`), and the expert and MLP streams (`expert_stream.py`), where one op pair covers every expert slot of every row. Batch 1 keeps two specializations: the fused q/k norm and RoPE op (`qk_rope.py`) and a one-token core placement in the streams. See [round 2](experiments/2026-11-19-decode-round-2.md), [batched streams](experiments/2026-11-21-batched-expert-streams.md) and [compact boundaries](experiments/2026-11-21-compact-boundaries-multi-row.md).
+Decode captures one metal trace per active row count (1 to `STREAM_ROWS`, 16). Every row count runs the same fused path: compact FP32 boundaries with one tail op per boundary (`boundary.py`), the router op (`router.py`), and the expert and MLP streams (`expert_stream.py`), where one op pair covers every expert slot of every row. The router lists the step's distinct experts, so an expert that several rows picked is read once ([shared expert reads](experiments/2026-11-23-shared-expert-reads.md)). Batch 1 keeps two specializations: the fused q/k norm and RoPE op (`qk_rope.py`) and a one-token core placement in the streams. See [round 2](experiments/2026-11-19-decode-round-2.md), [batched streams](experiments/2026-11-21-batched-expert-streams.md) and [compact boundaries](experiments/2026-11-21-compact-boundaries-multi-row.md).
 
-Batch 1 and batches 2-4 still run some different kernels, which round differently, so a greedy request can continue differently at a near-tie when it shares decode steps with others. Both paths are equally accurate against fp32 ([batch paths](experiments/2026-11-21-batch-path-accuracy.md)).
+Batch 1 and larger batches still run some different kernels, which round differently, so a greedy request can continue differently at a near-tie when it shares decode steps with others. Both paths are equally accurate against fp32 ([batch paths](experiments/2026-11-21-batch-path-accuracy.md)).
 
 Everything a trace touches is allocated before the first capture, and prefill reduces across chips with semaphores allocated at load ([trace safety](experiments/2026-11-21-trace-safety.md)). New code must keep both rules.
 
@@ -94,7 +94,7 @@ Accuracy needs 3 seeds and speed a same-day baseline ([experiments](experiments/
 
 - **Q4_0 serving.** Needs an expert-major prefill matmul that dequantizes inside, batch 2-4 down kernels, compact step tiles, and DRAM for the steps ([prefill dequantization](experiments/2026-11-21-q4-prefill-dequant.md)).
 - **Device sampling and async decode.** Needs a fused LM-head top-k and a device embedding.
-- **Multi-row decode.** Expert slots shared by several users are read once per user; RoPE at 2-4 rows uses generic ops.
+- **Multi-row decode.** RoPE at 2-16 rows uses generic ops; 9-15 rows concatenate heads through a permute; the router's top-k runs on one RISC (145 us at 16 rows); prefill runs one request at a time, so TTFT grows with concurrency.
 - **Host overhead.** Input build, readback, sampling and vLLM bookkeeping run outside the device each step; only async decode removes most of it.
 - **Prefill.** The all-gathers are bound by one Ethernet link, and the gate|up sparse matmul uses a fraction of the cores.
 - **Tool choice upstream.** Drop `tool_parser.py` once vLLM sets the structural tag for gemma4 (vllm-project/vllm#53363).

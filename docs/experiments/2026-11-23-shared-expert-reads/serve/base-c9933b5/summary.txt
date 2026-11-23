@@ -1,0 +1,17 @@
+c1-128-128-n8 warmup {'in_tok': 144.4, 'mean_ttft': 230.2, 'mean_tpot': 17.5, 'tput_user': 57.14, 'tput': 52.18}
+c1-128-128-n8 r0 {'in_tok': 144.2, 'mean_ttft': 225.8, 'mean_tpot': 17.51, 'tput_user': 57.11, 'tput': 52.25}
+c1-128-128-n8 r1 {'in_tok': 144.4, 'mean_ttft': 222.6, 'mean_tpot': 17.5, 'tput_user': 57.15, 'tput': 52.35}
+c1-128-128-n8 r2 {'in_tok': 144.2, 'mean_ttft': 230.4, 'mean_tpot': 17.5, 'tput_user': 57.14, 'tput': 52.17}
+c4-128-128-n16 warmup {'in_tok': 144.4, 'mean_ttft': 666.0, 'mean_tpot': 29.61, 'tput_user': 33.77, 'tput': 115.6}
+c4-128-128-n16 r0 {'in_tok': 144.2, 'mean_ttft': 665.4, 'mean_tpot': 29.63, 'tput_user': 33.75, 'tput': 115.58}
+c4-128-128-n16 r1 {'in_tok': 144.4, 'mean_ttft': 673.6, 'mean_tpot': 29.61, 'tput_user': 33.78, 'tput': 115.43}
+c4-128-128-n16 r2 {'in_tok': 144.2, 'mean_ttft': 671.4, 'mean_tpot': 29.66, 'tput_user': 33.72, 'tput': 115.32}
+c8-128-128-n32 warmup {'in_tok': 144.4, 'mean_ttft': 4398.1, 'mean_tpot': 30.76, 'tput_user': 32.51, 'tput': 115.73}
+c8-128-128-n32 r0 {'in_tok': 144.5, 'mean_ttft': 4398.9, 'mean_tpot': 30.75, 'tput_user': 32.52, 'tput': 115.72}
+c8-128-128-n32 r1 {'in_tok': 144.4, 'mean_ttft': 4403.1, 'mean_tpot': 30.74, 'tput_user': 32.53, 'tput': 115.68}
+c8-128-128-n32 r2 {'in_tok': 144.3, 'mean_ttft': 4410.5, 'mean_tpot': 30.77, 'tput_user': 32.5, 'tput': 115.54}
+c16-128-128-n64 warmup {'in_tok': 144.4, 'mean_ttft': 12110.5, 'mean_tpot': 30.81, 'tput_user': 32.46, 'tput': 115.82}
+c16-128-128-n64 r0 {'in_tok': 144.4, 'mean_ttft': 12120.2, 'mean_tpot': 30.83, 'tput_user': 32.44, 'tput': 115.75}
+c16-128-128-n64 r1 {'in_tok': 144.4, 'mean_ttft': 12134.4, 'mean_tpot': 30.88, 'tput_user': 32.39, 'tput': 115.57}
+c16-128-128-n64 r2 {'in_tok': 144.4, 'mean_ttft': 12362.2, 'mean_tpot': 28.52, 'tput_user': 35.06, 'tput': 115.9}
+server stopped

@@ -22,7 +22,7 @@ serve-gemma4 *args:
         --host "{{ host }}" --port "{{ port }}" \
         --served-model-name gemma4 \
         --block-size 64 \
-        --max-num-seqs 4 \
+        --max-num-seqs 16 \
         --max-model-len 32768 \
         --max-num-batched-tokens 2048 \
         --enable-auto-tool-choice --tool-call-parser gemma4_tt \
