@@ -10,7 +10,11 @@
 // gate b + 12 j at row offset j and up 36 + b + 12 j at offset j + up_delta; this core reads its pair j
 // as two one-tile packets per k-step, k_stride bytes apart.
 //
-// runtime args: [w_addr, idx_addr, bank_id, vc, slot0, pair_j]
+// The ids row holds the routed slots' expert ids and, at entry count_index, their count n. The
+// `readers` cores of one bank split the n slots into contiguous runs of ceil(n / readers); this core,
+// number `rank`, streams its run.
+//
+// runtime args: [w_addr, idx_addr, bank_id, vc, rank, pair_j]
 
 #include "stream_common.hpp"
 
@@ -19,12 +23,12 @@ void kernel_main() {
     const uint32_t idx_addr = get_arg_val<uint32_t>(1);
     const uint32_t bank_id = get_arg_val<uint32_t>(2);
     const uint32_t vc = get_arg_val<uint32_t>(3);
-    const uint32_t slot0 = get_arg_val<uint32_t>(4);
+    const uint32_t rank = get_arg_val<uint32_t>(4);
     const uint32_t pair_j = get_arg_val<uint32_t>(5);
 
     constexpr uint32_t cb_w = get_compile_time_arg_val(0);
     constexpr uint32_t cb_scr = get_compile_time_arg_val(1);
-    constexpr uint32_t slots = get_compile_time_arg_val(2);
+    constexpr uint32_t count_index = get_compile_time_arg_val(2);  // ids entry holding the slot count
     constexpr uint32_t blocks = get_compile_time_arg_val(3);       // blocks per expert
     constexpr uint32_t block_tiles = get_compile_time_arg_val(4);  // tiles per block
     constexpr uint32_t packets = get_compile_time_arg_val(5);      // packets per block
@@ -33,8 +37,9 @@ void kernel_main() {
     constexpr uint32_t split = get_compile_time_arg_val(8);
     constexpr uint32_t k_stride = get_compile_time_arg_val(9);  // split: bytes per K row of the bank
     constexpr uint32_t up_delta = get_compile_time_arg_val(10);  // split: up tile offset from gate, in tiles
-    constexpr uint32_t id_bytes = get_compile_time_arg_val(11);  // the ids row, <= 64
-    constexpr auto idx_args = TensorAccessorArgs<12>();
+    constexpr uint32_t id_bytes = get_compile_time_arg_val(11);  // bytes read of the ids row
+    constexpr uint32_t readers = get_compile_time_arg_val(12);
+    constexpr auto idx_args = TensorAccessorArgs<13>();
 
     constexpr uint32_t block_bytes = block_tiles * tile_bytes;
     constexpr uint32_t packet_bytes = split ? tile_bytes : block_bytes / packets;
@@ -47,15 +52,12 @@ void kernel_main() {
     read_row0(s_idx, scr, id_bytes);
     noc_async_read_barrier();
     volatile tt_l1_ptr uint16_t* ids = reinterpret_cast<volatile tt_l1_ptr uint16_t*>(scr);
-    uint32_t offsets[slots];
-    for (uint32_t i = 0; i < slots; ++i) {
-        offsets[i] = static_cast<uint32_t>(ids[slot0 + i]) * expert_bytes;
-    }
+    const SlotRun run = slot_run(ids[count_index], readers, rank);
 
     BlockStream<cb_w, block_tiles, block_bytes> st;
     st.init(get_noc_addr_from_bank_id<true>(bank_id, w_addr), packet_bytes, vc);
-    for (uint32_t i = 0; i < slots; ++i) {
-        uint32_t src = offsets[i];
+    for (uint32_t i = run.lo; i < run.hi; ++i) {
+        uint32_t src = static_cast<uint32_t>(ids[i]) * expert_bytes;
         if constexpr (split) {
             src += pair_j * tile_bytes;
             for (uint32_t b = 0; b < blocks; ++b) {

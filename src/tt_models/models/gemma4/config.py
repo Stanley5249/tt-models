@@ -8,9 +8,8 @@ from typing_extensions import TypedDict
 
 from tt_models.common.config import TILE
 
-# Decode batches up to this many tokens take the expert streams (their scratch holds 32
-# slots).
-STREAM_ROWS = 4
+# Most decode rows: the stream kernels keep token rows in the top two faces of a tile.
+STREAM_ROWS = 16
 # Longest piece of a prompt one prefill pass computes. It bounds activation memory
 # (the expert-major MoE gathers k = 8 rows per token) whatever chunk vLLM schedules.
 PREFILL_CHUNK = 4096

@@ -52,13 +52,17 @@ class Boundary:
         self.chunks = hidden // CHUNK  # 176
         self.V = compact_tiles(hidden)  # 3
         self.eps = eps
-        self.tail_cores = (
-            tail_cores  # per token row: each row's tail runs on its own group of cores
-        )
-        per = -(-self.chunks // tail_cores)
-        self.tail_ranges = [
+        # Each token row's tail runs on its own group of up to tail_cores cores; 11-16
+        # rows get fewer per row so the groups fit the 64-core grid.
+        self.tail_cores = tail_cores
+
+    def tail_groups(self, rows: int) -> list[tuple[int, int]]:
+        """The chunk range each core of one row's group writes."""
+        n = min(self.tail_cores, 64 // rows)
+        per = -(-self.chunks // n)
+        return [
             (min(i * per, self.chunks), min((i + 1) * per, self.chunks))
-            for i in range(tail_cores)
+            for i in range(n)
         ]
 
     # -- tensors ---------------------------------------------------------------
@@ -156,7 +160,8 @@ class Boundary:
         rows: int = 1,
     ) -> ttnn.Tensor:
         V = self.V
-        cores = line_cores(self.tail_cores * rows, y0=0)  # core i: row i // tail_cores
+        groups = self.tail_groups(rows)
+        cores = line_cores(len(groups) * rows, y0=0)  # core i: row i // len(groups)
         crs = core_range_set(cores)
         cb_g, cb_x, cb_w, cb_j, cb_sq, cb_rs, cb_r, cb_t0, cb_xo, cb_row0 = (
             0,
@@ -190,8 +195,8 @@ class Boundary:
         cbs += [cb(crs, cb_row0 + i, ttnn.bfloat16, 2048, V) for i in range(len(outs))]
         reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
         for i, c in enumerate(cores):
-            row, j = divmod(i, self.tail_cores)
-            c0, c1 = self.tail_ranges[j]
+            row, j = divmod(i, len(groups))
+            c0, c1 = groups[j]
             reader_rt[c.x][c.y] = [
                 g.buffer_address(),
                 x.buffer_address(),

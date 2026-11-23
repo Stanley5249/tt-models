@@ -1,9 +1,11 @@
 // Routed-expert down matmul (TRISC) for Gemma 4 decode: for each of this core's J output columns,
 // out = sum over slots e and K tiles k of act[e, k] . Wd_e[k, col], accumulated in FP32 dest. A slot's
-// act tiles arrive as kt tiles of cb_in0 (the writer streams them slot by slot).
+// act tiles arrive as kt tiles of cb_in0 (the writer streams them slot by slot); the slot count arrives
+// in cb_cnt.
 
 #include <cstdint>
 
+#include "api/compute/cb_api.h"
 #include "api/compute/compute_kernel_hw_startup.h"
 #include "api/compute/matmul.h"
 #include "api/compute/pack.h"
@@ -12,11 +14,14 @@ void kernel_main() {
     constexpr uint32_t cb_in0 = get_compile_time_arg_val(0);
     constexpr uint32_t cb_w = get_compile_time_arg_val(1);
     constexpr uint32_t cb_out = get_compile_time_arg_val(2);
-    constexpr uint32_t slots = get_compile_time_arg_val(3);
+    constexpr uint32_t cb_cnt = get_compile_time_arg_val(3);
     constexpr uint32_t kt = get_compile_time_arg_val(4);
     constexpr uint32_t cols = get_compile_time_arg_val(5);
 
     compute_kernel_hw_startup<SrcOrder::Reverse>(cb_in0, cb_w, cb_out);
+    cb_wait_front(cb_cnt, 1);
+    const uint32_t slots = read_tile_value(cb_cnt, 0, 0);
+    cb_pop_front(cb_cnt, 1);
     matmul_init(cb_in0, cb_w);
     tile_regs_acquire();
     for (uint32_t e = 0; e < slots; ++e) {

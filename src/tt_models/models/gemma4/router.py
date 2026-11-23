@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import ttnn
 
 from tt_models.common.config import L1, TILE
@@ -14,11 +16,14 @@ from tt_models.models.gemma4.generic_op import (
     core_range_set,
 )
 
+if TYPE_CHECKING:
+    import torch
+
 
 class Router:
-    """Fused decode router for one to four tokens.
+    """Fused decode router for 1-16 tokens.
 
-    Decode router for 1-4 tokens: logits, top-k and softmax over the k logits in one
+    Logits, top-k, softmax over the k logits and the step's distinct experts in one
     op (kernels/router_*).
 
     topk_router_gpt took 68-72 us per layer, mostly in its top-k stage. Here 11 cores (8
@@ -31,7 +36,10 @@ class Router:
     (scripts/kernels/router_check.py).
     Its weights are closer to an fp32 reference (max error 0.0007 against
     topk_router_gpt's 0.11).
-    Outputs: row-major uint16 ids and BF16 weights, token-major (entry t * k + j).
+    Outputs (row-major): uint16 ids of the step's distinct experts, one slot each, with
+    their count at entry `slots`; BF16 weights slot-major [slot * rows + t], zero where
+    token t did not pick the slot's expert. The expert streams read each slot's
+    weights once for all its tokens.
     """
 
     def __init__(
@@ -46,10 +54,11 @@ class Router:
     ) -> None:
         """Assign router partials to cores and output rows.
 
-        rows: decode tokens (1 .. 4). The reducer stacks every core's partial rows in
-        one tile, so
-        parts * rows must fit 32: 3-4 tokens use 8 parts of 11 K tiles (the first 8 of
-        the 11 cores).
+        rows: decode tokens (1 .. 16). The reducer stacks every core's partial rows in
+        one tile, so parts * rows must fit 32 and parts must divide the 88 K tiles:
+        3-4 tokens use 8 parts of 11 K tiles (the first 8 of the 11 cores). With fewer
+        parts than cores, each part also splits the expert tiles over up to 4 cores
+        (16 tokens: 2 parts x 4), so no core reads more than a quarter of a K half.
         """
         self.mesh, self.top_k, self.rows = mesh, top_k, rows
         self.kx = hidden // TILE
@@ -58,25 +67,43 @@ class Router:
             parts -= 1
         self.parts = parts
         self.kt = self.kx // parts
-        assert rows * top_k <= TILE
-        self.cores = [ttnn.CoreCoord(i % 8, core_row - i // 8) for i in range(parts)]
+        self.n_split = next(
+            s for s in (4, 2, 1) if parts * s <= 11 and self.n_tiles % s == 0
+        )
+        self.tn = self.n_tiles // self.n_split  # expert tiles per core
+        assert rows <= TILE // 2, "token rows must fit the top faces of a tile"
+        self.slots = min(n_experts, rows * top_k)
+        # Row lengths in entries, whole 64-byte lines: ids then the count, weights.
+        self.id_entries = -(-(self.slots + 1) // TILE) * TILE
+        self.wt_entries = -(-(self.slots * rows) // TILE) * TILE
+        self.cores = [
+            ttnn.CoreCoord(i % 8, core_row - i // 8)
+            for i in range(parts * self.n_split)
+        ]
         self.red = mesh.worker_core_from_logical_core(self.cores[0])
 
     def outputs(self) -> tuple[ttnn.Tensor, ttnn.Tensor]:
-        """Allocate row-major expert ids and weights.
+        """Allocate the row-major expert ids and weights the expert streams take."""
 
-        Row-major ids and weights, token-major (entry t * k + j), at least 16 entries
-        (32 bytes): the
-        layout the expert streams take.
-        """
-
-        def row(dtype: ttnn.DataType) -> ttnn.Tensor:
-            n = max(16, self.rows * self.top_k)
+        def row(n: int, dtype: ttnn.DataType) -> ttnn.Tensor:
             return ttnn.allocate_tensor_on_device(
                 ttnn.Shape([1, n]), dtype, ttnn.ROW_MAJOR_LAYOUT, self.mesh, L1
             )
 
-        return row(ttnn.uint16), row(ttnn.bfloat16)
+        return row(self.id_entries, ttnn.uint16), row(self.wt_entries, ttnn.bfloat16)
+
+    def decode(self, ids: torch.Tensor, wts: torch.Tensor) -> list[dict[int, float]]:
+        """Each token's {expert: weight} from host copies of the outputs (checks)."""
+        ids, wts = ids.flatten().long(), wts.flatten().float()
+        n = int(ids[self.slots])
+        return [
+            {
+                int(ids[s]): float(wts[s * self.rows + t])
+                for s in range(n)
+                if wts[s * self.rows + t] != 0
+            }
+            for t in range(self.rows)
+        ]
 
     def __call__(
         self,
@@ -100,12 +127,12 @@ class Router:
         n = self.n_tiles
         cbs = [
             cb(crs, cb_x, bf16, 2048, self.kt),
-            cb(crs, cb_w, bf16, 2048, self.kt * n),
+            cb(crs, cb_w, bf16, 2048, self.kt * self.tn),
             cb(crs, cb_j, f32, FP32_TILE, 1),
-            cb(crs, cb_partial, f32, FP32_TILE, n),
+            cb(crs, cb_partial, f32, FP32_TILE, self.tn),
             cb(crs, cb_part, f32, FP32_TILE, n),
             cb(crs, cb_e, f32, FP32_TILE, n),
-            cb(crs, cb_out, bf16, 128, 1),
+            cb(crs, cb_out, bf16, 2 * (self.id_entries + self.wt_entries), 1),
         ]
         reader_rt, writer_rt, compute_rt = (
             ttnn.RuntimeArgs(),
@@ -114,19 +141,22 @@ class Router:
         )
         for i, c in enumerate(self.cores):
             red = int(i == 0)
+            part, n0 = i // self.n_split, (i % self.n_split) * self.tn
             reader_rt[c.x][c.y] = [
                 x.buffer_address(),
                 w.buffer_address(),
-                i * self.kt,
+                part * self.kt,
                 red,
+                n0,
             ]
             writer_rt[c.x][c.y] = [
-                i,
+                part,
                 self.red.x,
                 self.red.y,
                 red,
                 ids.buffer_address(),
                 wts.buffer_address(),
+                n0,
             ]
             compute_rt[c.x][c.y] = [red]
         sem_id = 0
@@ -142,6 +172,7 @@ class Router:
                     self.kt,
                     n,
                     self.rows,
+                    self.tn,
                     *accessor(x),
                     *accessor(w),
                 ],
@@ -163,7 +194,11 @@ class Router:
                     self.top_k,
                     sem_id,
                     self.rows,
-                    max(32, 2 * self.rows * self.top_k),
+                    self.slots,
+                    2 * self.id_entries,
+                    2 * self.wt_entries,
+                    self.tn,
+                    len(self.cores),
                     *accessor(ids),
                     *accessor(wts),
                 ],
@@ -184,6 +219,7 @@ class Router:
                     cb_e,
                     self.kt,
                     n,
+                    self.tn,
                 ],
                 runtime_args=compute_rt,
                 config=ttnn.ComputeConfigDescriptor(

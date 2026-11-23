@@ -1,10 +1,12 @@
 // Routed-expert gate|up matmul + GELU-tanh (TRISC) for Gemma 4 batch-1 decode.
 //
-// For each slot this core owns: g = x . W[:, gate b], u = x . W[:, up b] over 88 K tiles (FP32 dest),
+// For each slot of this core's run (its length arrives in cb_cnt from the writer):
+// g = x . W[:, gate b], u = x . W[:, up b] over 88 K tiles (FP32 dest),
 // act = gelu_tanh(g) * u * w_e * per_expert_scale[e], packed as one BF16 tile (row 0 is the token).
 
 #include <cstdint>
 
+#include "api/compute/cb_api.h"
 #include "api/compute/compute_kernel_hw_startup.h"
 #include "api/compute/eltwise_binary_sfpu.h"
 #include "api/compute/eltwise_unary/gelu.h"
@@ -18,12 +20,15 @@ void kernel_main() {
     constexpr uint32_t cb_w = get_compile_time_arg_val(1);
     constexpr uint32_t cb_sc = get_compile_time_arg_val(2);
     constexpr uint32_t cb_act = get_compile_time_arg_val(3);
-    constexpr uint32_t slots = get_compile_time_arg_val(4);
+    constexpr uint32_t cb_cnt = get_compile_time_arg_val(4);
     constexpr uint32_t blocks = get_compile_time_arg_val(5);
     constexpr uint32_t ksteps = get_compile_time_arg_val(6);  // k-steps per block (2 tiles each)
     constexpr uint32_t kx = blocks * ksteps;
 
     compute_kernel_hw_startup<SrcOrder::Reverse>(cb_x, cb_w, cb_act);
+    cb_wait_front(cb_cnt, 1);
+    const uint32_t slots = read_tile_value(cb_cnt, 0, 0);
+    cb_pop_front(cb_cnt, 1);
     cb_wait_front(cb_x, kx);
     cb_wait_front(cb_sc, 2 * slots);
     // Matmul unpacks in1 (BFP4 weights) to SrcA; the score copies need SrcA as BF16. Without the

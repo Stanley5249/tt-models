@@ -38,7 +38,7 @@ import torch
 import ttnn
 
 from tt_models.common.config import TILE
-from tt_models.models.gemma4.expert_stream import ExpertStream, _id_bytes, pad_down
+from tt_models.models.gemma4.expert_stream import ExpertStream, pad_down, row_bytes
 from tt_models.models.gemma4.generic_op import (
     BF16_TILE,
     KERNELS,
@@ -141,7 +141,8 @@ def gate_up_q4_op(
         cb(cores, cb_act, ttnn.bfloat16, BF16_TILE, 2),
     ]
     reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
-    for core, bank, _, vc, slot0, pair_j, act_pair in assign:
+    for core, bank, _, vc, rank, pair_j, act_pair in assign:
+        slot0 = rank * slots_per_core
         row = slot0 // slots_per_row
         assert (slot0 + slots_per_core - 1) // slots_per_row == row, (
             "a core's slots must belong to one token"
@@ -151,7 +152,7 @@ def gate_up_q4_op(
             ids.buffer_address(),
             bank,
             vc,
-            slot0,
+            rank,
             pair_j,
         ]
         writer_rt[core.x][core.y] = [
@@ -166,11 +167,13 @@ def gate_up_q4_op(
             bank,
             row,
         ]
-    id_bytes = _id_bytes(max(a[4] for a in assign) + slots_per_core)
+    # the router's ids row: the slots, then their count at entry `slots`
+    slots = len({a[4] for a in assign}) * slots_per_core
+    id_bytes = row_bytes(slots + 1)
     reader_ct = [
         cb_w,
         cb_rs,
-        slots_per_core,
+        slots,
         blocks,
         2 * block_k,
         2,
@@ -180,6 +183,7 @@ def gate_up_q4_op(
         0,
         0,
         id_bytes,
+        len({a[4] for a in assign}),
         *accessor(ids),
     ]
     writer_ct = [
@@ -314,7 +318,7 @@ def down_q4_op(
             steps.buffer_address(),
             ids.buffer_address(),
         ]
-    id_bytes = _id_bytes(slots)
+    id_bytes = row_bytes(slots + 1)
     reader_ct = [cb_w, cb_rs, slots, kt, cols, bank_cols, tb, id_bytes, *accessor(ids)]
     writer_ct = [
         cb_in0,

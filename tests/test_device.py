@@ -50,7 +50,9 @@ def model(mesh: ttnn.MeshDevice, max_batch: int):
     )
 
 
-@pytest.mark.parametrize(("prompt_len", "batch"), [(64, 1), (64, 4), (1100, 1)])
+@pytest.mark.parametrize(
+    ("prompt_len", "batch"), [(64, 1), (64, 4), (64, 11), (64, 16), (1100, 1)]
+)
 def test_decode_matches_prefill(mesh: ttnn.MeshDevice, prompt_len: int, batch: int):
     """decode(L) must match prefill(L + 1); 1100 tokens runs past the sliding window."""
     torch.manual_seed(0)

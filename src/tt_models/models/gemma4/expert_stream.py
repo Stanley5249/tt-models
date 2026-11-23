@@ -21,10 +21,13 @@ gate_up: act[slot, pair] = gelu_tanh(x Wg) * (x Wu) * w_slot * per_expert_scale[
 into a [32, slots * 352] tile tensor. down: out[col] = sum over slots and k of
 act . Wd, the slot sum fused into the K accumulation.
 
-Several decode tokens (rows 0 .. B - 1 of every tile) share one op pair: the
-matmuls compute all rows anyway, and slot s = 8 * token + j scales only its
-token's row, so the down's slot sum leaves each token's experts in its row.
-The weight bytes grow with the B * 8 slots, the op count does not.
+Several decode tokens (rows 0 .. B - 1 of every tile, B <= 16) share one op
+pair: the matmuls compute all rows anyway. The router (router.py) lists the
+step's distinct experts, one slot each, with a weight per token row that is zero
+for tokens that did not pick it, so an expert shared by several tokens is read
+once and the down's slot sum leaves each token's experts in its row. The slot
+count is known only on the device: every kernel reads it from the ids row, and
+the gate|up cores of a bank split the slots into contiguous runs.
 
 MlpStream runs the shared dense MLP through the same kernels: its per-chip
 gate|up [2816, 2304] BFP8 has 72 column tiles, so bank b holds the 3 pairs
@@ -175,11 +178,9 @@ def run(
     )
 
 
-def _id_bytes(slots: int) -> int:
-    """Bytes the kernels read of the row-major ids / weights row (scratch holds 64)."""
-    n = max(32, 2 * slots)
-    assert n <= 64, "the kernels' scratch holds 32 slots"
-    return n
+def row_bytes(entries: int) -> int:
+    """Bytes the kernels read of a row-major ids or weights row: whole 64-byte lines."""
+    return -(-2 * entries // 64) * 64
 
 
 def gate_up_op(
@@ -193,11 +194,12 @@ def gate_up_op(
     act: ttnn.Tensor,
     *,
     kx: int,
-    slots_per_core: int,
+    slots: int,
+    readers: int,
     pairs: int,
     n_scale: int,
     rows: int = 1,
-    slots_per_row: int = 0,
+    row_weights: bool = False,
     split: tuple[int, int] | None = None,
     fidelity: ttnn.MathFidelity = ttnn.MathFidelity.LoFi,
     build: bool = False,
@@ -207,35 +209,40 @@ def gate_up_op(
     act[slot, pair] = gelu_tanh(x Wg) * (x Wu) * weights[slot] * scale[ids[slot]]
     (kernels/expert_gate_up_*).
 
-    assign: (core, bank, r, vc, slot0, pair_j, act_pair) per core. act tile = slot *
-    pairs + act_pair.
-    rows: decode tokens (tile rows); slot s scales row s // slots_per_row only, or every
-    row with 0.
+    assign: (core, bank, r, vc, rank, pair_j, act_pair) per core. act tile = slot *
+    pairs + act_pair. ids: at most `slots` expert ids and their count at entry
+    `slots`; the `readers` cores of one bank (ranks 0 .. readers - 1) split the slots.
+    rows: decode tokens (tile rows). row_weights: weights is slot-major [slot * rows +
+    row]; otherwise weights[slot] scales every row.
     split: None for the expert layout (contiguous (gate, up) per k, expert-major), or
     (k_stride_tiles,
     up_delta) for the dense layout (one-tile packets at row offsets pair_j and pair_j +
     up_delta).
     """
     cb_x, cb_w, cb_sc, cb_rs, cb_ws, cb_act = 0, 1, 2, 3, 4, 16
+    cb_cnt = 5
     block_k = 11  # k-steps per weight block (22 tiles)
     blocks = kx // block_k
     tb = tile_bytes(w.dtype)
+    id_bytes = row_bytes(slots + 1)
+    wt_bytes = row_bytes(slots * rows if row_weights else slots)
     cbs = [
         cb(cores, cb_x, ttnn.bfloat16, BF16_TILE, kx),
         cb(cores, cb_w, w.dtype, tb, 3 * 2 * block_k),
-        cb(cores, cb_sc, ttnn.bfloat16, BF16_TILE, 2 * slots_per_core),
-        cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
-        cb(cores, cb_ws, ttnn.bfloat16, 512, 1),
+        cb(cores, cb_sc, ttnn.bfloat16, BF16_TILE, 2 * -(-slots // readers)),
+        cb(cores, cb_rs, ttnn.bfloat16, id_bytes, 1),
+        cb(cores, cb_ws, ttnn.bfloat16, id_bytes + wt_bytes + 2 * n_scale, 1),
+        cb(cores, cb_cnt, ttnn.uint32, 16, 1),
         cb(cores, cb_act, ttnn.bfloat16, BF16_TILE, 2),
     ]
     reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
-    for core, bank, _, vc, slot0, pair_j, act_pair in assign:
+    for core, bank, _, vc, rank, pair_j, act_pair in assign:
         reader_rt[core.x][core.y] = [
             w.buffer_address(),
             ids.buffer_address(),
             bank,
             vc,
-            slot0,
+            rank,
             pair_j,
         ]
         writer_rt[core.x][core.y] = [
@@ -245,15 +252,14 @@ def gate_up_op(
             weights.buffer_address(),
             scale.buffer_address(),
             act_pair,
-            slot0,
+            rank,
         ]
     expert_bytes = kx * 2 * tb
     k_stride, up_delta = split or (0, 0)
-    id_bytes = _id_bytes(max(a[4] for a in assign) + slots_per_core)
     reader_ct = [
         cb_w,
         cb_rs,
-        slots_per_core,
+        slots,
         blocks,
         2 * block_k,
         2,
@@ -263,6 +269,7 @@ def gate_up_op(
         k_stride * tb,
         up_delta,
         id_bytes,
+        readers,
     ]
     reader_ct += accessor(ids)
     writer_ct = [
@@ -271,16 +278,19 @@ def gate_up_op(
         cb_act,
         cb_ws,
         kx,
-        slots_per_core,
+        cb_cnt,
         pairs,
         n_scale,
         rows,
-        slots_per_row,
+        int(row_weights),
         id_bytes,
+        wt_bytes,
+        slots,
+        readers,
     ]
     for t in (x, act, ids, weights, scale):
         writer_ct += accessor(t)
-    compute_ct = [cb_x, cb_w, cb_sc, cb_act, slots_per_core, blocks, block_k]
+    compute_ct = [cb_x, cb_w, cb_sc, cb_act, cb_cnt, blocks, block_k]
     program = ttnn.ProgramDescriptor(
         kernels=_kernels(
             cores,
@@ -318,7 +328,8 @@ def down_op(
     """Build the streamed expert down operation.
 
     out[col] = sum over slots e and K tiles k of act[e, k] . W_{ids[e]}[k, col]
-    (kernels/expert_down_*).
+    (kernels/expert_down_*). ids: at most `slots` expert ids and their count at entry
+    `slots`.
 
     w: interleaved [*, slots' K, banks * bank_cols * 32]; bank b holds columns b + banks
     * j. out: a
@@ -326,8 +337,9 @@ def down_op(
     (boundary.py) whose
     vector for row b starts at chunk compact_chunk0 + b * (chunks per vector).
     """
-    cb_in0, cb_w, cb_rs, cb_zero, cb_out = 0, 1, 3, 4, 16
+    cb_in0, cb_w, cb_rs, cb_zero, cb_cnt, cb_scr, cb_out = 0, 1, 3, 4, 5, 6, 16
     tb = tile_bytes(w.dtype)
+    id_bytes = row_bytes(slots + 1)
     compact = compact_chunk0 is not None
     out_dtype = ttnn.float32 if compact else ttnn.bfloat16
     cbs = [
@@ -335,8 +347,10 @@ def down_op(
             cores, cb_in0, ttnn.bfloat16, BF16_TILE, 2 * kt
         ),  # streamed one slot at a time
         cb(cores, cb_w, w.dtype, tb, 3 * kt * cols),
-        cb(cores, cb_rs, ttnn.bfloat16, 64, 1),
+        cb(cores, cb_rs, ttnn.bfloat16, id_bytes, 1),
         cb(cores, cb_zero, ttnn.bfloat16, 64, 1),
+        cb(cores, cb_cnt, ttnn.uint32, 16, 1),
+        cb(cores, cb_scr, ttnn.bfloat16, id_bytes, 1),
         cb(cores, cb_out, out_dtype, 2 * BF16_TILE if compact else BF16_TILE, cols),
     ]
     chunks = 2 * n_tiles
@@ -359,6 +373,7 @@ def down_op(
             j0,
             (compact_chunk0 or 0) + chunks,
             zero,
+            ids.buffer_address(),
         ]
     reader_ct = [
         cb_w,
@@ -368,13 +383,13 @@ def down_op(
         cols,
         bank_cols,
         tb,
-        _id_bytes(slots),
+        id_bytes,
         *accessor(ids),
     ]
     writer_ct = [
         cb_in0,
         cb_out,
-        slots,
+        cb_cnt,
         cols,
         banks,
         n_tiles,
@@ -384,9 +399,12 @@ def down_op(
         kt,
         rows,
         chunks + pad,
+        cb_scr,
+        id_bytes,
+        slots,
     ]
-    writer_ct += accessor(act) + accessor(out)
-    compute_ct = [cb_in0, cb_w, cb_out, slots, kt, cols]
+    writer_ct += accessor(act) + accessor(out) + accessor(ids)
+    compute_ct = [cb_in0, cb_w, cb_out, cb_cnt, kt, cols]
     program = ttnn.ProgramDescriptor(
         kernels=_kernels(
             cores,
@@ -430,22 +448,23 @@ class ExpertStream:
             n_experts,
             rows,
         )
-        self.slots = top_k * rows
+        assert rows <= TILE // 2, "token rows must fit the top faces of a tile"
+        self.gate_up_readers = gate_up_readers
+        self.slots = min(n_experts, top_k * rows)  # the most distinct experts per step
         self.kx = hidden // TILE  # 88
         self.pairs = expert_local // TILE  # 11 real (gate, up) column pairs per chip
         self.kt = self.pairs  # down K tiles
         self.n_tiles = hidden // TILE  # 88 real down columns
         self.bank_cols = -(-self.n_tiles // self.banks)  # 8
         self.down_width = self.bank_cols * self.banks * TILE  # 3072
-        assert self.slots % gate_up_readers == 0
         assert self.bank_cols % down_readers == 0
-        self.gu_slots = self.slots // gate_up_readers
+        self.gu_slots = -(-self.slots // gate_up_readers)  # the most one core takes
         self.down_cols = self.bank_cols // down_readers
         assert self.down_cols <= 4, "fp32 dest holds 4 tiles"
         gu, self.gu_cores = _bankline_cores(
             mesh, list(range(self.pairs)), gate_up_readers
         )
-        self.gu_assign = [(c, b, r, v, r * self.gu_slots, 0, b) for c, b, r, v in gu]
+        self.gu_assign = [(c, b, r, v, r, 0, b) for c, b, r, v in gu]
         self.down_assign, self.down_cores = _bankline_cores(
             mesh, list(range(self.banks)), down_readers
         )
@@ -486,8 +505,7 @@ class ExpertStream:
     ) -> ttnn.Tensor:
         """Run the gate and up projections for the routed experts.
 
-        X [1, 1, rows, H] BF16 tiles; ids / weights: row-major [1, rows * k],
-        token-major (slot 8 t + j);
+        X [1, 1, rows, H] BF16 tiles; ids / weights: the router's rows (router.py);
         scale: row-major BF16 [1, E] per_expert_scale; w_gate_up: the interleaved [1, E,
         H, 2 * pad] BFP4 weight.
         """
@@ -501,11 +519,12 @@ class ExpertStream:
             w_gate_up,
             act,
             kx=self.kx,
-            slots_per_core=self.gu_slots,
+            slots=self.slots,
+            readers=self.gate_up_readers,
             pairs=self.pairs,
             n_scale=self.n_experts,
             rows=self.rows,
-            slots_per_row=self.top_k,
+            row_weights=True,
         )
 
     def down(
@@ -594,11 +613,14 @@ class MlpStream:
         self.down_assign, self.down_cores = _bankline_cores(
             mesh, list(range(banks)), down_readers
         )
-        self.ids0 = _const_row(mesh, [0] * 16, ttnn.uint16)
+        # ids rows as the router's: the slots, then their count
+        self.ids0 = _const_row(mesh, [0, 1] + [0] * 30, ttnn.uint16)
         self.ids_down = _const_row(
-            mesh, list(range(down_slots)) + [0] * (16 - down_slots), ttnn.uint16
+            mesh,
+            [*range(down_slots), down_slots] + [0] * (31 - down_slots),
+            ttnn.uint16,
         )
-        self.ones = _const_row(mesh, [1.0] * 16, ttnn.bfloat16)
+        self.ones = _const_row(mesh, [1.0] * 32, ttnn.bfloat16)
 
     def h_tensor(self, rows: int = 1) -> ttnn.Tensor:
         """Allocate storage for the dense MLP activations."""
@@ -645,11 +667,11 @@ class MlpStream:
             w_gate_up,
             h,
             kx=self.kx,
-            slots_per_core=1,
+            slots=1,
+            readers=1,
             pairs=0,
             n_scale=16,
             rows=rows,
-            slots_per_row=0,
             split=(self.row_tiles, self.per_bank),
             fidelity=self.fidelity,
             build=build,

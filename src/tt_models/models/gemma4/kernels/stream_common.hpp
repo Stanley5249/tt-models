@@ -75,3 +75,15 @@ FORCE_INLINE void read_row0(const Accessor& s, uint32_t l1, uint32_t bytes) {
 constexpr uint32_t ROW0_FACE_BYTES = 32;
 constexpr uint32_t FACE1_OFFSET = 512;
 constexpr uint32_t TILE_BYTES_BF16 = 2048;
+
+// The contiguous run of the n routed slots that core `rank` of `readers` takes: ceil(n / readers) slots
+// each, so the runs stay balanced whatever n is.
+struct SlotRun {
+    uint32_t lo, hi;
+};
+
+FORCE_INLINE SlotRun slot_run(uint32_t n, uint32_t readers, uint32_t rank) {
+    const uint32_t per = (n + readers - 1) / readers;
+    const uint32_t lo = rank * per < n ? rank * per : n;
+    return {lo, lo + per < n ? lo + per : n};
+}

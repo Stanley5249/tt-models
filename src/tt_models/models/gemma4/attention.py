@@ -581,16 +581,26 @@ class Attention:
 
     def _concat_heads_decode(self, attn: ttnn.Tensor, batch: int) -> ttnn.Tensor:
         s = self.shape
-        grid_x = min(batch, 8)
-        while batch % grid_x:
-            grid_x -= 1
-        cores = ttnn.CoreRangeSet(
-            {
-                ttnn.CoreRange(
-                    ttnn.CoreCoord(0, 0),
-                    ttnn.CoreCoord(grid_x - 1, batch // grid_x - 1),
-                )
-            }
+        if batch > 8 and batch % 8:
+            # nlp_concat_heads_decode takes only whole rows of 8 cores; the prefill
+            # concat on the head-major layout costs 14-40 us instead of about 5. The
+            # result is resharded one head per core, as the wo matmul takes it.
+            heads = ttnn.permute(
+                attn, (0, 2, 1, 3), memory_config=ttnn.L1_MEMORY_CONFIG
+            )
+            attn.deallocate(True)
+            flat = ttnn.experimental.nlp_concat_heads(
+                heads, memory_config=ttnn.L1_MEMORY_CONFIG
+            )
+            heads.deallocate(True)
+            out = ttnn.to_memory_config(
+                flat, width_sharded_l1(s.n_q * s.head_dim, s.n_q)
+            )
+            flat.deallocate(True)
+            return out
+        # one core per row on full rows of the grid
+        cores = ttnn.num_cores_to_corerangeset(
+            batch, self.mesh.compute_with_storage_grid_size(), row_wise=True
         )
         shard = ttnn.create_sharded_memory_config(
             shape=(TILE, s.head_dim),

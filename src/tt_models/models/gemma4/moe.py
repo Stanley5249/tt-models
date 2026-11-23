@@ -6,8 +6,8 @@ every selected expert and the load is always balanced. The two partial sums
 are reduced with one all-reduce on a [.., 2*H] concatenation, because each
 branch has its own post-norm that needs the full sum.
 
-Decode streams the routed experts of all its tokens (T <= 4) per DRAM bank
-with two generic ops (expert_stream.py). Prefill is expert-major: the host
+Decode streams the distinct routed experts of all its tokens (T <= 16) per DRAM
+bank with two generic ops (expert_stream.py). Prefill is expert-major: the host
 groups every expert's tokens into chunks, so each chunk reads one expert's
 weights once. The down weight is stored with the hidden padded to 3072 columns
 for the stream's bank layout; prefill slices the padding off.

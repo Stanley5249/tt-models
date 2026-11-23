@@ -1,7 +1,7 @@
-"""Device check of the router op (boundary.Router) against topk_router_gpt, for 1-4
+"""Device check of the router op (router.Router) against topk_router_gpt, for 1-16
 token rows.
 
-pixi run python scripts/kernels/router_check.py [--layers 0 5 17] [--rows 1 2 3 4]
+pixi run python scripts/kernels/router_check.py [--layers 0 5 17] [--rows 1 2 4 16]
 """
 
 import argparse
@@ -62,20 +62,13 @@ def main():
                     nh = host(n).float()[0, 0, :rows]
                     wh = host(ff.router).float()[0, 0]
                     for c in range(2):
-                        got_i = (
-                            host(ids, c).long().flatten()[: rows * k].reshape(rows, k)
-                        )
-                        got_w = (
-                            host(wts, c).float().flatten()[: rows * k].reshape(rows, k)
-                        )
+                        got = router.decode(host(ids, c), host(wts, c))
                         ref_i = host(ids_ref, c).long().reshape(-1, k)[:rows]
                         ref_w = host(w_ref, c).float().reshape(-1, k)[:rows]
                         for b in range(rows):
-                            a, bb = got_i[b].tolist(), ref_i[b].tolist()
-                            wa, wb = (
-                                dict(zip(a, got_w[b].tolist())),
-                                dict(zip(bb, ref_w[b].tolist())),
-                            )
+                            wa, bb = got[b], ref_i[b].tolist()
+                            a = list(wa)
+                            wb = dict(zip(bb, ref_w[b].tolist()))
                             same += set(a) == set(bb)
                             total += 1
                             wdiff = max(

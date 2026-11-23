@@ -1,4 +1,4 @@
-"""Check and time the decode expert stream ops for 1-4 token rows.
+"""Check and time the decode expert stream ops for 1-16 token rows.
 
     pixi run python scripts/kernels/expert_stream_check.py [--rows 4] [--layer \\
         0] [--gate-up-readers 4] [--down-readers 2]
@@ -6,7 +6,9 @@
 Real layer weights. The stream and the prefill expert-major path (indexed
 sparse_matmul, an independent implementation) get the same normed rows; the
 per-chip partial sums (before the all-reduce) are compared, then the stream is
-timed by trace replay (tt_models.common.timing.device_time_us).
+timed by trace replay (tt_models.common.timing.device_time_us). The stream takes
+the router op's distinct experts, so rows that share experts read them once;
+`--shared` gives every row the same input to show that.
 """
 
 import argparse
@@ -22,6 +24,7 @@ from tt_models.common.weights import WeightLoader
 from tt_models.models.gemma4.checkpoint import Checkpoint
 from tt_models.models.gemma4.expert_stream import ExpertStream, pad_down
 from tt_models.models.gemma4.moe import FeedForward
+from tt_models.models.gemma4.router import Router
 
 
 def main():
@@ -31,6 +34,7 @@ def main():
     ap.add_argument("--down-readers", type=int, default=2)
     ap.add_argument("--seeds", type=int, default=3)
     ap.add_argument("--rows", type=int, default=1)
+    ap.add_argument("--shared", action="store_true", help="the same input in every row")
     args = ap.parse_args()
     ckpt = Checkpoint()
     cfg = ckpt.config
@@ -77,7 +81,8 @@ def main():
         )
         for seed in range(args.seeds):
             torch.manual_seed(seed)
-            res = torch.randn(1, 1, rows, cfg.hidden_size) * 3
+            res = torch.randn(1, 1, 1 if args.shared else rows, cfg.hidden_size) * 3
+            res = res.expand(1, 1, rows, cfg.hidden_size).contiguous()
             r = ttnn.from_torch(
                 res,
                 dtype=ttnn.bfloat16,
@@ -89,26 +94,16 @@ def main():
             x = ttnn.mul(normed, ff.pre_ff2, memory_config=ttnn.L1_MEMORY_CONFIG)
             ref = ff._experts(x, normed)
 
+            router = Router(mesh, cfg.hidden_size, ff.n_experts, ff.top_k, rows=rows)
+
             def route():
-                ids, weights = ff._route(normed, rows)
-                if rows == 1:
-                    return ids, weights
-                flat = ttnn.typecast(
-                    ttnn.reshape(ttnn.typecast(ids, ttnn.uint32), (1, rows * ff.top_k)),
-                    ttnn.uint16,
-                )
-                return flat, ttnn.reshape(weights, (1, rows * ff.top_k))
+                ids, weights = router.outputs()
+                router(normed, ff.router, ids, weights)
+                return ids, weights
 
             ids, weights = route()
-            if seed == 0:
-                print(
-                    "ids",
-                    ids.memory_config().buffer_type,
-                    ids.shape,
-                    "weights",
-                    weights.memory_config().buffer_type,
-                    flush=True,
-                )
+            n = int(ttnn.to_torch(ttnn.get_device_tensors(ids)[0]).flatten()[st.slots])
+            print(f"seed {seed}: {n} distinct experts for {rows} rows", flush=True)
 
             def stream():
                 act = st.act_tensor()
