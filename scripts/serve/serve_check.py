@@ -7,13 +7,13 @@ what else the server is doing.
 Needs a running `just serve-gemma4`. Every check but tools compares greedy token ids
 with the same request run alone:
 
-- isolation: four chat requests at once, stopping at different lengths, so decode
-  replays every active row count while the others are mid-sequence. One row
-  runs the fused batch-1 kernels and 2-4 rows the batched ones, which round
-  differently, and which one computed a step depends on arrival timing; so a
-  request may take the other branch at a near-tie later on. Cross-request
-  contamination garbles a request at once, so this check needs the first 16
-  tokens to agree and reports later divergences;
+- isolation: sixteen chat requests at once (four prompts, each stopping at four
+  lengths), so decode replays every active row count up to 16 while the others are
+  mid-sequence and rows share experts. Row counts round differently, and which
+  one computed a step depends on arrival timing; so a request may take another
+  branch at a near-tie later on. Cross-request contamination garbles a request
+  at once, so this check needs the first 16 tokens to agree and reports later
+  divergences;
 - raw: a raw token prompt (no <bos>, flat logits, the investigation's failing
   case), with temperature 0 set explicitly;
 - arrival: an 8K-token prompt arrives while a stream decodes; reports the
@@ -190,14 +190,16 @@ def document(n_chars: int) -> str:
 
 
 def check_isolation(url: str):
-    alone = [chat(url, p, n) for p, n in zip(PROMPTS, LENGTHS)]
+    requests = list(itertools.product(PROMPTS, LENGTHS))
+    prompts, lengths = [p for p, _ in requests], [n for _, n in requests]
+    alone = [chat(url, p, n) for p, n in requests]
     ok = True
     for rnd in range(2):  # the second round replays every captured trace again
-        with ThreadPoolExecutor(len(PROMPTS)) as pool:
-            together = list(pool.map(chat, itertools.repeat(url), PROMPTS, LENGTHS))
-        for p, a, b in zip(PROMPTS, alone, together):
+        with ThreadPoolExecutor(len(requests)) as pool:
+            together = list(pool.map(chat, itertools.repeat(url), prompts, lengths))
+        for (p, n), a, b in zip(requests, alone, together):
             ok &= compare(
-                f"concurrent round {rnd}: {p[:40]!r}", a, b, need=min(16, len(a))
+                f"concurrent round {rnd}: {p[:32]!r} x{n}", a, b, need=min(16, len(a))
             )
     return ok
 
