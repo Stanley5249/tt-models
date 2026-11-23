@@ -539,7 +539,12 @@ class Attention:
             program_config=ttnn.SDPAProgramConfig(
                 compute_with_storage_grid_size=grid,
                 q_chunk_size=32,
-                k_chunk_size=128,  # 64: 0.3 ms slower per step at 2k-8k positions
+                # 128 positions: 0.3 ms per step faster than 64 at 2k-8k positions.
+                # A chunk reads whole page-table entries, so it must not run past the
+                # table, whose width a small KV pool can make odd.
+                k_chunk_size=128
+                if page_table.shape[-1] * kv.block_size % 128 == 0
+                else 64,
                 exp_approx_mode=False,
             ),
             compute_kernel_config=HIFI4,

@@ -3,9 +3,9 @@
 Each chip streams its half of the tied embedding (BFP8, 131072 columns) with
 generic-op kernels (kernels/lm_head_*), as the expert streams do: the columns
 are padded to a multiple of the 12 DRAM banks, so bank b holds tile columns
-b + 12 j of every K row, and 3 cores next to each bank read its columns in
-groups of 3 tiles, accumulate all 88 K tiles in FP32 dest and write the FP32
-logits straight into row-major rows. The ttnn version (16 DRAM-sharded matmuls,
+b + 12 j of every K row, and 1-2 cores next to each bank (READERS) read its
+columns in groups of 3 tiles, accumulate all 88 K tiles in FP32 dest and write
+the FP32 logits straight into row-major rows. The ttnn version (16 DRAM-sharded matmuls,
 an untilize each and a concat) placed its readers from chip 0's DRAM map, which
 cost chip 1 0.5 ms per step.
 """
@@ -74,12 +74,13 @@ class LmHead:
 
         def weight() -> torch.Tensor:
             t = ckpt.get("embed_tokens.weight").T  # [H, V]
-            pad = t.new_zeros(self.hidden, width - per_chip)
-            parts = [
-                torch.cat([t[:, c * per_chip : (c + 1) * per_chip], pad], -1)
-                for c in range(self.tp)
-            ]
-            return torch.cat(parts, -1).contiguous()[None, None]
+            # one padded copy: [chip 0's vocab | zeros | chip 1's vocab | zeros]
+            out = t.new_zeros(1, 1, self.hidden, self.tp * width)
+            for c in range(self.tp):
+                out[0, 0, :, c * width : c * width + per_chip] = t[
+                    :, c * per_chip : (c + 1) * per_chip
+                ]
+            return out
 
         self.weight = loader.put(f"lm_head_banks{width}", weight, dtype, shard_dim=-1)
         # Each chip's cores sit next to its own DRAM banks.

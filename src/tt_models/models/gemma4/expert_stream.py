@@ -343,9 +343,8 @@ def down_op(
     rows: int = 1,
     compact_chunk0: int | None = None,
     fidelity: ttnn.MathFidelity = ttnn.MathFidelity.LoFi,
-    build: bool = False,
-) -> ProgramParts | ttnn.Tensor:
-    """Build the streamed expert down operation.
+) -> ProgramParts:
+    """Build the streamed expert down program (run it with run_on_chips).
 
     out[col] = sum over slots e and K tiles k of act[e, k] . W_{ids[e]}[k, col]
     (kernels/expert_down_*). ids: at most `slots` expert ids and their count at entry
@@ -437,8 +436,7 @@ def down_op(
         semaphores=[],
         cbs=cbs,
     )
-    ios = [w, act, ids, out]
-    return (program, ios) if build else ttnn.generic_op(ios, program)
+    return program, [w, act, ids, out]
 
 
 class ExpertStream:
@@ -601,7 +599,6 @@ class ExpertStream:
                     n_tiles=self.n_tiles,
                     rows=self.rows,
                     compact_chunk0=compact_chunk0,
-                    build=True,
                 )
                 for assign, cores in self.down_chips
             ]
@@ -679,7 +676,6 @@ class DownStream:
                     rows=rows,
                     compact_chunk0=compact_chunk0,
                     fidelity=self.fidelity,
-                    build=True,
                 )
                 for assign, cores in self.chips
             ]
