@@ -36,7 +36,7 @@ Context for values that differ between docs:
 - [Round 1](2026-11-17-decode-round-1/report.md) reports median TPOT (74.8 ms at `5101e0e`). The other docs use the mean, which is 74.71 ms in `baseline-5101e0e/c1-128-128.json`.
 - `5887694` was measured twice: 35.18 ms TPOT on 2026-11-17 and 35.16 ms on 2026-11-19 with the CPU governor at `performance`. Its standalone decode was 32.9 and 33.3 ms, inside run-to-run noise.
 - Round 2's report commit `a527dad` had overwritten three of round 1's final serving runs. This change moves the 2026-11-19 runs to `2026-11-19-decode-round-2/final-serving/` (18.72 ms TPOT at one user) and restores round 1's 2026-11-17 runs from `d775003` (35.18 ms).
-- Round 2's end code gave 18.72 ms with `bench.sh` and sampling, and 18.17 ms with `bench_tis.sh` and greedy decoding ([official comparison](2026-11-19-official-comparison.md)). The client differs, not the code.
+- The Stage 2 end code gave 18.72 ms with `bench.sh` and sampling, and 18.17 ms with `bench_tis.sh` and greedy decoding ([official comparison](2026-11-19-official-comparison.md)). The client differs, not the code.
 - Step 1 ended at 35.42 ms and step 2 started at 34.95 ms. Two merges (`2d0d735`, `d565603`) came in between, and no doc explains the 0.47 ms difference.
 - On 2026-11-22, single-user TPOT was 18.10-18.16 ms on ttnn 0.81.1 and 17.46-17.47 ms on 0.82.0 ([ttnn 0.82.0 run](2026-11-22-shared-stack.md)). The 4-user output throughput was not reported that day, so 111.3 tok/s from 2026-11-21 is the latest.
 
