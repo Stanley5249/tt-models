@@ -91,18 +91,8 @@ class QkRope:
         groups = min(rows, 64 // self.V)  # cores per compact tile
         cores = [ttnn.CoreCoord(i % 8, i // 8) for i in range(groups * self.V)]
         crs = core_range_set(cores)
-        cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, cb_sq, cb_s1, cb_r, cb_out = (
-            0,
-            1,
-            2,
-            3,
-            4,
-            5,
-            6,
-            7,
-            8,
-            16,
-        )
+        cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, cb_sq, cb_s1, cb_r, cb_t = range(10)
+        cb_out = 16
         f32 = ttnn.float32
         cbs = [
             cb(crs, i, f32, FP32_TILE, n)
@@ -113,7 +103,8 @@ class QkRope:
                 (cb_w, 2),
                 (cb_a, 1),
                 (cb_b, 1),
-                (cb_sq, 2),
+                (cb_sq, 1),
+                (cb_t, 2),  # each its own CB: one push and pop per row keeps it aligned
                 (cb_s1, 1),
                 (cb_r, 1),
             )
@@ -165,6 +156,7 @@ class QkRope:
             cb_out,
             f32_bits(1.0 / self.head_dim),
             f32_bits(self.eps),
+            cb_t,
         ]
         dm = ttnn.DataMovementConfigDescriptor
         kernels = [

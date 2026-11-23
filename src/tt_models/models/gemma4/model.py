@@ -114,6 +114,8 @@ class Gemma4TT:
         self._trace_inputs: dict[int, dict[str, ttnn.Tensor]] = {}
         self._pt_last: dict[int, dict[str, torch.Tensor]] = {}
         self._pt_src: dict[str, torch.Tensor] = {}
+        # restored after each decode input build (_decode_inputs)
+        self._torch_threads = torch.get_num_threads()
         init_ccl(mesh)
 
     # -- host-side tables ----------------------------------------------------
@@ -543,12 +545,11 @@ class Gemma4TT:
         device, and waking it for these small tensors cost 1-2 ms per step (2.2 ->
         0.6 ms at 4 rows). The sampler's large argmax keeps the pool.
         """
-        threads = torch.get_num_threads()
         torch.set_num_threads(1)
         try:
             return self._build_decode_inputs(tokens, positions, tables)
         finally:
-            torch.set_num_threads(threads)
+            torch.set_num_threads(self._torch_threads)
 
     def _build_decode_inputs(
         self, tokens: torch.Tensor, positions: torch.Tensor, tables: torch.Tensor

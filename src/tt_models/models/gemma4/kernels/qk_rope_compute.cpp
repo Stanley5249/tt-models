@@ -25,6 +25,7 @@ void kernel_main() {
     constexpr uint32_t cb_out = get_compile_time_arg_val(9);  // BF16
     constexpr uint32_t inv_hd = get_compile_time_arg_val(10);
     constexpr uint32_t eps = get_compile_time_arg_val(11);
+    constexpr uint32_t cb_t = get_compile_time_arg_val(12);  // the two RoPE terms
     const uint32_t n_rows = get_arg_val<uint32_t>(0);  // token rows this core handles
 
     compute_kernel_hw_startup(cb_x, cb_w, cb_sq);
@@ -92,16 +93,16 @@ void kernel_main() {
         mul_reuse_dest_tiles<EltwiseBinaryReuseDestType::DEST_TO_SRCA>(cb_cs, 1, 1);
         tile_regs_commit();
         tile_regs_wait();
-        cb_reserve_back(cb_sq, 2);
-        pack_tile(0, cb_sq);
-        pack_tile(1, cb_sq);
-        cb_push_back(cb_sq, 2);
+        cb_reserve_back(cb_t, 2);
+        pack_tile(0, cb_t);
+        pack_tile(1, cb_t);
+        cb_push_back(cb_t, 2);
         tile_regs_release();
 
-        cb_wait_front(cb_sq, 2);
-        add_init(cb_sq, cb_sq, false);
+        cb_wait_front(cb_t, 2);
+        add_init(cb_t, cb_t, false);
         tile_regs_acquire();
-        add_tiles(cb_sq, cb_sq, 0, 1, 0);
+        add_tiles(cb_t, cb_t, 0, 1, 0);
         mul_reuse_dest_init<EltwiseBinaryReuseDestType::DEST_TO_SRCA>(cb_r);
         mul_reuse_dest_tiles<EltwiseBinaryReuseDestType::DEST_TO_SRCA>(cb_r, 0, 0);
         tile_regs_commit();
@@ -111,7 +112,7 @@ void kernel_main() {
         pack_tile(0, cb_out);
         cb_push_back(cb_out, 1);
         tile_regs_release();
-        cb_pop_front(cb_sq, 2);
+        cb_pop_front(cb_t, 2);
         cb_pop_front(cb_r, 1);
 
         cb_pop_front(cb_x, 1);
