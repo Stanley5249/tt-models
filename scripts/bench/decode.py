@@ -3,8 +3,9 @@
     pixi run python scripts/bench/decode.py --batch 1 --steps 32 [--trace] \\
         [--out artifacts/decode/x.json]
 
-Prefills every slot with the same prompt, then times `--steps` decode calls
-end to end (host inputs in, float logits out). The first call per mode is a
+Prefills every slot with its own random prompt, so the rows route to different
+experts as separate requests do, then times `--steps` decode calls end to end
+(host inputs in, float logits out). The first call per mode is a
 warm-up (compile, or trace capture) and is excluded.
 """
 
@@ -49,12 +50,13 @@ def main():
         print(f"model loaded in {time.time() - t0:.0f}s", flush=True)
         pts = model.allocate_kv_cache(args.batch, args.prompt_len + args.steps + 1)
         torch.manual_seed(0)
-        ids = torch.randint(100, 20000, (args.prompt_len,))
-        logits = None
-        for b in range(args.batch):
-            logits = model.prefill(ids, 0, pts[:, b])
-        assert logits is not None
-        tok = torch.full((args.batch,), int(logits.argmax()))
+        ids = torch.randint(100, 20000, (args.batch, args.prompt_len))
+        tok = torch.tensor(
+            [
+                int(model.prefill(ids[b], 0, pts[:, b]).argmax())
+                for b in range(args.batch)
+            ]
+        )
         times = []
         for step in range(args.steps + 1):
             pos = torch.full((args.batch,), args.prompt_len + step)
