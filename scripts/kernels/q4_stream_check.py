@@ -173,7 +173,7 @@ def main():
             )
             normed = rms_norm(r, None, ff.eps)
             x = ttnn.mul(normed, ff.pre_ff2, memory_config=ttnn.L1_MEMORY_CONFIG)
-            ids, weights = ff._route(normed, 1)
+            ids, weights = ff.route_one(normed)
             xh = ttnn.to_torch(ttnn.get_device_tensors(x)[0]).double()[0, 0, 0]
             idh = ttnn.to_torch(ttnn.get_device_tensors(ids)[0])[0, : ff.top_k].long()
             wh = ttnn.to_torch(ttnn.get_device_tensors(weights)[0]).double()[

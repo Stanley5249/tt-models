@@ -364,6 +364,13 @@ class FeedForward:
             num_experts=self.n_experts,
         )
 
+    def route_one(self, normed: ttnn.Tensor) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+        """Route one normed row with the decode router op, as the streams read it."""
+        router = router_op(self.mesh, self.cfg)
+        ids, weights = router.outputs()
+        router(normed, self.router, ids, weights)
+        return ids, weights
+
     def _experts_q4_rows(
         self, x: ttnn.Tensor, normed: ttnn.Tensor, group: int = 256
     ) -> ttnn.Tensor:
@@ -388,7 +395,7 @@ class FeedForward:
                 nr = ttnn.slice(
                     normed, [0, 0, t, 0], [1, 1, t + 1, self.hidden], memory_config=L1
                 )
-                ids, weights = self._route(nr, 1)
+                ids, weights = self.route_one(nr)
                 act = self.stream.act_tensor()
                 q4.gate_up_op(xr, ids, weights, self.scale_row, act)
                 out = self.stream.out_tensor(DRAM)
