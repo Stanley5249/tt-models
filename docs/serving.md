@@ -15,13 +15,13 @@ vLLM owns every layer's KV cache ([hybrid KV cache](experiments/2026-11-21-hybri
 
 ### Prefill
 
-`Gemma4TT.prefill(tokens, start, tables)` computes positions `[start, len(tokens))` and writes only their K/V. `start` must lie on the block grid, the lcm of the group block sizes, so prefix hits and chunk ends never rewrite shared blocks; the adapter refuses a chunk alignment off the grid at startup. Long prompts run in pieces of at most `PREFILL_CHUNK` tokens, and every piece pads to a bucket (`config.prefill_rows`) whose programs are built at warmup ([length buckets](experiments/2026-11-21-prefill-length-buckets.md)). Experts run expert-major in one-tile chunks ([one-tile chunks](experiments/2026-11-21-one-tile-expert-chunks.md)).
+`Gemma4TT.prefill(tokens, start, tables)` computes positions `[start, len(tokens))` and writes only their K/V. `start` must lie on the block grid, the lcm of the group block sizes, so prefix hits and chunk ends never rewrite shared blocks; the adapter refuses a chunk alignment off the grid at startup. Long prompts run in pieces of at most `PREFILL_CHUNK` tokens, and every piece pads to a bucket (`config.prefill_rows`) whose programs are built at warmup ([length buckets](experiments/2026-11-21-prefill-length-buckets.md)). Experts run expert-major in one-tile chunks ([one-tile chunks](experiments/2026-11-21-one-tile-expert-chunks.md)). The requests of one scheduler step whose pieces fit `PREFILL_CHUNK` rows run as one pass (`Gemma4TT.prefill_batch`): projections, MLP and experts take every piece's rows, and each piece writes its K/V and attends over its own sequence ([round 3](experiments/2026-11-23-decode-serving-round-3.md)).
 
 Prefix caching is vLLM's automatic prefix caching. Chunked prefill uses the plugin's scheduler with one decode step after every prefill chunk ([decode interleave](experiments/2026-11-21-decode-interleave.md)).
 
 ### Decode
 
-Decode captures one metal trace per active row count (1 to `STREAM_ROWS`, 16). Every row count runs the same fused path: compact FP32 boundaries with one tail op per boundary (`boundary.py`), the router op (`router.py`), and the expert and MLP streams (`expert_stream.py`), where one op pair covers every expert slot of every row. The router lists the step's distinct experts, so an expert that several rows picked is read once ([shared expert reads](experiments/2026-11-23-shared-expert-reads.md)). Batch 1 keeps two specializations: the fused q/k norm and RoPE op (`qk_rope.py`) and a one-token core placement in the streams. See [round 2](experiments/2026-11-19-decode-round-2.md), [batched streams](experiments/2026-11-21-batched-expert-streams.md) and [compact boundaries](experiments/2026-11-21-compact-boundaries-multi-row.md).
+Decode captures one metal trace per active row count (1 to `STREAM_ROWS`, 16). Every row count runs the same fused path: compact FP32 boundaries with one tail op per boundary (`boundary.py`), the router op (`router.py`), and the expert and MLP streams (`expert_stream.py`), where one op pair covers every expert slot of every row. The router lists the step's distinct experts, so an expert that several rows picked is read once ([shared expert reads](experiments/2026-11-23-shared-expert-reads.md)), and its cores share the rows' top-k. The fused q/k norm and RoPE op (`qk_rope.py`) covers every row count. o_proj and the dense MLP down run through the down stream (`DownStream`) straight into compact vectors, and the LM head streams its weight with its own kernels (`lm_head.py`). The streams and the LM head place their cores per chip, because the two chips are harvested differently. See [round 2](experiments/2026-11-19-decode-round-2.md), [batched streams](experiments/2026-11-21-batched-expert-streams.md), [compact boundaries](experiments/2026-11-21-compact-boundaries-multi-row.md) and [round 3](experiments/2026-11-23-decode-serving-round-3.md).
 
 Batch 1 and larger batches still run some different kernels, which round differently, so a greedy request can continue differently at a near-tie when it shares decode steps with others. Both paths are equally accurate against fp32 ([batch paths](experiments/2026-11-21-batch-path-accuracy.md)).
 
@@ -37,7 +37,7 @@ The model-side sampler (`sample` in `vllm_adapter.py`) runs on the host after th
 
 ### Precision
 
-Experts are BFP4 at LoFi; attention, MLP, LM head and KV cache are BFP8; the residual stream between layers is FP32 (`config.Precision`). The checkpoint is Q4_0, which BFP4 cannot hold ([weight formats](experiments/2026-11-17-weight-precision.md), [BFP4](experiments/2026-11-21-bfp4-mixed-precision.md)). `Precision(expert_q4=True)` reads the exact Q4_0 experts in batch-1 decode; it is for accuracy runs only, because prefill then runs one token at a time ([Q4_0 decode experts](experiments/2026-11-21-q4-decode-experts.md)).
+Experts are BFP4 at LoFi; attention, MLP, LM head and KV cache are BFP8 (`Precision(lm_head=bfp4)` trades decode KL for speed, [round 3](experiments/2026-11-23-decode-serving-round-3.md)); the residual stream between layers is FP32 (`config.Precision`). The checkpoint is Q4_0, which BFP4 cannot hold ([weight formats](experiments/2026-11-17-weight-precision.md), [BFP4](experiments/2026-11-21-bfp4-mixed-precision.md)). `Precision(expert_q4=True)` reads the exact Q4_0 experts in batch-1 decode; it is for accuracy runs only, because prefill then runs one token at a time ([Q4_0 decode experts](experiments/2026-11-21-q4-decode-experts.md)).
 
 ## Capabilities
 
@@ -93,9 +93,9 @@ Accuracy needs 3 seeds and speed a same-day baseline ([experiments](experiments/
 ## Open work
 
 - **Q4_0 serving.** Needs an expert-major prefill matmul that dequantizes inside, batch 2-4 down kernels, compact step tiles, and DRAM for the steps ([prefill dequantization](experiments/2026-11-21-q4-prefill-dequant.md)).
-- **Device sampling and async decode.** Needs a fused LM-head top-k and a device embedding.
-- **Multi-row decode.** RoPE at 2-16 rows uses generic ops; 9-15 rows concatenate heads through a permute; the router's top-k runs on one RISC (145 us at 16 rows); prefill runs one request at a time, so TTFT grows with concurrency.
-- **Host overhead.** Input build, readback, sampling and vLLM bookkeeping run outside the device each step; only async decode removes most of it.
+- **Device sampling and async decode.** Needs a top-k in the LM head stream and a device embedding. At 16 rows the logit readback alone takes 4.3 ms per step.
+- **Multi-row decode.** 9-15 rows concatenate heads through a permute. More than 16 rows needs the stream kernels to use a tile's bottom faces. The tails (30-40 us each) are latency-bound whatever their core count.
+- **Host overhead.** Input build, readback and sampling run outside the device each step; only async decode removes most of it.
 - **Prefill.** The all-gathers are bound by one Ethernet link, and the gate|up sparse matmul uses a fraction of the cores.
 - **Tool choice upstream.** Drop `tool_parser.py` once vLLM sets the structural tag for gemma4 (vllm-project/vllm#53363).
 - **Quality.** More GPQA questions or seeds before comparing precision choices ([GPQA baseline](experiments/2026-11-21-gpqa-baseline.md)).

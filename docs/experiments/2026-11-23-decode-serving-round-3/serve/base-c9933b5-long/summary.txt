@@ -1,0 +1,6 @@
+c1-2048-128-n4 r0 {'in_tok': 2064.2, 'mean_ttft': 1436.9, 'mean_tpot': 18.71, 'tput_user': 53.44, 'tput': 33.56}
+c1-2048-128-n4 r1 {'in_tok': 2064.8, 'mean_ttft': 1433.4, 'mean_tpot': 18.73, 'tput_user': 53.4, 'tput': 33.58}
+c1-2048-128-n4 r2 {'in_tok': 2064.2, 'mean_ttft': 1440.0, 'mean_tpot': 18.72, 'tput_user': 53.43, 'tput': 33.53}
+c16-1024-256-n32 r0 {'in_tok': 1040.5, 'mean_ttft': 25247.1, 'mean_tpot': 37.79, 'tput_user': 26.46, 'tput': 96.6}
+c16-1024-256-n32 r1 {'in_tok': 1040.4, 'mean_ttft': 25235.2, 'mean_tpot': 37.79, 'tput_user': 26.46, 'tput': 96.62}
+c16-1024-256-n32 r2 {'in_tok': 1040.3, 'mean_ttft': 25265.8, 'mean_tpot': 37.81, 'tput_user': 26.45, 'tput': 96.54}
