@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | Stage 1: Initial Optimization | round 1 | `5101e0e` -> `5887694` | 2026-11-17 |
 | Stage 2: Single-user Decode | round 2 | `5887694` -> `f158df1` | 2026-11-18/19 |
-| Stage 3: Multi-user Decode | batched expert streams (step 1), router op and compact boundaries for 2-4 rows (step 2) | `a485d83` -> `0e65f24`, `d565603` -> `333c5e8` | 2026-11-21 |
+| Stage 3: Multi-user Decode | batched expert streams (step 1), router op and compact boundaries for batches 2-4 (step 2) | `a485d83` -> `0e65f24`, `d565603` -> `333c5e8` | 2026-11-21 |
 
 A stage holds many changes, one per iteration of the profile, change, and benchmark loop. The move from ttnn 0.81.1 to 0.82.0 on 2026-11-22 is a library version change, not a stage.
 
