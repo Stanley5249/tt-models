@@ -21,4 +21,4 @@ Not kept: `all_reduce_async` and `num_links=2` (both hung the card), router as l
 
 **Decision.** Kept. Batch 4 still ran the old path, which [batched expert streams](2026-11-21-batched-expert-streams.md) and [compact boundaries for 2-4 rows](2026-11-21-compact-boundaries-multi-row.md) later fixed. Remaining gap to the roofline: weight ops at 170-210 GB/s, about 5 ms of non-weight ops, host work, and chip 1 running 0.5 ms behind.
 
-**Data.** `2026-11-19-decode-round-2/`: `report.md` (the original write-up with the per-layer table and roofline), trace breakdowns in `final/`, serving runs, and accuracy runs per step (`decode4x128-<step>-p*.json`).
+**Data.** `2026-11-19-decode-round-2/`: `report.md` (the original write-up with the per-layer table and roofline), trace breakdowns in `final/`, serving runs (`final-base/` before, `final-serving/` after; `final-serving/` was moved from the round-1 folder on 2026-11-23), and accuracy runs per step (`decode4x128-<step>-p*.json`).
