@@ -26,14 +26,11 @@ class Router:
     Logits, top-k, softmax over the k logits and the step's distinct experts in one
     op (kernels/router_*).
 
-    topk_router_gpt took 68-72 us per layer, mostly in its top-k stage. Here 11 cores (8
-    at 3-4 tokens)
+    topk_router_gpt took 68-72 us per layer, mostly in its top-k stage. Here 8-11 cores
     each multiply their K slice of the normed rows by the BF16 router weight, the
-    reducer core gathers the
-    partial rows (semaphore), sums each token's rows and takes exp on the FPU/SFPU, and
-    its RISC picks every
-    token's top k and normalizes them: 37-42 us at 1-2 tokens, 57-68 us at 3-4
-    (scripts/kernels/router_check.py).
+    reducer core gathers the partial rows (semaphore), sums each token's rows and takes
+    exp on the FPU/SFPU, and the cores' RISCs pick the tokens' top k and normalize them,
+    a share of the rows each (scripts/kernels/router_check.py).
     Its weights are closer to an fp32 reference (max error 0.0007 against
     topk_router_gpt's 0.11).
     Outputs (row-major): uint16 ids of the step's distinct experts, one slot each, with
@@ -122,7 +119,7 @@ class Router:
         (expert_stream.run).
         """
         crs = core_range_set(self.cores)
-        cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, cb_out = 0, 1, 2, 3, 4, 5, 6
+        cb_x, cb_w, cb_j, cb_partial, cb_part, cb_e, cb_out, cb_res = range(8)
         f32, bf16 = ttnn.float32, ttnn.bfloat16
         n = self.n_tiles
         cbs = [
@@ -133,7 +130,13 @@ class Router:
             cb(crs, cb_part, f32, FP32_TILE, n),
             cb(crs, cb_e, f32, FP32_TILE, n),
             cb(crs, cb_out, bf16, 2 * (self.id_entries + self.wt_entries), 1),
+            cb(crs, cb_res, bf16, 4 * self.top_k * self.rows, 1),  # k ids, k weights
         ]
+        # The reducer signals the top-k cores (router_writer.cpp) at these NOC coords.
+        peers = [0] * (2 * 10)
+        for r, c in enumerate(self.cores[1:]):
+            noc = self.mesh.worker_core_from_logical_core(c)
+            peers[2 * r : 2 * r + 2] = [noc.x, noc.y]
         reader_rt, writer_rt, compute_rt = (
             ttnn.RuntimeArgs(),
             ttnn.RuntimeArgs(),
@@ -157,6 +160,8 @@ class Router:
                 ids.buffer_address(),
                 wts.buffer_address(),
                 n0,
+                i,
+                *peers,
             ]
             compute_rt[c.x][c.y] = [red]
         sem_id = 0
@@ -199,6 +204,9 @@ class Router:
                     2 * self.wt_entries,
                     self.tn,
                     len(self.cores),
+                    cb_res,
+                    1,
+                    2,
                     *accessor(ids),
                     *accessor(wts),
                 ],
@@ -229,7 +237,10 @@ class Router:
                 ),
             ),
         ]
-        sems = [ttnn.SemaphoreDescriptor(id=sem_id, core_ranges=crs, initial_value=0)]
+        sems = [
+            ttnn.SemaphoreDescriptor(id=i, core_ranges=crs, initial_value=0)
+            for i in (sem_id, 1, 2)  # partials, top-k ready, top-k done
+        ]
         program = ttnn.ProgramDescriptor(kernels=kernels, semaphores=sems, cbs=cbs)
         return (
             (program, [x, w, ids, wts])
