@@ -11,7 +11,7 @@ fixed cost.
 
 Here the residual stream and the all-reduced partial sums are "compact": the
 2816 values as FP32 chunks of 16, 64 chunks per [32, 32] FP32 tile, so a vector
-is 3 dense tiles (compact.hpp). Matmul outputs are packed into that form, the
+is 3 dense tiles (compact.hpp). The o_proj and down streams write that form, the
 all-gather moves 3 or 6 tiles, and one tail op per boundary does the sum over
 chips, every norm, the residual adds and the layer scalar on a few tiles, then
 scatters the next matmul inputs back to row form (BF16).
@@ -24,7 +24,7 @@ from __future__ import annotations
 import ttnn
 
 from tt_models.common.config import L1, TILE
-from tt_models.models.gemma4.compact import CHUNK, CHUNKS_PER_TILE, compact_tiles
+from tt_models.models.gemma4.compact import CHUNK, compact_tiles
 from tt_models.models.gemma4.generic_op import (
     FP32_TILE,
     KERNELS,
@@ -37,11 +37,7 @@ from tt_models.models.gemma4.generic_op import (
 
 
 class Boundary:
-    """Compact pack and tail operators for one mesh.
-
-    Compact pack and the two tail ops of one mesh (core placement shared by the
-    layers).
-    """
+    """The compact tensors and the two tail ops of one mesh (shared by the layers)."""
 
     def __init__(
         self, mesh: ttnn.MeshDevice, hidden: int, eps: float, tail_cores: int = 6
@@ -88,63 +84,6 @@ class Boundary:
         )
 
     # -- ops -------------------------------------------------------------------
-
-    def pack(
-        self,
-        src: ttnn.Tensor,
-        dst: ttnn.Tensor,
-        cores: list[ttnn.CoreCoord],
-        dst_chunk0: int = 0,
-        rows: int = 1,
-    ) -> ttnn.Tensor:
-        """Pack row-form FP32 input into compact vectors.
-
-        Row form FP32 [1, 1, rows, H] (any layout) -> compact vectors (one per row)
-        from chunk dst_chunk0 of
-        dst; zeroes the padding.
-        """
-        n_tiles = self.hidden // TILE
-        per = -(-n_tiles // len(cores))
-        crs = core_range_set(cores)
-        rt = ttnn.RuntimeArgs()
-        pad0 = dst_chunk0 + self.chunks
-        pad = self.V * CHUNKS_PER_TILE - self.chunks
-        for i, c in enumerate(cores):
-            t0 = min(i * per, n_tiles)
-            t1 = min(t0 + per, n_tiles)
-            last = i == len(cores) - 1
-            rt[c.x][c.y] = [
-                src.buffer_address(),
-                dst.buffer_address(),
-                t0,
-                t1 - t0,
-                dst_chunk0,
-                pad0,
-                pad if last else 0,
-            ]
-        cb_scr = 0
-        scr_bytes = (2 * per * rows + 1) * 64
-        kernel = ttnn.KernelDescriptor(
-            kernel_source=str(KERNELS / "compact_pack.cpp"),
-            core_ranges=crs,
-            compile_time_args=[
-                cb_scr,
-                rows,
-                self.V * CHUNKS_PER_TILE,
-                *accessor(src),
-                *accessor(dst),
-            ],
-            runtime_args=rt,
-            config=ttnn.DataMovementConfigDescriptor(
-                processor=ttnn.DataMovementProcessor.RISCV_0, noc=ttnn.NOC.NOC_1
-            ),
-        )
-        program = ttnn.ProgramDescriptor(
-            kernels=[kernel],
-            semaphores=[],
-            cbs=[cb(crs, cb_scr, ttnn.float32, scr_bytes, 1)],
-        )
-        return ttnn.generic_op([src, dst], program)
 
     def _tail(
         self,

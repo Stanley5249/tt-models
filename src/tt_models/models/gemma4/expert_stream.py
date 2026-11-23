@@ -608,6 +608,84 @@ class ExpertStream:
         )
 
 
+class DownStream:
+    """A dense [K, H] BFP8 projection of decode rows into compact FP32 vectors.
+
+    Through the expert down kernels: the weight is stored with H padded to whole bank
+    columns (pad_down, so bank b holds columns b + 12 j) and read as `slots` blocks of
+    K tiles with ids 0 .. slots - 1, on 2 cores per bank placed per chip. The dense
+    MLP down and attention's o_proj use it; writing compact vectors saves o_proj's
+    separate pack op.
+    """
+
+    def __init__(
+        self,
+        mesh: ttnn.MeshDevice,
+        k: int,
+        hidden: int,
+        slots: int,
+        readers: int = 2,
+        fidelity: ttnn.MathFidelity = ttnn.MathFidelity.HiFi2,
+    ) -> None:
+        """Place the readers of a [k, hidden] weight read in `slots` K blocks."""
+        self.banks = banks = mesh.dram_grid_size().x
+        self.slots, self.fidelity = slots, fidelity
+        self.n_tiles = hidden // TILE
+        self.bank_cols = -(-self.n_tiles // banks)
+        self.width = self.bank_cols * banks * TILE  # the padded hidden, 3072
+        assert (k // TILE) % slots == 0, "slots must split K"
+        assert self.bank_cols % readers == 0
+        self.kt = k // TILE // slots
+        self.cols = self.bank_cols // readers
+        self.chips = [
+            bankline_cores(
+                mesh, list(range(banks)), readers, chip=ttnn.MeshCoordinate(0, i)
+            )
+            for i in range(mesh.get_num_devices())
+        ]
+        # an ids row as the router's: the slots, then their count
+        self.ids = _const_row(
+            mesh, [*range(slots), slots] + [0] * (31 - slots), ttnn.uint16
+        )
+
+    def __call__(
+        self,
+        act: ttnn.Tensor,
+        w: ttnn.Tensor,
+        out: ttnn.Tensor,
+        compact_chunk0: int | None = 0,
+        rows: int = 1,
+    ) -> ttnn.Tensor:
+        """Out = act @ w for the token rows of act [1, 1, rows, K].
+
+        out: compact FP32 vectors (one per row) from chunk compact_chunk0, or with
+        compact_chunk0=None a [1, 1, rows, H] BF16 row-form tensor.
+        """
+        return run_on_chips(
+            [
+                down_op(
+                    assign,
+                    cores,
+                    act,
+                    self.ids,
+                    w,
+                    out,
+                    slots=self.slots,
+                    kt=self.kt,
+                    cols=self.cols,
+                    banks=self.banks,
+                    bank_cols=self.bank_cols,
+                    n_tiles=self.n_tiles,
+                    rows=rows,
+                    compact_chunk0=compact_chunk0,
+                    fidelity=self.fidelity,
+                    build=True,
+                )
+                for assign, cores in self.chips
+            ]
+        )
+
+
 class MlpStream:
     """Run one layer's shared dense MLP through the expert stream kernels.
 
@@ -649,25 +727,13 @@ class MlpStream:
         )
         # pair j of bank b: gate column b + 12 j -> h tile b + 12 j
         self.gu_assign = [(c, b, j, v, 0, j, b + banks * j) for c, b, j, v in gu]
-        self.n_tiles = hidden // TILE
-        self.bank_cols = -(-self.n_tiles // banks)
-        self.down_width = self.bank_cols * banks * TILE
-        assert half % down_slots == 0
-        self.down_slots, self.down_kt = (
-            down_slots,
-            half // down_slots,
-        )  # 4 slots of 9 K tiles
-        self.down_cols = self.bank_cols // down_readers
-        self.down_assign, self.down_cores = bankline_cores(
-            mesh, list(range(banks)), down_readers
+        # 4 slots of 9 K tiles
+        self.down_stream = DownStream(
+            mesh, mlp_pad, hidden, down_slots, down_readers, fidelity
         )
-        # ids rows as the router's: the slots, then their count
+        self.down_width = self.down_stream.width
+        # an ids row as the router's: the slot, then the count
         self.ids0 = _const_row(mesh, [0, 1] + [0] * 30, ttnn.uint16)
-        self.ids_down = _const_row(
-            mesh,
-            [*range(down_slots), down_slots] + [0] * (31 - down_slots),
-            ttnn.uint16,
-        )
         self.ones = _const_row(mesh, [1.0] * 32, ttnn.bfloat16)
 
     def h_tensor(self, rows: int = 1) -> ttnn.Tensor:
@@ -736,27 +802,10 @@ class MlpStream:
         """Compute the dense MLP's down projection.
 
         Out = h @ W_down; w_down: [1152, 3072] BFP8 per chip. out: compact FP32
-        vectors (one per row) from
-        chunk compact_chunk0, or with compact_chunk0=None a [1, 1, rows, H] BF16
-        row-form tensor.
+        vectors (one per row) from chunk compact_chunk0, or with compact_chunk0=None a
+        [1, 1, rows, H] BF16 row-form tensor.
         """
-        return down_op(
-            self.down_assign,
-            self.down_cores,
-            h,
-            self.ids_down,
-            w_down,
-            out,
-            slots=self.down_slots,
-            kt=self.down_kt,
-            cols=self.down_cols,
-            banks=self.banks,
-            bank_cols=self.bank_cols,
-            n_tiles=self.n_tiles,
-            rows=rows,
-            compact_chunk0=compact_chunk0,
-            fidelity=self.fidelity,
-        )
+        return self.down_stream(h, w_down, out, compact_chunk0, rows)
 
 
 def pad_down(down: torch.Tensor, width: int) -> torch.Tensor:

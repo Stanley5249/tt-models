@@ -50,7 +50,6 @@ def main():
         init_ccl(mesh)
         b = Boundary(mesh, H, EPS, tail_cores=args.tail_cores)
         shard0 = ttnn.ShardTensorToMesh(mesh, dim=0)
-        cores = [ttnn.CoreCoord(i, 7) for i in range(8)]
 
         def dev(
             t: torch.Tensor,
@@ -89,23 +88,6 @@ def main():
 
         for R in args.rows:
             print(f"== {R} row(s)", flush=True)
-            # pack: per-chip row-form FP32 rows -> compact vectors, after one vector of
-            # offset
-            rows = torch.randn(2, 1, R, H)
-            src = dev(rows, mapper=shard0)
-            dst = b.compact(R + 1)
-            b.pack(src, dst, cores, dst_chunk0=b.V * 64, rows=R)
-            for i in range(2):
-                report(
-                    f"pack chip {i}",
-                    from_compact(chip(dst, i)[0, 0], R + 1, H)[1:],
-                    rows[i, 0],
-                )
-            print(
-                "pack us",
-                device_time_us(mesh, lambda: b.pack(src, b.compact(R), cores, rows=R)),
-            )
-
             # all-gather of compact vectors
             parts = torch.randn(2, R, H)
             pc = dev(

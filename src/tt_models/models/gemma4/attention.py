@@ -28,12 +28,11 @@ from tt_models.common.config import (
     HIFI2,
     HIFI4,
     TILE,
-    dram_sharded,
-    width_sharded_l1,
 )
 from tt_models.common.mesh import per_mesh_cache
 from tt_models.common.weights import WeightLoader, norm_weight
 from tt_models.models.gemma4.checkpoint import attention_dims
+from tt_models.models.gemma4.expert_stream import DownStream, pad_down
 from tt_models.models.gemma4.qk_rope import QkRope
 
 if TYPE_CHECKING:
@@ -108,6 +107,17 @@ def qk_rope(mesh: ttnn.MeshDevice, width: int, head_dim: int, eps: float) -> QkR
     if key not in _QK_ROPE:
         _QK_ROPE[key] = QkRope(mesh, width, head_dim, eps)
     return _QK_ROPE[key]
+
+
+_WO_STREAMS: dict[tuple[int, int], DownStream] = per_mesh_cache()
+
+
+def wo_stream(mesh: ttnn.MeshDevice, k: int, hidden: int, heads: int) -> DownStream:
+    """Share the o_proj stream per mesh and K across the layers."""
+    key = (id(mesh), k)
+    if key not in _WO_STREAMS:
+        _WO_STREAMS[key] = DownStream(mesh, k, hidden, heads)
+    return _WO_STREAMS[key]
 
 
 _ROTATE: dict[tuple[int, int], ttnn.Tensor] = per_mesh_cache()
@@ -222,30 +232,16 @@ class Attention:
 
         self.wqkv = loader.put(f"L{layer_idx}.wqkv", wqkv, dtype, shard_dim=-1)
         self.wo = loader.put(f"L{layer_idx}.wo", wo, dtype, shard_dim=-2)
-        # Decode reads wo DRAM-sharded, fed by the concat-heads output, which is
-        # already width-sharded one head per core: 47 -> 34 us (sliding), 86 -> 62 us
-        # (global) in docs/experiments/2026-11-17-decode-round-1.md. Prefill keeps the
-        # interleaved copy.
+        # Decode streams wo (DownStream, one head per K block) straight into compact
+        # vectors; prefill keeps the interleaved copy.
         k_local, hidden = s.n_q * s.head_dim, cfg.hidden_size
-        # A cached tensor keeps the memory layout it was saved with, so the copy has its
-        # own name.
-        self.wo_dram = loader.put(
-            f"L{layer_idx}.wo_dram",
-            wo,
+        self.wo_stream = wo_stream(loader.mesh, k_local, hidden, s.n_q)
+        self.wo_banks = loader.put(
+            f"L{layer_idx}.wo_banks{self.wo_stream.width}",
+            lambda: pad_down(wo(), self.wo_stream.width).contiguous(),
             dtype,
             shard_dim=-2,
-            memory_config=dram_sharded(loader.mesh, k_local, hidden),
         )
-        self.wo_cfg = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
-            in0_block_w=k_local // TILE // s.n_q,
-            per_core_M=1,
-            per_core_N=hidden // TILE // s.n_q,
-            fused_activation=None,
-        )
-        self.wo_out = width_sharded_l1(hidden, s.n_q)
-        self.wo_cores = [
-            ttnn.CoreCoord(i, 0) for i in range(s.n_q)
-        ]  # the wo_out shard cores
         rm = ttnn.ROW_MAJOR_LAYOUT
         self.q_norm = loader.put(
             f"L{layer_idx}.q_norm",
@@ -465,18 +461,9 @@ class Attention:
         """
         rows = x.shape[2]
         heads = self._heads_decode(x, rope, kv, page_table, cur_pos)
-        out_sh = ttnn.linear(
-            heads,
-            self.wo_dram,
-            program_config=self.wo_cfg,
-            compute_kernel_config=HIFI2,
-            memory_config=self.wo_out,
-            dtype=ttnn.float32,
-        )
-        heads.deallocate(True)
         out = boundary.compact(rows)
-        boundary.pack(out_sh, out, self.wo_cores, rows=rows)
-        out_sh.deallocate(True)
+        self.wo_stream(heads, self.wo_banks, out, compact_chunk0=0, rows=rows)
+        heads.deallocate(True)
         return out
 
     def _heads_decode(
@@ -569,20 +556,15 @@ class Attention:
         s = self.shape
         if batch > 8 and batch % 8:
             # nlp_concat_heads_decode takes only whole rows of 8 cores; the prefill
-            # concat on the head-major layout costs 14-40 us instead of about 5. The
-            # result is resharded one head per core, as the wo matmul takes it.
+            # concat on the head-major layout costs 14-40 us instead of about 5.
             heads = ttnn.permute(
                 attn, (0, 2, 1, 3), memory_config=ttnn.L1_MEMORY_CONFIG
             )
             attn.deallocate(True)
-            flat = ttnn.experimental.nlp_concat_heads(
+            out = ttnn.experimental.nlp_concat_heads(
                 heads, memory_config=ttnn.L1_MEMORY_CONFIG
             )
             heads.deallocate(True)
-            out = ttnn.to_memory_config(
-                flat, width_sharded_l1(s.n_q * s.head_dim, s.n_q)
-            )
-            flat.deallocate(True)
             return out
         # one core per row on full rows of the grid
         cores = ttnn.num_cores_to_corerangeset(
