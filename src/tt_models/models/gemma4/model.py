@@ -82,7 +82,7 @@ class Gemma4TT:
         ]
         self.head = LmHead(mesh, loader, ckpt, cfg, precision.lm_head)
         self.boundary = Boundary(mesh, self.hidden, cfg.rms_norm_eps)
-        # compact tiles of each layer type's [cos | sin] table in the batch-1 FP32 input
+        # compact tiles per row of each layer type's [cos | sin] table in the FP32 input
         self._cs_tiles = {
             kind: 2
             * next(
@@ -450,7 +450,6 @@ class Gemma4TT:
         width = self.table_width
         for batch in range(1, self.max_batch + 1):
             for layer in self.layers:
-                layer.attn.head_weights(batch)
                 layer.ff.decode_constants(batch)
             zeros = torch.zeros(batch, dtype=torch.long)
             host = self._decode_inputs(
@@ -481,7 +480,22 @@ class Gemma4TT:
     def _decode_inputs(
         self, tokens: torch.Tensor, positions: torch.Tensor, tables: torch.Tensor
     ) -> dict[str, ttnn.Tensor]:
-        """Host tensors for one decode step; shapes depend only on the batch size."""
+        """Host tensors for one decode step; shapes depend only on the batch size.
+
+        Built on one torch thread: torch's pool sleeps while the host waits for the
+        device, and waking it for these small tensors cost 1-2 ms per step (2.2 ->
+        0.6 ms at 4 rows). The sampler's large argmax keeps the pool.
+        """
+        threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+        try:
+            return self._build_decode_inputs(tokens, positions, tables)
+        finally:
+            torch.set_num_threads(threads)
+
+    def _build_decode_inputs(
+        self, tokens: torch.Tensor, positions: torch.Tensor, tables: torch.Tensor
+    ) -> dict[str, ttnn.Tensor]:
         batch = tokens.shape[0]
         width = self.table_width
         cache = self.require_kv()
@@ -497,7 +511,7 @@ class Gemma4TT:
             * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.cfg.rms_norm_eps)
             * self.input_ln0
         )
-        # one FP32 input [xc | (batch 1) sliding cs | full cs]: fewer host copies
+        # one FP32 input [xc | sliding cs | full cs]: fewer host copies
         f32 = [to_compact(xf)[None, None]]
         inputs = {
             "h0": self._host(h0.reshape(1, 1, batch, self.hidden)),
@@ -524,19 +538,13 @@ class Gemma4TT:
                 )
                 rows[:, :roped] = table[pos][:, None, :]
                 rope_tables[name] = rows
-            if (
-                batch == 1
-            ):  # compact [cos | signed sin] tables for the fused q/k norm + RoPE
-                f32.append(
-                    attn.qk_rope.host_tables(
-                        rope_tables["cos"].flatten(), rope_tables["sin"].flatten()
-                    )
+            # compact [cos | signed sin] tables for the fused q/k norm + RoPE
+            f32.append(
+                attn.qk_rope.host_tables(
+                    rope_tables["cos"].reshape(batch, -1),
+                    rope_tables["sin"].reshape(batch, -1),
                 )
-            else:
-                for name, rows in rope_tables.items():
-                    inputs[f"{kind}.{name}"] = self._host(
-                        rows.reshape(1, 1, batch * attn.heads, -1), ttnn.float32
-                    )
+            )
         inputs["in32"] = self._host(torch.cat(f32, dim=-1), ttnn.float32)
         return inputs
 
@@ -547,15 +555,13 @@ class Gemma4TT:
         V = self.boundary.V
         pages = {
             "sliding_attention": batch * V,
-            "full_attention": batch * V + self._cs_tiles["sliding_attention"],
+            "full_attention": batch * (V + self._cs_tiles["sliding_attention"]),
         }
         xc, h = dev["in32"], dev["h0"]
         for i, (layer, kv) in enumerate(zip(self.layers, self.require_kv().layers)):
             kind = "sliding_attention" if layer.sliding else "full_attention"
-            if batch == 1:  # the fused q/k norm + RoPE op reads its tables from in32
-                rope = ("compact", dev["in32"], pages[kind])
-            else:
-                rope = (dev[f"{kind}.cos"], dev[f"{kind}.sin"])
+            # the fused q/k norm + RoPE op reads its tables from in32
+            rope = ("compact", dev["in32"], pages[kind])
             xn, hn = layer.decode_compact(
                 xc,
                 h,

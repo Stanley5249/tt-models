@@ -1,11 +1,13 @@
 // q/k norm + RoPE input gather (NCRISC) for one compact tile of the fused QKV row (boundary.py QkRope).
 //
-// Gathers compact tile `tile` of the FP32 QKV matmul output (row form) twice: in order (x) and with every
-// chunk swapped with its half-head partner (xr, the rotate_half permutation; the sign is in the sin
-// table). Reads the step's [cos | sin * sign] and the layer's [w | w permuted] compact tiles, and builds
-// the two block-ones tiles of the per-head sums.
+// Reads the layer's [w | w permuted] compact tiles and builds the two block-ones tiles of the per-head
+// sums once. Then for each token row of this core: gathers compact tile `tile` of that row of the FP32
+// QKV matmul output (row form) twice, in order (x) and with every chunk swapped with its half-head
+// partner (xr, the rotate_half permutation; the sign is in the sin table), and reads the row's
+// [cos | sin * sign] compact tiles (row b's tables start at cs_page0 + 2 * vec_tiles * b).
 //
-// runtime args: [x_addr, cs_addr, w_addr, tile, cs_page0] (cs_page0: the tables' first tile in a combined input)
+// runtime args: [x_addr, cs_addr, w_addr, tile, cs_page0, n_rows, row 0, row 1, ...]
+// (cs_page0: the tables' first tile in a combined input)
 
 #include "compact.hpp"
 
@@ -15,6 +17,7 @@ void kernel_main() {
     const uint32_t w_addr = get_arg_val<uint32_t>(2);
     const uint32_t tile = get_arg_val<uint32_t>(3);
     const uint32_t cs_page0 = get_arg_val<uint32_t>(4);
+    const uint32_t n_rows = get_arg_val<uint32_t>(5);
 
     constexpr uint32_t cb_x = get_compile_time_arg_val(0);
     constexpr uint32_t cb_xr = get_compile_time_arg_val(1);
@@ -33,20 +36,6 @@ void kernel_main() {
     const auto s_cs = TensorAccessor(cs_args, cs_addr, COMPACT_TILE);
     const auto s_w = TensorAccessor(w_args, w_addr, COMPACT_TILE);
 
-    cb_reserve_back(cb_x, 1);
-    cb_reserve_back(cb_xr, 1);
-    const uint32_t lx = get_write_ptr(cb_x), lxr = get_write_ptr(cb_xr);
-    constexpr uint32_t half = head_chunks / 2;
-    for (uint32_t q = 0; q < CHUNKS_PER_TILE; ++q) {
-        const uint32_t c = tile * CHUNKS_PER_TILE + q;
-        const uint32_t partner = (c % head_chunks) < half ? c + half : c - half;
-        noc_async_read(row_chunk_addr<4>(s_x, c), lx + q * COMPACT_CHUNK, COMPACT_CHUNK);
-        noc_async_read(row_chunk_addr<4>(s_x, partner), lxr + q * COMPACT_CHUNK, COMPACT_CHUNK);
-    }
-    cb_reserve_back(cb_cs, 2);
-    const uint32_t lcs = get_write_ptr(cb_cs);
-    noc_async_read_page(cs_page0 + tile, s_cs, lcs);
-    noc_async_read_page(cs_page0 + vec_tiles + tile, s_cs, lcs + COMPACT_TILE);
     cb_reserve_back(cb_w, 2);
     const uint32_t lw = get_write_ptr(cb_w);
     noc_async_read_page(tile, s_w, lw);
@@ -67,8 +56,28 @@ void kernel_main() {
     cb_push_back(cb_a, 1);
     cb_push_back(cb_b, 1);
     noc_async_read_barrier();
-    cb_push_back(cb_x, 1);
-    cb_push_back(cb_xr, 1);
-    cb_push_back(cb_cs, 2);
     cb_push_back(cb_w, 2);
+
+    constexpr uint32_t half = head_chunks / 2;
+    for (uint32_t i = 0; i < n_rows; ++i) {
+        const uint32_t row = get_arg_val<uint32_t>(6 + i);
+        cb_reserve_back(cb_x, 1);
+        cb_reserve_back(cb_xr, 1);
+        const uint32_t lx = get_write_ptr(cb_x), lxr = get_write_ptr(cb_xr);
+        for (uint32_t q = 0; q < CHUNKS_PER_TILE; ++q) {
+            const uint32_t c = tile * CHUNKS_PER_TILE + q;
+            const uint32_t partner = (c % head_chunks) < half ? c + half : c - half;
+            noc_async_read(row_chunk_addr<4>(s_x, c, row), lx + q * COMPACT_CHUNK, COMPACT_CHUNK);
+            noc_async_read(row_chunk_addr<4>(s_x, partner, row), lxr + q * COMPACT_CHUNK, COMPACT_CHUNK);
+        }
+        cb_reserve_back(cb_cs, 2);
+        const uint32_t lcs = get_write_ptr(cb_cs);
+        const uint32_t cs_row = cs_page0 + 2 * vec_tiles * row;
+        noc_async_read_page(cs_row + tile, s_cs, lcs);
+        noc_async_read_page(cs_row + vec_tiles + tile, s_cs, lcs + COMPACT_TILE);
+        noc_async_read_barrier();
+        cb_push_back(cb_x, 1);
+        cb_push_back(cb_xr, 1);
+        cb_push_back(cb_cs, 2);
+    }
 }

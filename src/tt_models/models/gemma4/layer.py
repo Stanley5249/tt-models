@@ -142,7 +142,7 @@ class DecoderLayer:
         self,
         xc: ttnn.Tensor,
         h: ttnn.Tensor,
-        rope: tuple[ttnn.Tensor, ttnn.Tensor] | CompactRope,
+        rope: CompactRope,
         kv: LayerKv,
         page_table: ttnn.Tensor,
         cur_pos: ttnn.Tensor,

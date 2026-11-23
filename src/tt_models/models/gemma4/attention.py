@@ -253,19 +253,12 @@ class Attention:
             lambda: norm_weight(ckpt.get(p + "k_norm.weight")),
             layout=rm,
         )
-        # Decode normalizes all heads of the fused QKV row at once, so the head
-        # weights become one [B * heads, hd] multiplier: q_norm rows, k_norm rows,
-        # and ones for V (weightless norm). Built per batch size on first use.
-        self._head_w = (
-            ckpt.get(p + "q_norm.weight").float(),
-            ckpt.get(p + "k_norm.weight").float(),
-        )
-        self._head_w_dev = {}
         self.mesh = loader.mesh
-        # batch-1 decode: fused q/k norm + RoPE (boundary.QkRope) with [w | w permuted]
-        # per value
+        # Decode: fused q/k norm + RoPE (qk_rope.py) with [w | w permuted] per value of
+        # the fused QKV row: q_norm, k_norm, and ones for V (weightless norm).
         self.qk_rope = qk_rope(self.mesh, self.heads * s.head_dim, s.head_dim, self.eps)
-        q, k = self._head_w
+        q = ckpt.get(p + "q_norm.weight").float()
+        k = ckpt.get(p + "k_norm.weight").float()
         w_row = torch.cat(
             [q.repeat(s.n_q), k.repeat(s.n_kv), torch.ones(s.n_kv * s.head_dim)]
         )
@@ -415,32 +408,10 @@ class Attention:
         """Heads per chip in the fused QKV row: Q, then K, then V."""
         return self.shape.n_q + 2 * self.shape.n_kv
 
-    def head_weights(self, batch: int) -> ttnn.Tensor:
-        """Get per-head normalization weights for the batch."""
-        if batch not in self._head_w_dev:
-            q, k = self._head_w
-            s = self.shape
-            per_user = torch.cat(
-                [
-                    q.expand(s.n_q, -1),
-                    k.expand(s.n_kv, -1),
-                    torch.ones(s.n_kv, s.head_dim),
-                ]
-            )
-            self._head_w_dev[batch] = ttnn.from_torch(
-                per_user.repeat(batch, 1)[None, None],
-                dtype=ttnn.float32,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.mesh,
-                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh),
-                memory_config=DRAM,
-            )
-        return self._head_w_dev[batch]
-
     def decode_compact(
         self,
         x: ttnn.Tensor,
-        rope: tuple[ttnn.Tensor, ttnn.Tensor] | CompactRope,
+        rope: CompactRope,
         kv: LayerKv,
         page_table: ttnn.Tensor,
         cur_pos: ttnn.Tensor,
@@ -448,12 +419,10 @@ class Attention:
     ) -> ttnn.Tensor:
         """Compute compact attention partial sums for a decode step.
 
-        1-4 decode tokens: x is the normed row-form input [1, 1, rows, H]. Returns
-        this chip's o_proj
-        partial sums in compact FP32 form (boundary.py, one vector per row), packed
-        straight from the
-        width-sharded matmul output. rope: the batch-1 compact tables or the (cos, sin)
-        rows (decode).
+        1-16 decode tokens: x is the normed row-form input [1, 1, rows, H]. Returns
+        this chip's o_proj partial sums in compact FP32 form (boundary.py, one vector
+        per row), packed straight from the width-sharded matmul output. rope: the
+        compact FP32 step input and the first tile of the rows' [cos | sin] tables.
         """
         rows = x.shape[2]
         heads = self._heads_decode(x, rope, kv, page_table, cur_pos)
@@ -474,7 +443,7 @@ class Attention:
     def _heads_decode(
         self,
         x: ttnn.Tensor,
-        rope: tuple[ttnn.Tensor, ttnn.Tensor] | CompactRope,
+        rope: CompactRope,
         kv: LayerKv,
         page_table: ttnn.Tensor,
         cur_pos: ttnn.Tensor,
@@ -497,41 +466,19 @@ class Attention:
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=ttnn.float32,
         )
-        # Batch 1 passes the compact tensor and first tile of [cos | sin].
-        if len(rope) == 3:
-            roped = ttnn.allocate_tensor_on_device(
-                ttnn.Shape([1, 1, 1, width]),
-                ttnn.bfloat16,
-                ttnn.TILE_LAYOUT,
-                self.mesh,
-                ttnn.L1_MEMORY_CONFIG,
-            )
-            self.qk_rope(xqkv, rope[1], self.rope_w, roped, cs_page0=rope[2])
-            xqkv.deallocate(True)
-            fused = roped
-        else:
-            rows = ttnn.reshape(xqkv, (1, 1, batch * self.heads, s.head_dim))
-            normed = ttnn.rms_norm(
-                rows,
-                epsilon=self.eps,
-                memory_config=ttnn.L1_MEMORY_CONFIG,
-                compute_kernel_config=HIFI4,
-            )
-            xqkv.deallocate(True)
-            weighted = ttnn.mul(
-                normed, self.head_weights(batch), memory_config=ttnn.L1_MEMORY_CONFIG
-            )
-            normed.deallocate(True)
-            roped = apply_rope(
-                weighted,
-                *rope,
-                memory_config=ttnn.L1_MEMORY_CONFIG,
-                dtype=ttnn.bfloat16,
-            )
-            weighted.deallocate(True)
-            fused = ttnn.reshape(roped, (1, 1, batch, width))
+        # rope: the compact FP32 input and the first tile of the rows' [cos | sin].
+        _, cs, cs_page0 = rope
+        roped = ttnn.allocate_tensor_on_device(
+            ttnn.Shape([1, 1, batch, width]),
+            ttnn.bfloat16,
+            ttnn.TILE_LAYOUT,
+            self.mesh,
+            ttnn.L1_MEMORY_CONFIG,
+        )
+        self.qk_rope(xqkv, cs, self.rope_w, roped, cs_page0=cs_page0)
+        xqkv.deallocate(True)
         q, k, v = ttnn.experimental.nlp_create_qkv_heads_decode(
-            fused,
+            roped,
             num_heads=s.n_q,
             num_kv_heads=s.n_kv,
             memory_config=ttnn.L1_HEIGHT_SHARDED_MEMORY_CONFIG,

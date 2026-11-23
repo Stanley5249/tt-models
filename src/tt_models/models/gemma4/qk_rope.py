@@ -1,4 +1,4 @@
-"""Fused q/k RMSNorm, head weights and RoPE for the batch-1 QKV row."""
+"""Fused q/k RMSNorm, head weights and RoPE for the decode QKV rows."""
 
 from __future__ import annotations
 
@@ -33,16 +33,16 @@ def rope_partner(width: int, head_dim: int) -> torch.Tensor:
 
 
 class QkRope:
-    """Fused q/k RMSNorm, head weights and RoPE for batch-1 QKV.
+    """Fused q/k RMSNorm, head weights and RoPE for the decode QKV rows.
 
-    q/k RMSNorm, head weights and RoPE of the fused batch-1 QKV row in one op
+    q/k RMSNorm, head weights and RoPE of every fused QKV row in one op
     (kernels/qk_rope_*).
 
-    One core per compact tile (4 heads of 256 or 2 of 512); V heads have weight 1, cos
-    1, sin 0.
-    Replaces reshape, rms_norm, the weight multiply, the rotate_half matmul, three RoPE
-    eltwise ops and the
-    reshape back (~60 us per layer).
+    One core per compact tile (4 heads of 256 or 2 of 512) and token row; past 64
+    cores a core takes several rows of its tile. V heads have weight 1, cos 1, sin 0.
+    Replaces reshape, rms_norm, the weight multiply, the rotate_half matmul, three
+    RoPE eltwise ops and the reshape back (~60 us per layer at batch 1, ~120 us at 16
+    rows).
     """
 
     def __init__(
@@ -51,13 +51,11 @@ class QkRope:
         width: int,
         head_dim: int,
         eps: float,
-        core_row: int = 6,
     ) -> None:
         """Set up the fused RMSNorm and RoPE operation."""
         self.mesh, self.width, self.head_dim, self.eps = mesh, width, head_dim, eps
         self.V = width // (CHUNK * CHUNKS_PER_TILE)
         assert width == self.V * CHUNK * CHUNKS_PER_TILE
-        self.cores = [ttnn.CoreCoord(i, core_row) for i in range(self.V)]
         self.partner = rope_partner(width, head_dim)
         self.sign = torch.where(
             torch.arange(width) % head_dim < head_dim // 2, -1.0, 1.0
@@ -67,13 +65,14 @@ class QkRope:
         """[W] per-value head weights -> compact [w | w permuted to partners]."""
         return compact_tensor(self.mesh, torch.stack([w_row, w_row[self.partner]]))
 
-    def host_tables(self, cos_row: torch.Tensor, sin_row: torch.Tensor) -> torch.Tensor:
-        """Pack one token's cosine and signed sine rows into compact form.
+    def host_tables(self, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        """Pack the tokens' cosine and signed sine rows into compact form.
 
-        Per-step [cos | sin * rotate_half sign] for one token, as host compact FP32
-        [1, 1, 32, 2 V 32].
+        cos, sin: [rows, W]. Per token [cos | sin * rotate_half sign], as host compact
+        FP32 [1, 1, 32, rows 2 V 32].
         """
-        return to_compact(torch.stack([cos_row, sin_row * self.sign]))[None, None]
+        pairs = torch.stack([cos, sin * self.sign], dim=1).reshape(-1, self.width)
+        return to_compact(pairs)[None, None]
 
     def __call__(
         self,
@@ -85,10 +84,13 @@ class QkRope:
     ) -> ttnn.Tensor:
         """Apply fused RMSNorm and RoPE to the QKV row.
 
-        x: FP32 row-form QKV matmul output [1, 1, 1, W]; out: BF16 row form [1, 1, 1,
-        W].
+        x: FP32 row-form QKV matmul output [1, 1, rows, W]; out: BF16 row form [1, 1,
+        rows, W]; cs: the host_tables of the rows from tile cs_page0.
         """
-        crs = core_range_set(self.cores)
+        rows = x.shape[2]
+        groups = min(rows, 64 // self.V)  # cores per compact tile
+        cores = [ttnn.CoreCoord(i % 8, i // 8) for i in range(groups * self.V)]
+        crs = core_range_set(cores)
         cb_x, cb_xr, cb_cs, cb_w, cb_a, cb_b, cb_sq, cb_s1, cb_r, cb_out = (
             0,
             1,
@@ -118,15 +120,24 @@ class QkRope:
         ]
         cbs.append(cb(crs, cb_out, ttnn.bfloat16, 2048, 1))
         reader_rt, writer_rt = ttnn.RuntimeArgs(), ttnn.RuntimeArgs()
-        for t, c in enumerate(self.cores):
+        compute_rt = ttnn.RuntimeArgs()
+        for i, c in enumerate(cores):
+            g, t = divmod(i, self.V)
+            mine = list(range(g, rows, groups))
+            # A fixed-length row list: the program cache keeps the first call's
+            # runtime-argument count for programs that differ only in their rows.
+            listed = [*mine, *[0] * (16 - len(mine))]
             reader_rt[c.x][c.y] = [
                 x.buffer_address(),
                 cs.buffer_address(),
                 w.buffer_address(),
                 t,
                 cs_page0,
+                len(mine),
+                *listed,
             ]
-            writer_rt[c.x][c.y] = [out.buffer_address(), t]
+            writer_rt[c.x][c.y] = [out.buffer_address(), t, len(mine), *listed]
+            compute_rt[c.x][c.y] = [len(mine)]
         head_chunks = self.head_dim // CHUNK
         reader_ct = [
             cb_x,
@@ -179,7 +190,7 @@ class QkRope:
                 kernel_source=str(KERNELS / "qk_rope_compute.cpp"),
                 core_ranges=crs,
                 compile_time_args=compute_ct,
-                runtime_args=[],
+                runtime_args=compute_rt,
                 config=ttnn.ComputeConfigDescriptor(
                     math_fidelity=ttnn.MathFidelity.HiFi4,
                     fp32_dest_acc_en=True,
