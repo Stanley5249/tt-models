@@ -50,6 +50,52 @@ def model(mesh: ttnn.MeshDevice, max_batch: int):
     )
 
 
+def test_greedy_readback_matches_full_logits(mesh: ttnn.MeshDevice):
+    head = model(mesh, 16).head
+    logits = torch.full((16, head.vocab), -1.0)
+    chip_width = head.vocab // head.tp
+    logits[0, [2047, 2048, chip_width + 2048]] = 2.0
+    logits[1, chip_width + 113] = 3.0
+    logits[2, [chip_width + 3, 170, 270]] = torch.nan
+    logits[3, 120:122] = torch.tensor([-0.0, 0.0])
+    logits[4].fill_(-torch.inf)
+    for rows in (1, 4, 11, 16):
+        scores = [logits[:rows], logits[:rows].flip(-1)]
+        inputs = [
+            ttnn.from_torch(
+                score[None, None],
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+                device=mesh,
+                mesh_mapper=ttnn.ShardTensorToMesh(mesh, dim=-1),
+            )
+            for score in scores
+        ]
+        for x, score in zip(inputs, scores):
+            ids = head.read_greedy(x)
+            assert ids.dtype == torch.long
+            assert torch.equal(ids, score.argmax(-1, keepdim=True))
+        for x in inputs:
+            x.deallocate(True)
+
+
+def test_greedy_decode_reuses_logit_trace():
+    with open_n300(trace_region_size=50_000_000) as mesh:
+        m = model(mesh, 4)
+        tables = m.allocate_kv_cache(4, 128)
+        tokens = torch.tensor([3, 4, 5, 6])
+        positions = torch.tensor([0, -1, 0, 0])
+        active, logits = m.decode_active(
+            tokens, positions, tables, trace=True, output="raw_logits"
+        )
+        selected, ids = m.decode_active(
+            tokens, positions, tables, trace=True, output="greedy"
+        )
+        assert torch.equal(active, selected)
+        assert torch.equal(ids, logits.argmax(-1, keepdim=True))
+        assert len(m.traces) == 1
+        m.release_traces()
+
+
 @pytest.mark.parametrize(
     ("prompt_len", "batch"), [(64, 1), (64, 4), (64, 11), (64, 16), (1100, 1)]
 )

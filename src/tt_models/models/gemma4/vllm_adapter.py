@@ -39,6 +39,8 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheSpec
     from vllm_tt_plugin.model_input import TTSamplingParams
 
+    from tt_models.models.gemma4.model import DecodeOutput
+
 # Device DRAM per chip for the shared KV pool. Weights take 8.0 of 11.87 GiB;
 # the rest holds prefill activations, decode traces and their inputs.
 # GEMMA4_KV_POOL_GIB overrides it, for example to force preemption in a test.
@@ -400,10 +402,20 @@ class Gemma4ForCausalLM:
         """Run one scheduler decode step and sample when requested."""
         tables = self._group_tables(page_tables_per_layer, tokens.shape[0])
         t0 = time.perf_counter()
-        # The model-side sampler caps only what it needs (see sample()).
-        raw = sampling_params is not None
-        active, logits = self.model.decode_active(
-            tokens[:, 0], start_pos, tables, trace=enable_trace, softcap=not raw
+        output: DecodeOutput = "logits"
+        if sampling_params is not None:
+            # The model-side sampler caps only what it needs (see sample()).
+            output = "raw_logits"
+            rows_idx = torch.nonzero(start_pos >= 0).flatten().tolist()
+            requested_log_probs = sampling_params.enable_log_probs
+            if all(
+                sampling_params.temperature[row] == 0
+                and (requested_log_probs is None or not requested_log_probs[row])
+                for row in rows_idx
+            ):
+                output = "greedy"
+        active, result = self.model.decode_active(
+            tokens[:, 0], start_pos, tables, trace=enable_trace, output=output
         )
         if self.timing:
             t1 = time.perf_counter()
@@ -419,10 +431,13 @@ class Gemma4ForCausalLM:
         rows = tokens.shape[0]
         if sampling_params is not None:
             ids = torch.zeros(rows, 1, dtype=torch.long)
+            if output == "greedy":
+                ids[active] = result
+                return ids
             log_probs = None
             if len(active):
                 got, lp = sample(
-                    logits,
+                    result,
                     sampling_params,
                     start_pos[active],
                     rows_idx=active,
@@ -435,8 +450,8 @@ class Gemma4ForCausalLM:
                     vals[active], lp_ids[active] = lp
                     log_probs = (vals, lp_ids)
             return ids if log_probs is None else (ids, log_probs)
-        full = torch.zeros(rows, logits.shape[-1])
-        full[active] = logits
+        full = torch.zeros(rows, result.shape[-1])
+        full[active] = result
         return full[:, None, :]
 
     # -- lifecycle -------------------------------------------------------------
@@ -490,7 +505,7 @@ class Gemma4ForCausalLM:
         kv_cache: KvCache,  # noqa: ARG002 - plugin API
         max_batch_size: int,
         num_blocks: int,  # noqa: ARG002 - plugin API
-        can_sample_on_device: bool,  # noqa: ARG002, FBT001 - plugin API
+        can_sample_on_device: bool,  # noqa: FBT001 - plugin API
         enable_trace: bool,  # noqa: FBT001 - plugin API
         **_: object,
     ) -> None:
@@ -504,7 +519,13 @@ class Gemma4ForCausalLM:
         for active in range(1, max_batch_size + 1):
             positions = torch.full((max_batch_size,), -1, dtype=torch.long)
             positions[:active] = 0
-            self.model.decode(tokens, positions, tables, trace=enable_trace)
+            self.model.decode_active(
+                tokens,
+                positions,
+                tables,
+                trace=enable_trace,
+                output="greedy" if can_sample_on_device else "logits",
+            )
 
     def release_persistent_capture(self) -> None:
         """Release the persistent decode traces."""

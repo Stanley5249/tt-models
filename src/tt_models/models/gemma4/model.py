@@ -11,7 +11,7 @@ moved, preempted, resumed and share cached prefixes without telling the model.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import torch
 import ttnn
@@ -35,6 +35,8 @@ from tt_models.models.gemma4.kv_cache import KvCache
 from tt_models.models.gemma4.layer import DecoderLayer
 from tt_models.models.gemma4.lm_head import LmHead
 from tt_models.models.gemma4.reference import embed_scale
+
+type DecodeOutput = Literal["logits", "raw_logits", "greedy"]
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -413,31 +415,27 @@ class Gemma4TT:
         tables: torch.Tensor,
         *,
         trace: bool = False,
-        softcap: bool = True,
+        output: DecodeOutput = "logits",
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Decode only the active rows and return their indices and logits.
-
-        decode() without the inactive rows: (active row indices, float logits [A,
-        V]).
-
-        Building the zero-filled [B, V] result of decode() costs ~1 ms per step; the
-        vLLM
-        adapter samples only the active rows. softcap=False returns the logits before
-        the final softcap (LmHead.softcap), for a caller that caps only what it needs.
-        """
+        """Return active row indices and their logits [A, V] or token IDs [A, 1]."""
         active = torch.nonzero(positions >= 0).flatten()
         if len(active) == tokens.shape[0]:
             return active, self._decode_rows(
-                tokens, positions, tables, trace=trace, softcap=softcap
+                tokens, positions, tables, trace=trace, output=output
             )
         if not len(active):
-            return active, torch.zeros(0, self.vocab)
+            empty = (
+                torch.empty(0, 1, dtype=torch.long)
+                if output == "greedy"
+                else torch.empty(0, self.vocab)
+            )
+            return active, empty
         return active, self._decode_rows(
             tokens[active],
             positions[active],
             tables[:, active],
             trace=trace,
-            softcap=softcap,
+            output=output,
         )
 
     def _decode_rows(
@@ -447,7 +445,7 @@ class Gemma4TT:
         tables: torch.Tensor,
         *,
         trace: bool,
-        softcap: bool = True,
+        output: DecodeOutput,
     ) -> torch.Tensor:
         """Decode rows that are all active."""
         if tokens.shape[0] > self.max_batch:
@@ -462,11 +460,11 @@ class Gemma4TT:
                 for k, v in host.items()
             }
             out = self._decode_device(dev)
-            logits = self.head.read(out, softcap=softcap)
+            result = self._read_decode(out, output)
             out.deallocate(True)
             for t in dev.values():
                 t.deallocate(True)
-            return logits
+            return result
         key = tokens.shape[0]
         if not self._trace_inputs:
             self._prepare_traces()
@@ -488,7 +486,12 @@ class Gemma4TT:
                 last[k] = src.clone()
             ttnn.copy_host_to_device_tensor(v, dev[k])
         ttnn.execute_trace(self.mesh, tid, cq_id=0, blocking=False)
-        return self.head.read(out, softcap=softcap)
+        return self._read_decode(out, output)
+
+    def _read_decode(self, out: ttnn.Tensor, output: DecodeOutput) -> torch.Tensor:
+        if output == "greedy":
+            return self.head.read_greedy(out)
+        return self.head.read(out, softcap=output == "logits")
 
     def _prepare_traces(self) -> None:
         """Prepare one decode trace for every active row count.

@@ -29,7 +29,9 @@ Everything a trace touches is allocated before the first capture, and prefill re
 
 ### Sampling
 
-The model-side sampler (`sample` in `vllm_adapter.py`) runs on the host after the logits are read back: greedy is an argmax, sampling takes the top k <= 1,024 candidates and applies temperature, top-p and a seed keyed by (seed, position). Only the candidates get the final softcap ([lazy softcap](experiments/2026-11-21-lazy-softcap.md)); logprobs and vLLM's host sampler still get the whole capped row. Device sampling and async decode were evaluated and not built ([device sampling](experiments/2026-11-21-device-sampling.md)).
+When every active decode row is greedy and needs no logprobs, each chip reduces its FP32 logits to local maxima. The host merges those candidates in vocabulary order, so an exact tie selects the lowest token ID. Greedy readback uses the same trace as full-logit decode.
+
+The host model-side sampler (`sample` in `vllm_adapter.py`) reads full logits for mixed or sampled batches. Sampling takes the top k <= 1,024 candidates and applies temperature, top-p and a seed keyed by (seed, position). Only the candidates get the final softcap ([lazy softcap](experiments/2026-11-21-lazy-softcap.md)). Logprobs and vLLM's host sampler get the whole capped row.
 
 ### Tool choice
 
@@ -54,7 +56,8 @@ Experts are BFP4 at LoFi; attention, MLP, LM head and KV cache are BFP8 (`Precis
 | `tool_choice="required"` or a named tool | Enforced by `tool_parser.py` |
 | `n > 1`, `logit_bias`, `echo` | Supported |
 | Embeddings, `prompt_logprobs` | No (generative model; the plugin refuses prompt logprobs) |
-| Async decode, device sampling | No (evaluated, see above) |
+| Greedy decode readback | Exact FP32 device argmax with host merge |
+| Async decode, stochastic device sampling | Open |
 | Q4_0 experts | Accuracy runs only |
 | vLLM streaming-input sessions | No: they resume prefill off the block grid |
 | Multimodal, speculative decoding, data parallel | No (no MTP heads in this checkpoint) |
@@ -93,7 +96,7 @@ Accuracy needs 3 seeds and speed a same-day baseline ([experiments](experiments/
 ## Open work
 
 - **Q4_0 serving.** Needs an expert-major prefill matmul that dequantizes inside, batch 2-4 down kernels, compact step tiles, and DRAM for the steps ([prefill dequantization](experiments/2026-11-21-q4-prefill-dequant.md)).
-- **Device sampling and async decode.** Needs a top-k in the LM head stream and a device embedding. At 16 rows the logit readback alone takes 4.3 ms per step.
+- **Stochastic device sampling and async decode.** A device top-k could reduce full-logit readback for sampled batches. Async decode also needs the embedding on the device. See [device sampling](experiments/2026-11-21-device-sampling.md).
 - **Multi-row decode.** 9-15 rows concatenate heads through a permute. More than 16 rows needs the stream kernels to use a tile's bottom faces. The tails (30-40 us each) are latency-bound whatever their core count.
 - **Host overhead.** Input build, readback and sampling run outside the device each step; only async decode removes most of it.
 - **Prefill.** The all-gathers are bound by one Ethernet link, and the gate|up sparse matmul uses a fraction of the cores.

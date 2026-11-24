@@ -28,6 +28,8 @@ from tt_models.models.gemma4.generic_op import (
     KERNELS,
     accessor,
     cb,
+    core_range_set,
+    line_cores,
     tile_bytes,
 )
 
@@ -220,6 +222,64 @@ class LmHead:
             .reshape(-1, self.vocab)
         )
         return self.softcap(logits) if softcap else logits
+
+    def read_greedy(self, logits: ttnn.Tensor) -> torch.Tensor:
+        """Read local FP32 maxima and return the greedy token ID for each row."""
+        rows, vocab = logits.shape[2], logits.shape[3]
+        # A worker reads 8 KiB of each vocabulary row and returns a score and ID.
+        workers = 64
+        width = vocab // workers
+        assert width * workers == vocab
+        cores = line_cores(workers)
+        core_set = core_range_set(cores)
+        words = -(-rows // 4) * 8  # one 32-byte-aligned page per worker
+        result = ttnn.allocate_tensor_on_device(
+            ttnn.Shape([1, 1, workers, words]),
+            ttnn.uint32,
+            ttnn.ROW_MAJOR_LAYOUT,
+            self.mesh,
+            DRAM,
+        )
+        kernel = ttnn.KernelDescriptor(
+            kernel_source=str(KERNELS / "lm_head_argmax.cpp"),
+            core_ranges=core_set,
+            compile_time_args=[
+                rows,
+                width,
+                vocab,
+                words * 4,
+                *accessor(logits),
+                *accessor(result),
+            ],
+            runtime_args=[
+                (core, [logits.buffer_address(), result.buffer_address(), i])
+                for i, core in enumerate(cores)
+            ],
+            config=ttnn.ReaderConfigDescriptor(),
+        )
+        ttnn.generic_op(
+            [logits, result],
+            ttnn.ProgramDescriptor(
+                kernels=[kernel],
+                semaphores=[],
+                cbs=[
+                    cb(core_set, 0, ttnn.uint32, width * 4, 1),
+                    cb(core_set, 1, ttnn.uint32, words * 4, 1),
+                ],
+            ),
+        )
+        pairs = (
+            ttnn.to_torch(
+                result, mesh_composer=ttnn.ConcatMeshToTensor(self.mesh, dim=2)
+            )
+            .numpy()
+            .reshape(self.tp * workers, words // 2, 2)
+        )
+        result.deallocate(True)
+        # Worker order is vocabulary order, so ties keep the lower token ID.
+        best = pairs[:, :rows, 0].argmax(axis=0)
+        ids = pairs[best, np.arange(rows), 1] + (best // workers) * vocab
+        return torch.from_numpy(ids)[:, None]
 
     def softcap(self, logits: torch.Tensor) -> torch.Tensor:
         """Apply the final logit softcap in place and return the logits.
