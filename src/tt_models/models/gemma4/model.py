@@ -408,7 +408,11 @@ class Gemma4TT:
         trace: bool = False,
         output: DecodeOutput = "logits",
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return active row indices and their logits [A, V] or token IDs [A, 1]."""
+        """Return active row indices and their logits [A, V] or token IDs [A, 1].
+
+        "raw_logits" skips the final softcap (LmHead.softcap), for a caller that caps
+        only what it needs. "greedy" returns the token IDs of the largest logits.
+        """
         active = torch.nonzero(positions >= 0).flatten()
         if len(active) == tokens.shape[0]:
             return active, self._decode_rows(
@@ -498,7 +502,9 @@ class Gemma4TT:
         corrupted values: wrong tokens, or expert ids that send a read out of
         bounds and hang the device. The eager run also compiles the programs. Its
         zero page tables send every row's K/V write to the null block 0, which
-        holds no request's data.
+        holds no request's data. The greedy readback is not traced, but its kernels
+        stay in DRAM, so they are built here too. Its result buffer may overlap
+        trace intermediates, because it is read before the next replay.
         """
         width = self.table_width
         for batch in range(1, self.max_batch + 1):
@@ -515,7 +521,9 @@ class Gemma4TT:
                 for k, v in host.items()
             }
         for dev in self._trace_inputs.values():
-            self._decode_device(dev).deallocate(True)
+            out = self._decode_device(dev)
+            self.head.read_greedy(out)  # its program runs between trace replays
+            out.deallocate(True)
 
     def _host(
         self,

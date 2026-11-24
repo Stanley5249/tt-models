@@ -87,9 +87,12 @@ def test_greedy_decode_reuses_logit_trace():
         active, logits = m.decode_active(
             tokens, positions, tables, trace=True, output="raw_logits"
         )
+        programs = mesh.num_program_cache_entries()
         selected, ids = m.decode_active(
             tokens, positions, tables, trace=True, output="greedy"
         )
+        # A program built after a capture could be allocated in trace memory.
+        assert mesh.num_program_cache_entries() == programs
         assert torch.equal(active, selected)
         assert torch.equal(ids, logits.argmax(-1, keepdim=True))
         assert len(m.traces) == 1

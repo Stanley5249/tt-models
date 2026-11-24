@@ -505,7 +505,7 @@ class Gemma4ForCausalLM:
         kv_cache: KvCache,  # noqa: ARG002 - plugin API
         max_batch_size: int,
         num_blocks: int,  # noqa: ARG002 - plugin API
-        can_sample_on_device: bool,  # noqa: FBT001 - plugin API
+        can_sample_on_device: bool,  # noqa: ARG002, FBT001 - plugin API
         enable_trace: bool,  # noqa: FBT001 - plugin API
         **_: object,
     ) -> None:
@@ -519,13 +519,7 @@ class Gemma4ForCausalLM:
         for active in range(1, max_batch_size + 1):
             positions = torch.full((max_batch_size,), -1, dtype=torch.long)
             positions[:active] = 0
-            self.model.decode_active(
-                tokens,
-                positions,
-                tables,
-                trace=enable_trace,
-                output="greedy" if can_sample_on_device else "logits",
-            )
+            self.model.decode(tokens, positions, tables, trace=enable_trace)
 
     def release_persistent_capture(self) -> None:
         """Release the persistent decode traces."""
