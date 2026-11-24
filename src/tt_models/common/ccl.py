@@ -118,6 +118,7 @@ def all_gather_compact(x: ttnn.Tensor) -> ttnn.Tensor:
         memory_config=L1,
         barrier_semaphore=barrier,
         chunks_per_sync=10,
-        num_workers_per_link=2,
+        # A single worker avoids mux overhead for the smallest partial sums.
+        num_workers_per_link=1 if x.shape[-1] <= 6 * TILE else 2,
         num_buffers_per_channel=2,
     )
