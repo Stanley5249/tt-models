@@ -93,8 +93,6 @@ def sample(
     want_log_probs = params.enable_log_probs is not None and any(
         params.enable_log_probs[r] for r in idx
     )
-    if all(t == 0.0 for t in temps) and not want_log_probs:
-        return logits.argmax(-1, keepdim=True), None  # greedy: no top-k sort
     if want_log_probs and softcap is not None:
         logits, softcap = softcap(logits), None
     top_ks = [

@@ -545,7 +545,7 @@ class Gemma4TT:
 
         Built on one torch thread: torch's pool sleeps while the host waits for the
         device, and waking it for these small tensors cost 1-2 ms per step (2.2 ->
-        0.6 ms at 4 rows). The sampler's large argmax keeps the pool.
+        0.6 ms at 4 rows). The sampler's top-k keeps the pool.
         """
         torch.set_num_threads(1)
         try:

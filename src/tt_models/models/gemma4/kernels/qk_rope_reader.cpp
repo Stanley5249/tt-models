@@ -27,7 +27,7 @@ void kernel_main() {
     constexpr uint32_t cb_a = get_compile_time_arg_val(4);  // S1 = sq @ A
     constexpr uint32_t cb_b = get_compile_time_arg_val(5);  // S2 = B @ S1
     constexpr uint32_t head_chunks = get_compile_time_arg_val(6);  // 16 (head_dim 256) or 32 (512)
-    constexpr uint32_t vec_tiles = get_compile_time_arg_val(7);    // compact tiles of the row (cs / w stride)
+    constexpr uint32_t vec_tiles = get_compile_time_arg_val(7);    // compact tiles of the row (w stride)
     constexpr auto x_args = TensorAccessorArgs<8>();
     constexpr auto cs_args = TensorAccessorArgs<x_args.next_compile_time_args_offset()>();
     constexpr auto w_args = TensorAccessorArgs<cs_args.next_compile_time_args_offset()>();
