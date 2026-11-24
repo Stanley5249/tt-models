@@ -139,8 +139,8 @@ class Gemma4ForCausalLM:
         "supports_prefix_caching": True,
         "supports_chunked_prefill": True,
         "supports_async_decode": False,
-        # "Device" sampling here is the host-side top-k sampler above, which the
-        # plugin calls through decode_forward(sampling_params=...).
+        # The plugin delegates sampling through decode_forward(sampling_params=...).
+        # Gemma uses device maxima for greedy batches and host top-k for sampling.
         "supports_sample_on_device": True,
         "max_device_top_k": MAX_TOP_K,
         "supports_device_penalties": False,
