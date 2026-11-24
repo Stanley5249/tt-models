@@ -4,7 +4,8 @@
 // sums once. Then for each token row of this core: gathers compact tile `tile` of that row of the FP32
 // QKV matmul output (row form) twice, in order (x) and with every chunk swapped with its half-head
 // partner (xr, the rotate_half permutation; the sign is in the sin table), and reads the row's
-// [cos | sin * sign] compact tiles (row b's tables start at cs_page0 + 2 * vec_tiles * b).
+// [cos | sin * sign] compact tiles. All Q/K-only tiles share the first pair and the
+// last tile takes the second pair, which uses cos 1 and sin 0 for V.
 //
 // runtime args: [x_addr, cs_addr, w_addr, tile, cs_page0, n_rows, row 0, row 1, ...]
 // (cs_page0: the tables' first tile in a combined input)
@@ -72,9 +73,9 @@ void kernel_main() {
         }
         cb_reserve_back(cb_cs, 2);
         const uint32_t lcs = get_write_ptr(cb_cs);
-        const uint32_t cs_row = cs_page0 + 2 * vec_tiles * row;
-        noc_async_read_page(cs_row + tile, s_cs, lcs);
-        noc_async_read_page(cs_row + vec_tiles + tile, s_cs, lcs + COMPACT_TILE);
+        const uint32_t cs_row = cs_page0 + 4 * row + (tile + 1 == vec_tiles ? 2 : 0);
+        noc_async_read_page(cs_row, s_cs, lcs);
+        noc_async_read_page(cs_row + 1, s_cs, lcs + COMPACT_TILE);
         noc_async_read_barrier();
         cb_push_back(cb_x, 1);
         cb_push_back(cb_xr, 1);

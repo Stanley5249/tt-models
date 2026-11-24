@@ -20,6 +20,8 @@ from tt_models.models.gemma4.generic_op import (
     f32_bits,
 )
 
+ROPE_TILES_PER_ROW = 4  # cosine and signed sine for the repeated and last tiles
+
 
 def rope_partner(width: int, head_dim: int) -> torch.Tensor:
     """Find the rotate_half partner of every value in a fused QKV row.
@@ -57,22 +59,27 @@ class QkRope:
         self.V = width // (CHUNK * CHUNKS_PER_TILE)
         assert width == self.V * CHUNK * CHUNKS_PER_TILE
         self.partner = rope_partner(width, head_dim)
-        self.sign = torch.where(
-            torch.arange(width) % head_dim < head_dim // 2, -1.0, 1.0
-        )
+        self.sign = torch.where(torch.arange(head_dim) < head_dim // 2, -1.0, 1.0)
 
     def weights(self, w_row: torch.Tensor) -> ttnn.Tensor:
         """[W] per-value head weights -> compact [w | w permuted to partners]."""
         return compact_tensor(self.mesh, torch.stack([w_row, w_row[self.partner]]))
 
-    def host_tables(self, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        """Pack the tokens' cosine and signed sine rows into compact form.
-
-        cos, sin: [rows, W]. Per token [cos | sin * rotate_half sign], as host compact
-        FP32 [1, 1, 32, rows 2 V 32].
-        """
-        pairs = torch.stack([cos, sin * self.sign], dim=1).reshape(-1, self.width)
-        return to_compact(pairs)[None, None]
+    def host_tables(
+        self, cos: torch.Tensor, sin: torch.Tensor, rotated_heads: int
+    ) -> torch.Tensor:
+        """Pack a repeated RoPE tile pair and the last tile pair, including V."""
+        values = CHUNK * CHUNKS_PER_TILE
+        heads = values // self.head_dim
+        rotated_tail = rotated_heads - (self.V - 1) * heads
+        assert 0 <= rotated_tail <= heads  # V heads fit entirely in the last tile
+        pair = torch.stack([cos, sin * self.sign], dim=1).unsqueeze(2)
+        repeated = pair.expand(-1, -1, heads, -1)
+        tail = repeated.clone()
+        tail[:, 0, rotated_tail:] = 1.0
+        tail[:, 1, rotated_tail:] = 0.0
+        packed = torch.stack([repeated, tail], dim=1).reshape(-1, values)
+        return to_compact(packed)[None, None]
 
     def __call__(
         self,
@@ -85,7 +92,7 @@ class QkRope:
         """Apply fused RMSNorm and RoPE to the QKV row.
 
         x: FP32 row-form QKV matmul output [1, 1, rows, W]; out: BF16 row form [1, 1,
-        rows, W]; cs: the host_tables of the rows from tile cs_page0.
+        rows, W]; cs: four packed RoPE tiles per row from tile cs_page0.
         """
         rows = x.shape[2]
         groups = min(rows, 64 // self.V)  # cores per compact tile

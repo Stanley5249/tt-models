@@ -34,6 +34,7 @@ from tt_models.models.gemma4.config import (
 from tt_models.models.gemma4.kv_cache import KvCache
 from tt_models.models.gemma4.layer import DecoderLayer
 from tt_models.models.gemma4.lm_head import LmHead
+from tt_models.models.gemma4.qk_rope import ROPE_TILES_PER_ROW
 from tt_models.models.gemma4.reference import embed_scale
 
 type DecodeOutput = Literal["logits", "raw_logits", "greedy"]
@@ -88,16 +89,6 @@ class Gemma4TT:
         ]
         self.head = LmHead(mesh, loader, ckpt, cfg, precision.lm_head)
         self.boundary = Boundary(mesh, self.hidden, cfg.rms_norm_eps)
-        # compact tiles per row of each layer type's [cos | sin] table in the FP32 input
-        self._cs_tiles = {
-            kind: 2
-            * next(
-                layer.attn.qk_rope.V
-                for layer in self.layers
-                if layer.sliding == (kind == "sliding_attention")
-            )
-            for kind in ("sliding_attention", "full_attention")
-        }
         final_raw = ckpt.get("norm.weight").float()
         for i, layer in enumerate(self.layers):
             nxt = (
@@ -589,21 +580,9 @@ class Gemma4TT:
                 for layer in self.layers
                 if layer.sliding == (kind == "sliding_attention")
             )
-            roped = (
-                attn.shape.n_q + attn.shape.n_kv
-            )  # Q and K rows; V rows keep cos 1, sin 0
-            rope_tables: dict[str, torch.Tensor] = {}
-            for name, table, fill in (("cos", cos, 1.0), ("sin", sin, 0.0)):
-                rows = torch.full(
-                    (batch, attn.heads, attn.shape.head_dim), fill, dtype=table.dtype
-                )
-                rows[:, :roped] = table[pos][:, None, :]
-                rope_tables[name] = rows
-            # compact [cos | signed sin] tables for the fused q/k norm + RoPE
             f32.append(
                 attn.qk_rope.host_tables(
-                    rope_tables["cos"].reshape(batch, -1),
-                    rope_tables["sin"].reshape(batch, -1),
+                    cos[pos], sin[pos], attn.shape.n_q + attn.shape.n_kv
                 )
             )
         inputs["in32"] = self._host(torch.cat(f32, dim=-1), ttnn.float32)
@@ -616,7 +595,7 @@ class Gemma4TT:
         V = self.boundary.V
         pages = {
             "sliding_attention": batch * V,
-            "full_attention": batch * (V + self._cs_tiles["sliding_attention"]),
+            "full_attention": batch * (V + ROPE_TILES_PER_ROW),
         }
         xc, h = dev["in32"], dev["h0"]
         for i, (layer, kv) in enumerate(zip(self.layers, self.require_kv().layers)):
