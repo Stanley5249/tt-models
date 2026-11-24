@@ -1,0 +1,25 @@
+import json, sys, urllib.request
+from concurrent.futures import ThreadPoolExecutor
+T = ["rivers","volcanoes","bridges","printing","bees","glass","maps","salt","clocks","sails","ink","bread","copper","tides","paper","wheels"]
+K = [{}, {"temperature": 1, "top_k": 64, "seed": 7}, {"logprobs": 5}, {"repetition_penalty": 1.1}]
+def req(i, chat, kind):
+    kw = dict(K[kind]); text = f"Write a short paragraph about {T[i]} and explain why it matters."
+    body = {"model": "gemma4", "max_tokens": 64, "ignore_eos": True, "temperature": 0, "return_token_ids": True, **kw}
+    if chat:
+        body |= {"messages": [{"role": "user", "content": text}], "chat_template_kwargs": {"enable_thinking": False}}
+        if "logprobs" in kw: body |= {"logprobs": True, "top_logprobs": 5}
+    else: body["prompt"] = text
+    r = urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/v1/" + ("chat/completions" if chat else "completions"), json.dumps(body).encode(), {"Content-Type": "application/json"}))
+    return json.load(r)["choices"][0]["token_ids"]
+out = {}
+for chat in (True, False):
+    c = "chat" if chat else "raw"
+    solo = [[req(i, chat, k) for i in range(16)] for k in range(4)]
+    out[c + " solo"] = solo
+    again = [[req(i, chat, k) for i in range(16)] for k in range(4)]
+    print(c, "solo repeat identical", [a == b for a, b in zip(solo, again)], flush=True)
+    for name, f in (("greedy", lambda i: 0), ("greedy+sampled", lambda i: i % 2), ("greedy+logprobs", lambda i: 2 * (i % 2)), ("greedy+penalty", lambda i: 3 * (i % 2)), ("all kinds", lambda i: i % 4)):
+        with ThreadPoolExecutor(16) as ex: got = list(ex.map(lambda i: req(i, chat, f(i)), range(16)))
+        out[f"{c} {name}"] = got
+        print(c, name, [next((j for j in range(64) if solo[f(i)][i][j] != got[i][j]), 64) for i in range(16)], flush=True)
+json.dump(out, open(sys.argv[1], "w"))

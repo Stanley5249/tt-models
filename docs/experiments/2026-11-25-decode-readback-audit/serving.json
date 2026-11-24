@@ -1,0 +1,198 @@
+{
+ "f87908f": {
+  "c1-128-128-n8.r0": {
+   "completed": 8,
+   "failed": 0,
+   "output_throughput": 54.958,
+   "mean_tpot_ms": 16.482,
+   "median_itl_ms": 16.46,
+   "mean_ttft_ms": 235.681
+  },
+  "c1-128-128-n8.r1": {
+   "completed": 8,
+   "failed": 0,
+   "output_throughput": 54.873,
+   "mean_tpot_ms": 16.542,
+   "median_itl_ms": 16.502,
+   "mean_ttft_ms": 231.702
+  },
+  "c1-128-128-n8.r2": {
+   "completed": 8,
+   "failed": 0,
+   "output_throughput": 55.031,
+   "mean_tpot_ms": 16.454,
+   "median_itl_ms": 16.435,
+   "mean_ttft_ms": 236.12
+  },
+  "c16-128-128-n64.r0": {
+   "completed": 64,
+   "failed": 0,
+   "output_throughput": 289.115,
+   "mean_tpot_ms": 44.263,
+   "median_itl_ms": 43.974,
+   "mean_ttft_ms": 1457.323
+  },
+  "c16-128-128-n64.r1": {
+   "completed": 64,
+   "failed": 0,
+   "output_throughput": 288.772,
+   "mean_tpot_ms": 44.277,
+   "median_itl_ms": 44.119,
+   "mean_ttft_ms": 1463.765
+  },
+  "c16-128-128-n64.r2": {
+   "completed": 64,
+   "failed": 0,
+   "output_throughput": 288.421,
+   "mean_tpot_ms": 44.411,
+   "median_itl_ms": 44.472,
+   "mean_ttft_ms": 1453.874
+  },
+  "c4-128-128-n16.r0": {
+   "completed": 16,
+   "failed": 0,
+   "output_throughput": 142.51,
+   "mean_tpot_ms": 23.745,
+   "median_itl_ms": 23.134,
+   "mean_ttft_ms": 575.561
+  },
+  "c4-128-128-n16.r1": {
+   "completed": 16,
+   "failed": 0,
+   "output_throughput": 144.716,
+   "mean_tpot_ms": 23.664,
+   "median_itl_ms": 23.281,
+   "mean_ttft_ms": 531.127
+  },
+  "c4-128-128-n16.r2": {
+   "completed": 16,
+   "failed": 0,
+   "output_throughput": 144.91,
+   "mean_tpot_ms": 23.599,
+   "median_itl_ms": 23.102,
+   "mean_ttft_ms": 534.613
+  },
+  "c8-128-128-n32.r0": {
+   "completed": 32,
+   "failed": 0,
+   "output_throughput": 211.57,
+   "mean_tpot_ms": 31.332,
+   "median_itl_ms": 31.272,
+   "mean_ttft_ms": 859.37
+  },
+  "c8-128-128-n32.r1": {
+   "completed": 32,
+   "failed": 0,
+   "output_throughput": 212.051,
+   "mean_tpot_ms": 31.236,
+   "median_itl_ms": 31.094,
+   "mean_ttft_ms": 860.539
+  },
+  "c8-128-128-n32.r2": {
+   "completed": 32,
+   "failed": 0,
+   "output_throughput": 212.779,
+   "mean_tpot_ms": 31.107,
+   "median_itl_ms": 31.242,
+   "mean_ttft_ms": 860.4
+  }
+ },
+ "head": {
+  "c1-128-128-n8.r0": {
+   "completed": 8,
+   "failed": 0,
+   "output_throughput": 56.059,
+   "mean_tpot_ms": 16.116,
+   "median_itl_ms": 16.074,
+   "mean_ttft_ms": 236.329
+  },
+  "c1-128-128-n8.r1": {
+   "completed": 8,
+   "failed": 0,
+   "output_throughput": 56.289,
+   "mean_tpot_ms": 16.066,
+   "median_itl_ms": 16.051,
+   "mean_ttft_ms": 233.376
+  },
+  "c1-128-128-n8.r2": {
+   "completed": 8,
+   "failed": 0,
+   "output_throughput": 56.123,
+   "mean_tpot_ms": 16.084,
+   "median_itl_ms": 16.044,
+   "mean_ttft_ms": 237.832
+  },
+  "c16-128-128-n64.r0": {
+   "completed": 64,
+   "failed": 0,
+   "output_throughput": 317.481,
+   "mean_tpot_ms": 39.253,
+   "median_itl_ms": 39.052,
+   "mean_ttft_ms": 1460.453
+  },
+  "c16-128-128-n64.r1": {
+   "completed": 64,
+   "failed": 0,
+   "output_throughput": 314.78,
+   "mean_tpot_ms": 39.535,
+   "median_itl_ms": 39.218,
+   "mean_ttft_ms": 1480.143
+  },
+  "c16-128-128-n64.r2": {
+   "completed": 64,
+   "failed": 0,
+   "output_throughput": 318.03,
+   "mean_tpot_ms": 39.284,
+   "median_itl_ms": 39.434,
+   "mean_ttft_ms": 1445.538
+  },
+  "c4-128-128-n16.r0": {
+   "completed": 16,
+   "failed": 0,
+   "output_throughput": 151.129,
+   "mean_tpot_ms": 22.45,
+   "median_itl_ms": 22.007,
+   "mean_ttft_ms": 535.171
+  },
+  "c4-128-128-n16.r1": {
+   "completed": 16,
+   "failed": 0,
+   "output_throughput": 151.72,
+   "mean_tpot_ms": 22.388,
+   "median_itl_ms": 21.958,
+   "mean_ttft_ms": 529.758
+  },
+  "c4-128-128-n16.r2": {
+   "completed": 16,
+   "failed": 0,
+   "output_throughput": 151.194,
+   "mean_tpot_ms": 22.4,
+   "median_itl_ms": 21.894,
+   "mean_ttft_ms": 540.119
+  },
+  "c8-128-128-n32.r0": {
+   "completed": 32,
+   "failed": 0,
+   "output_throughput": 224.895,
+   "mean_tpot_ms": 29.102,
+   "median_itl_ms": 29.037,
+   "mean_ttft_ms": 855.92
+  },
+  "c8-128-128-n32.r1": {
+   "completed": 32,
+   "failed": 0,
+   "output_throughput": 226.255,
+   "mean_tpot_ms": 28.918,
+   "median_itl_ms": 28.903,
+   "mean_ttft_ms": 851.677
+  },
+  "c8-128-128-n32.r2": {
+   "completed": 32,
+   "failed": 0,
+   "output_throughput": 227.374,
+   "mean_tpot_ms": 28.744,
+   "median_itl_ms": 28.868,
+   "mean_ttft_ms": 851.725
+  }
+ }
+}

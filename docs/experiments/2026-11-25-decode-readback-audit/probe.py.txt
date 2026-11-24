@@ -1,0 +1,47 @@
+import argparse, hashlib, inspect, json, statistics, time
+import numpy as np, torch, ttnn
+import tt_models
+from tt_models.common.mesh import open_n300
+from tt_models.models.gemma4.checkpoint import Checkpoint
+from tt_models.models.gemma4.model import Gemma4TT
+ap = argparse.ArgumentParser(); ap.add_argument("--label"); ap.add_argument("--rows", type=int, nargs="+", default=[1,2,4,16])
+ap.add_argument("--steps", type=int, default=64); ap.add_argument("--greedy", action="store_true")
+ap.add_argument("--len", type=int, default=128)
+a = ap.parse_args()
+print(tt_models.__file__, flush=True)
+raw = {"output": "raw_logits"} if "output" in inspect.signature(Gemma4TT.decode_active).parameters else {"softcap": False}
+with open_n300(trace_region_size=300_000_000) as mesh:
+    m = Gemma4TT(mesh, Checkpoint(), max_batch=max(a.rows))
+    m.allocate_kv_cache(max(a.rows), 1024)
+    torch.set_num_threads(1); m._torch_threads = 1
+    for rows in a.rows:
+        for seed in range(3):
+            tables = m.page_tables(rows, 1024)
+            g = torch.Generator().manual_seed(seed * 100 + rows)
+            L = a.len
+            ids = torch.randint(100, 20000, (rows, L + a.steps + 1), generator=g)
+            for b in range(rows): m.prefill(ids[b, :L], 0, tables[:, b])
+            m.decode_active(ids[:, L], torch.full((rows,), L), tables, trace=True, **raw)
+            if a.greedy: m.decode_active(ids[:, L], torch.full((rows,), L), tables, trace=True, output="greedy")
+            dg = hashlib.sha256(); T = {}; bad = 0
+            tok = ids[:, L + 1]
+            for s in range(1, a.steps):
+                pos = torch.full((rows,), L + s)
+                if not a.greedy:
+                    t0 = time.perf_counter(); _, lg = m.decode_active(ids[:, L + s], pos, tables, trace=True, **raw)
+                    T.setdefault("raw", []).append(time.perf_counter() - t0); dg.update(lg.numpy().tobytes()); continue
+                got = {}
+                modes = ["torch", "numpy", "greedy"]; k = s % 3
+                for mode in modes[k:] + modes[:k]:
+                    t0 = time.perf_counter()
+                    _, r = m.decode_active(tok, pos, tables, trace=True, output="greedy" if mode == "greedy" else "raw_logits")
+                    if mode == "torch": r = r.argmax(-1, keepdim=True)
+                    if mode == "numpy": r = torch.from_numpy(r.numpy().argmax(-1))[:, None]
+                    T.setdefault(mode, []).append(time.perf_counter() - t0); got[mode] = r
+                    tt = T
+                bad += int((got["greedy"] != got["torch"]).sum())
+                tok = got["greedy"][:, 0]
+            print(json.dumps({"label": a.label, "rows": rows, "seed": seed, "bad": bad, "n": rows * (a.steps - 1), "digest": dg.hexdigest()[:16],
+              **{k: round(1e3 * statistics.median(v), 3) for k, v in T.items()}}), flush=True)
+    print("program cache", mesh.num_program_cache_entries())
+    m.release_traces()

@@ -29,7 +29,7 @@ Everything a trace touches is allocated before the first capture, and prefill re
 
 ### Sampling
 
-When every active decode row is greedy and needs no logprobs, each chip reduces its FP32 logits to local maxima. The host merges those candidates in vocabulary order, so an exact tie selects the lowest token ID. Greedy readback uses the same trace as full-logit decode.
+When every active decode row is greedy and needs no logprobs, each chip reduces its FP32 logits to local maxima. The host merges those candidates in vocabulary order, so an exact tie selects the lowest token ID. Greedy readback uses the same trace as full-logit decode. See [decode readback](experiments/2026-11-25-gemma4-decode-readback.md) and its [audit](experiments/2026-11-25-decode-readback-audit.md).
 
 The host model-side sampler (`sample` in `vllm_adapter.py`) reads full logits for mixed or sampled batches. Sampling takes the top k <= 1,024 candidates and applies temperature, top-p and a seed keyed by (seed, position). Only the candidates get the final softcap ([lazy softcap](experiments/2026-11-21-lazy-softcap.md)). Logprobs and vLLM's host sampler get the whole capped row.
 
