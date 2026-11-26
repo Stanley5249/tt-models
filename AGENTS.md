@@ -5,6 +5,10 @@
 - `just check` runs the format checks, ruff and pyrefly.
 - `just test` runs the host tests, and `just test -m device` the N300 ones.
 
+## Documentation
+
+- Use [docs/glossary.md](docs/glossary.md) as the source of reusable terminology for new documents. Keep full definitions there; reports may briefly explain a term on first use. Do not depend on tt-home for these definitions.
+
 ## Privacy
 
 The repository is public. Commit authorship and the local paths in experiment logs are public on purpose. Never commit tokens, credentials or `.env`.
