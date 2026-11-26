@@ -1,123 +1,86 @@
 # 使用 tt-scope 分析的 Gemma 4 推論最佳化
 
-Gemma 4 26B-A4B 在單張 N300d（兩顆 Wormhole chips）上透過 vLLM 提供文字生成服務。模型採 Google QAT checkpoint，主要權重使用 BFP4／BFP8。2026-11-22 起的 runtime 為 TTNN 0.82.0、vLLM 0.32.0 與 tt-scope 0.5.0。[Runtime 紀錄][stack] 程式範圍截至 2026-11-26 查核的 [tt-models 版本][head]。
+vLLM 在單張 N300d 上執行 Gemma 4 26B-A4B，提供文字生成服務。N300d 有兩顆 Wormhole chips。模型採 Google QAT checkpoint，expert weights 使用 BFP4，其他權重使用 BFP8。目前的 runtime 為 TTNN 0.82.0、vLLM 0.32.0 與 tt-scope 0.5.0。[本文描述的程式版本][head]
 
-各項結果只屬於自己的配對比較。各實驗的 runtime 與生成設定不同，例如 2026-11-22 從 TTNN 0.81.1 換成 0.82.0，所以本文不計算跨實驗的總加速倍率。[結果摘要][summary] 術語見 [Glossary](../glossary.md)，tt-scope 操作細節、服務穩定性、最新服務結果與驗證限制見[附錄](gemma4-optimization-with-tt-scope-appendix.md)。
-
-## tt-scope 怎麼找到線索
-
-Agent 用 tt-scope 錄製 Tracy captures，再依 chip 與 layer 內的位置整理 operations。在 Metal Trace replay 下，報表的 `OP TO OP LATENCY` 包含 host 在 replays 之間的時間。把這一欄直接加總，會得到約 395 ms 的 gap，但整個 decode step 只有約 34 ms。Agent 改用 device firmware start/end cycles，算出 replay 內的 gap 約 0.8 ms，因此調查轉向 kernels 本身的成本。[分析紀錄][findings] [分析腳本][breakdown]
-
-Tracy 負責定位 device 成本。Expert weights 的排列與跨 requests 的去重由程式和 kernel tests 檢查，host 路徑則用 `py-spy` 與分段計時。是否採用改動，依未開 profiler 的配對計時或服務測試決定。
+各項結果只比較該項的改動前與改動後，一組比較同時包含其他改動時，附錄會列出那些改動。各實驗的 runtime 與生成設定不同，所以本文不計算總加速倍率。[結果摘要][summary] 術語與 `model.decode` 的計時範圍見 [Glossary](../glossary.md#profiling-與計時的補充)。各項的實驗日期、commits、其他量測與同一組比較中的其他改動，以及 tt-scope 操作細節、服務穩定性與驗證限制，見[附錄](gemma4-optimization-with-tt-scope-appendix.md)。
 
 ## 主要最佳化
 
-### Readback 不傳 padding rows
+### Logits readback 不傳 tile 中的 padding rows
 
-**觀察**：2026-11-17 的實驗把 batch size 1 的 `model.decode` 單步分段計時。Trace 執行花 39.3 ms，logits readback 另花 9.1 ms。程式檢查發現，原程式以 tile layout 傳回 logits。只有一列是有效輸出，卻讀回 32 rows，其中 31 rows 是 padding。
+**觀察**：Batch size 1 的 decode step 分段計時中，trace 執行花 39.3 ms，logits readback 另花 9.1 ms。Code review 發現，原程式以 tile layout 把 logits 從 device 讀回 host。讀回的 32 rows 中只有 1 row 是有效輸出，其餘 31 rows 是 padding。[實驗紀錄][r1]
 
-**做法**：在 `ttnn.to_torch` 前加入 `ttnn.to_layout(..., ttnn.ROW_MAJOR_LAYOUT)`，只傳需要的 rows。[Code diff][rowdiff]
+**做法**：Decode 的 readback 路徑先用 `ttnn.to_layout(..., ttnn.ROW_MAJOR_LAYOUT)` 把 device 上的 logits 改為 row-major，再用 `ttnn.to_torch` 只把有效輸出的 rows 從 device 讀回 host。[Code diff][rowdiff]
 
-**結果**：當時 batch size 1 的 readback **9.1 → 0.6 ms**。這個數字只包含裝置結果傳回 host 的時間，不是整個 decode step。[實驗紀錄][r1]
+**結果**：Batch size 1 的 logits readback 耗時為 **9.1 → 0.6 ms**。這個計時只涵蓋 device 結果傳回 host，不是整個 decode step。[實驗紀錄][r1]
 
 ### 按 DRAM bank 讀取 expert weights
 
-**觀察**：Batch size 4 的 Tracy capture 顯示，一個 decode step 中 chip 0 的 kernel time 合計約 50.9 ms，其中 `ttnn.sparse_matmul` 占 **20.5 ms**，gap 只有 **0.86 ms**。所以瓶頸在 operations 本身，不在 operations 之間的 gap。原本的 `ttnn.sparse_matmul` 逐 tile 讀取所選的 expert weights。[改動前 capture][rawbatch]
+**觀察**：Batch size 2–4 的 decode 用 `ttnn.sparse_matmul` 逐 tile 讀取 router 選中的 expert weights。Batch size 4 的 Tracy capture 中，`ttnn.sparse_matmul` 讀取 expert weights 的速度只有約 85 GB/s。[實驗紀錄][batched]
 
-**做法**：改用自訂 kernels，按 DRAM bank 分配讀取工作，以較大封包搬運權重，並把 GELU activation function、乘上 routing weights 與 8 個 experts 的輸出加總，合併進同一組 kernels。[Source code][expertcode]
+**做法**：改用自訂 kernels，按 DRAM bank 分配讀取工作，以較大的區塊讀取 expert weights。GELU、乘上 routing weights 與 8 個 experts 輸出的加總也 fuse 進同一組 kernels。這組 kernels 先用於 batch size 1，再延伸到 batch size 2–4。[Source code][expertcode]
 
-**結果**：改動後的 Tracy capture 中，chip 0 的 kernel time 合計 **50.86 → 31.45 ms**。[改動後 capture][rawbatchafter] 未開 profiler 的配對計時中，batch size 4 直接呼叫 `model.decode` 的單步時間 **56.49 → 35.42 ms**，包含輸入輸出傳輸，不包含 token selection。[計時紀錄][batched]
+**結果**：Batch size 4 以 `model.decode` 計時的 decode latency 為 **56.49 → 35.42 ms**，expert weights 的讀取速度提高到約 204–226 GB/s。這組 decode latency 也包含 dense MLP 改用同一組 kernels 的效果。[實驗紀錄][batched]
 
-### 密集儲存 hidden state，合併相關運算
+### Hidden state 改放進 3 個 tiles，fuse layers 之間的運算
 
-**觀察**：另一輪 batch size 4 的 Tracy capture 顯示，chip 0 的正規化、加法與格式轉換約占 **7 ms**，60 次 all-gather 另占約 **3.3 ms**。原本每個 request 的 hidden state 有 2,816 個 components，占用 88 個 tiles，但每個 tile 只用其中一列。Batch size 4 時，四個 requests 各用一列，其餘列都是 padding。[改動前 capture][rawboundary]
+**觀察**：Hidden size 為 2,816，每個 request 的 hidden state 分散在 88 個 tiles。Batch size 4 時，每個 tile 的 32 rows 只用 4 rows，其餘 28 rows 是 padding。Batch size 4 的 Tracy capture 中，chip 0 在 matmuls 之間的 RMSNorm、加法、layout 轉換、slice 與 concat 約占 **7 ms**。[實驗紀錄][boundaries]
 
-**做法**：把每個 hidden state 密集裝入 3 個 FP32 tiles，再合併跨 chip 加總、RMSNorm 和 residual 加法。同一改動也把 residual 從 BF16 改為 FP32，所以結果同時反映這個精度改動。[Source code][boundarycode]
+**做法**：Decode 把每個 request 的 hidden state 依序存入 3 個 FP32 tiles。兩顆 chips 以 3-tile 的 all-gather 交換 partial sums，再由各 chip 的 tail op 一次完成本地加總、RMSNorm、residual 加法與 layer scaling。[Source code][boundarycode]
 
-**結果**：Chip 0 的 kernel time 合計 **30.55 → 24.83 ms**。[改動後 capture][rawboundaryafter] 未開 profiler 時，batch size 4 直接呼叫 `model.decode` 的單步時間 **34.95 → 29.49 ms**，包含輸入輸出傳輸與 host softcap。這組比較也包含多列 router 的調整，不能全部歸因於密集儲存或合併運算。同日 concurrency 4 的服務 TPOT **36.17 → 30.77 ms**，output throughput **96.9 → 111.3 tokens/s**。[實驗紀錄][boundaries] [比較版本][boundarycompare]
+**結果**：Batch size 4 以 `model.decode` 計時的 decode latency 為 **34.95 → 29.49 ms**，concurrency 4 的服務 TPOT 為 **36.17 → 30.77 ms**。[實驗紀錄][boundaries]
 
-### Requests 共用 expert weights，prompts 批次 prefill
+### 同一 decode step 中，每個 expert 的 weights 只讀一次
 
-**觀察**：舊程式對每個 request 分別讀取選中的 8 個 experts。紀錄中 batch size 4 的 32 次 expert 選擇（4 × 8）只涉及 29–30 個 distinct experts。這個數字來自 `expert_stream_check.py` 的 kernel 測試：輸入是 `torch.randn` 產生並正規化的 synthetic hidden states，權重是實際模型權重。它不是真實流量，也不是 Tracy 統計，原實驗摘要稱為 random prompts，以腳本為準。[測試腳本][expertcheck] 另一項計時測試檢查逐筆處理 prompts 的成本。[Prefill 紀錄][round3]
+**觀察**：舊程式對每個 request 分別讀取該 request 選中的 8 個 experts，不同 requests 選到同一個 expert 時，同一份 weights 會讀取多次。以 synthetic hidden states 執行 `expert_stream_check.py` 時，batch size 16 的 128 次 expert 選擇只涉及 84–86 個 distinct experts。[測試腳本][expertcheck]Expert 的暫存空間也讓 decode 最多只能處理 4 個 requests。[實驗紀錄][shared]
 
-**做法**：Router 在每個 decode step 列出不重複的 experts，每個 expert 的權重只讀一次，供相關 requests 共用。Prefill 改成多筆 prompts 批次執行。[Expert code][expertcode] [Prefill code][prefillcode]
+**做法**：Router 在每個 decode step 列出 distinct experts，每個 expert 的 weights 只讀一次，供選中該 expert 的 requests 共用。同一改動也擴大暫存空間並調整工作分配，讓 decode 最多可處理 16 個 requests。[Source code][expertcode]
 
-**結果**：Batch size 4 直接呼叫 `model.decode` 的時間 **28.81 → 26.01 ms**，包含 host softcap。改動後的版本同時包含 16-row 執行配置與 Q4_0 routing fix，所以這組數字不能全部歸因於共用讀取。支援的 decode batch size 從 4 擴至 16，也需要暫存空間與執行配置的調整。[Shared reads 紀錄][shared] 15 筆各 144-token 的 prompts 從逐筆處理 **3.30 秒 → 批次 1.45 秒**。[Prefill 紀錄][round3]
+**結果**：Batch size 4 以 `model.decode` 計時的 decode latency 為 **28.81 → 26.01 ms**。Server 同時處理的 requests 上限由 4 提高到 16，concurrency 16 的 output throughput 為 **115.7 → 216.2 tokens/s**。[實驗紀錄][shared]
 
-### Greedy 只讀回最高分候選
+### 多個 requests 的 prefill 放進同一個 batch
 
-**觀察**：原本每步讀回完整 logits，再由 host 執行 argmax。`py-spy` 的 stack samples 中，`decode_forward` 有 **89%** 落在 `LmHead.read`。這段時間包含等待裝置，不全是傳輸。分段計時另確認完整 logits readback 和 host argmax 的成本。[診斷紀錄][round3] [分段測試][reassessment]
+**觀察**：vLLM scheduler 在同一個 scheduler step 排入多個新 requests 時，adapter 逐一對每個 request 做 prefill。每次 prefill 都重讀所有 weights，所以短 prefill 每次約有 110 ms 的固定耗時。[實驗紀錄][shared]
 
-**做法**：LM head 的每個 worker 只負責一段 vocabulary 的 logits。改動後，每個 worker 在自己那段 vocabulary 中找出分數最高的 token，host 只讀回這些候選，每個 worker、每個 request 各一個，再從中選出分數最高者。只有所有 active requests 都是 greedy 且未要求 logprobs 時，才走這條路徑。[read_greedy][greedycode] [啟用條件][adaptercode]
+**做法**：Adapter 把同一個 scheduler step 中較短的 prefill 片段分組，每組只執行一次模型，projections、MLP 與 experts 一起處理組內所有 rows。Attention 仍把每個 request 的 K/V 寫入該 request 的 KV cache，並只對該 request 的序列計算 attention。[Source code][prefillcode]
 
-**結果**：在同一程式版本交錯測試三種選詞方式：完整 logits 加 PyTorch argmax、完整 logits 加 NumPy argmax、裝置候選加 host 合併。Batch size 16 的 greedy step 分別為 **41.24 ms**、**39.54 ms** 與 **36.01 ms**。這組計時包含 token selection，與前面 `model.decode` 的計時範圍不同。6,048 次逐 request、逐 step 的比較，選出的 token 都一致。[Audit][audit]
+**結果**：單獨量測 prefill 時，15 個各 144 tokens 的 prompts 耗時為 **3.30 → 1.45 秒**，concurrency 16 的 TTFT 為 **2.92 → 1.39 秒**。[實驗紀錄][round3]
 
 ## 其他最佳化
 
-數字只適用於各項的受測條件。「`model.decode` 單步」的計時範圍見 [Glossary](../glossary.md#profiling-與計時的補充)。
-
-- **Router fusion**：2026-11-17 的 profile 中，routing 每 layer 需 218 µs。改用合併的 `topk_router_gpt`，並一併調整 slot weights 的套用與 `fast_reduce_nc` 後，每 layer **218 → 80 µs**（[`f32639d`][f32639d]）。[紀錄][r1]
-- **Expert gate/up padding**：2026-11-17 的 profile 顯示 `sparse_matmul` 只用 8 cores。每顆 chip 的 gate/up 寬度從 352 補到 384，改用 24 cores 後，每 layer **172 → 118 µs**（[`f32639d`][f32639d]）。[紀錄][r1]
-- **QKV processing**：原本 query、key、value 各自做正規化與 RoPE。合併成一次正規化、一次 RoPE，K/V 直接寫入 cache 後，每 layer **17 → 8 operations**（[`ea2e6a0`][ea2e6a0]、[`1573ed6`][1573ed6]）。[紀錄][r1]
-- **Prefill 按 expert 處理**：原本 prefill 的每個 chunk 重複讀取 expert weights。改成每個 chunk 對每個 expert 只讀一次（[`b85f4ab`][b85f4ab]）。2,048-token TTFT **5.36 → 1.46 秒**是 2026-11-17 整個實驗的結果，不是此項的獨立收益。[紀錄][r1]
-- **只計算 active requests**：原本 vLLM 為單一 request 也計算四個 rows。改成只計算 active rows（[`807f056`][807f056]），紀錄未另列此項的獨立加速值。[紀錄][r1]
-- **Top-k sampler**：原本 host sampling 每步排序整個 vocabulary，約 **19 ms**。改成只處理 top-k candidates，移除這次排序（[`99cc25a`][99cc25a]），但整步不等於快 19 ms。[紀錄][r1]
-- **All-reduce 改寫**：Microbenchmark 中，`ttnn.all_reduce` 處理 2,816 個值的 padded row 需 **43 µs**。改用 `all_gather_async` 加本地 `fast_reduce_nc` 後為 **34 µs**，batch size 1 的 replay time **30.9 → 30.1 ms**（[`2104d70`][2104d70]）。[紀錄][r2]
-- **Dense MLP 按 DRAM bank 讀取**：tt-scope 的 trace breakdown 中，原本的 `ttnn` MLP matmuls 每 layer 約 83 µs 加 16 µs 的銜接運算。改走 expert 用的按 bank 讀取 kernels 後，batch size 1 的 replay time **19.7 → 18.65 ms**（[`350a68c`][350a68c]）。[紀錄][r2]
-- **Multi-row router**：`router_check.py` 顯示 `topk_router_gpt` 在任何 batch size 都要 69–72 µs，另有四個 reshape 與 typecast。把自訂 router 延伸到 1–4 rows 後，batch size 4 的 `model.decode` 單步 **34.8 → 33.8 ms**（[`7a3ccaf`][7a3ccaf]）。密集儲存 hidden state 那組比較也包含此改動。[紀錄][multirouter]
-- **只對候選做 softcap**：原本 host 對每列 262,144 個 logits 做 softcap，每列 0.34 ms。Softcap 在數學上單調遞增，所以改成先依原始 logits 選出 candidates，只對 candidates 做 softcap。服務 TPOT 在 concurrency 1 為 **18.46 → 18.14 ms**，concurrency 4 為 **37.75 → 36.44 ms**（[`8aa505e`][8aa505e]）。[紀錄][softcap]
-- **Runtime update**：同日在 `0d46091` 上比較 TTNN 0.81.1+conda.8 與 0.82.0+conda.1，正確性測試結果相同。換版後 concurrency 1 的服務 TPOT **18.10–18.16 → 17.46–17.47 ms**。這是軟體版本變更，不算自訂 kernel 的收益。[紀錄][stack]
-- **Q/K normalization and RoPE**：2026-11-23 的 Tracy captures 中，`ttnn` 的 q/k 正規化與 RoPE 鏈每 layer 需 68–120 µs。合併成一個 28–47 µs 的 operation，並改用單一 torch thread 建立輸入後，batch size 16 的 `model.decode` 單步 **56.05 → 49.81 ms**，包含這兩項改動（[`87f99ff`][87f99ff]）。[紀錄][round3]
-- **Router top-k 分散到多核心**：2026-11-23 的 Tracy captures 中，batch size 16 的 router operation 需 **145 µs**。改由多個 router cores 分擔 top-k 後為 **69 µs**，batch size 16 的 `model.decode` 單步 **49.80 → 47.56 ms**，輸出不變（[`7c565e5`][7c565e5]）。[紀錄][round3]
-- **SDPA chunk size**：原本 decode SDPA 每塊讀 64 個 cache 位置。Page table 涵蓋長度可被 128 整除時改讀 128 個，其餘維持 64。Batch size 1、2K 位置的 `model.decode` 單步 **18.33 → 18.03 ms**（[`0875726`][0875726]）。[紀錄][round3]
-- **LM head 按各 chip 配置**：2026-11-23 的 Tracy captures 顯示，`ttnn` 的 DRAM-sharded matmul 依 chip 0 的 DRAM 配置放置 readers，chip 1 的 LM head 因此較慢。改用依各 chip DRAM bank 配置的 kernels 後，chip 1 的 LM head operation **2.41 → 1.68 ms**，batch size 1 的 `model.decode` 單步 **16.95 → 15.84 ms**（[`41ef565`][41ef565]）。[紀錄][round3]
-- **Expert weights 按各 chip 配置**：2026-11-19 的 profile 顯示，expert 讀取的 readers 也依 chip 0 的 DRAM 配置放置，chip 1 每步慢 0.5 ms。改成各 chip 分別配置後，batch size 4 的 `model.decode` 單步 **23.21 → 22.78 ms**（[`ed12310`][ed12310]）。[紀錄][r2] [結果紀錄][round3]
-- **Output projection**：原本 attention 的 output projection 結果要再經一個 pack operation 轉成密集排列。改用 MLP down projection 的按 bank 讀取 kernels，直接寫出密集向量，並移除 pack operation 後，batch size 16 的 `model.decode` 單步 **47.48 → 46.49 ms**（[`1b4b150`][1b4b150]）。[紀錄][round3]
-- **RoPE input reuse**：程式檢查發現，每列輸入含 21 個 FP32 tiles，其中有重複的 RoPE tiles。共用相同的 tiles 後降為 11 個，batch size 16 的完整 logits 單步 **37.68 → 37.18 ms**（[`9d2b250`][9d2b250]）。[分析紀錄][reassessment] [Audit][audit]
-- **Small all-gather**：3 tiles 與 6 tiles 的小型 all-gather 原本使用兩個 fabric workers，也就是負責 chip 間傳輸的 workers。Microbenchmark 中改用一個 worker 後，分別 **10.94 → 7.97 µs**、**12.03 → 10.28 µs**，batch size 1 的完整 logits 單步 **15.39 → 15.21 ms**（[`e87dbd9`][e87dbd9]）。[分析紀錄][reassessment] [Audit][audit]
+- **Router fusion**：Profile 中，routing 每 layer 需 218 µs。改用 `topk_router_gpt`，把 router 的 top-k 與對選中 logits 的 softmax fuse 成一個 operation。MoE 把各 expert 的 routing weight 乘到該 expert 的 down projection 輸入上，並以 `fast_reduce_nc` 取代 `ttnn.sum` 加總 8 個 experts 的輸出，routing 每 layer 降到 **80 µs**。[紀錄][r1]
+- **Expert gate/up padding**：Profile 顯示 `sparse_matmul` 只用 8 cores 計算 gate/up。每顆 chip 的 gate/up 寬度從 352 補到 384，讓 `sparse_matmul` 可用 24 cores，每 layer **172 → 118 µs**。[紀錄][r1]
+- **QKV processing**：原本 decode 分別對 Q、K、V 做 RMSNorm，再只對 Q 與 K 做 RoPE。改為把 fused QKV 輸出當成同一組 rows，用一次 RMSNorm 與一次 RoPE 處理 Q、K、V，V 的 rows 使用 cos 1、sin 0，所以 RoPE 不改變 V 的數值。拆開 heads 後，K 與 V 直接寫入 KV cache，每 layer 的 operations 為 **17 → 8**。[紀錄][r1]
+- **Prefill 先按 expert 整理 tokens**：原本 prefill 以每 32 個連續 tokens 為一組，計算這組選到的所有 experts。每組幾乎涵蓋全部 128 個 experts，2,048-token prompt 每組每 layer 約讀 180 MB expert weights。改成 host 從 device 讀回每個 token 的 top-8 expert 選擇，按 expert 把 tokens 整理成 chunks，每個 expert chunk 只讀一次該 expert 的 weights。vLLM 外單獨量測的 2,048-token prefill 為 **5.36 → 1.49 秒**。[紀錄][r1]
+- **只計算 active requests**：vLLM 把 decode 輸入補到 `max_num_seqs` rows。`max_num_seqs` 為 4 時，即使只有一個 active request，model 也以 batch size 4 計算。改成 model 從 vLLM 傳入的 decode batch 移除 position 為 -1 的 rows，並為每種 active request 數各錄一個 Metal Trace。只有一個 active request 時，batch size 從 4 降到 1，trace 執行時間為 **62 → 32 ms**。[紀錄][r1]
+- **Top-k sampler**：Gemma 預設的 top-k 64、top-p 0.95 下，vLLM 的 CPU sampler 每個 decode step 在單一 PyTorch thread 上排序整個 vocabulary，約需 19 ms。改成由 adapter 從傳回的 logits 取出 top-k tokens，再套用 vLLM 的 temperature、top-k 與 top-p 規則。Concurrency 1 的服務 TPOT 為 **52.8 → 36.4 ms**。[紀錄][r1]
+- **All-reduce 改寫**：Microbenchmark 中，`ttnn.all_reduce` 處理 2,816 個值的 padded row 需 43 µs。改用 `all_gather_async`，再由每顆 chip 用 `fast_reduce_nc` 在本地加總兩顆 chips 的 partial sums，batch size 1 的 replay time 為 **30.9 → 30.1 ms**。[紀錄][r2]
+- **Dense MLP 按 DRAM bank 讀取**：tt-scope 的 trace breakdown 中，原本的 `ttnn` MLP matmuls 每 layer 約 83 µs，另有 16 µs 的銜接 operations。Dense MLP 改走 expert 用的按 bank 讀取 kernels 後，batch size 1 的 replay time 為 **19.7 → 18.65 ms**。[紀錄][r2]
+- **自訂 router**：Profile 中，batch size 1 的 `topk_router_gpt` 每 layer 約 71 µs，多數時間花在 top-k。改用自訂 router operation，由 11 個 cores 各算一部分 router logits，reducer 加總後在 RISC 上選出 top 8 並做 softmax。自訂 router 先用於 batch size 1，再延伸到 batch size 2–4。batch size 4 以 `model.decode` 計時的 decode latency 為 **34.8 → 33.8 ms**。[Batch size 1 紀錄][r2] [Batch size 2–4 紀錄][multirouter]
+- **只對選出的 tokens 做 softcap**：原本 host 對每個 request 的 262,144 個 logits 做 softcap，每個 request 需 0.34 ms。Softcap 在數學上單調遞增，所以 greedy decoding 與 top-k sampling 改用原始 logits 選出 tokens，只對選出的 k 個 logits 做 softcap。Concurrency 4 的服務 TPOT 為 **37.75 → 36.44 ms**。[紀錄][softcap]
+- **Q/K RMSNorm、RoPE 與 host 輸入**：Tracy captures 中，`ttnn` 的 Q/K RMSNorm 與 RoPE operations 每 layer 需 68–120 µs。另外，host 在等待 device 後喚醒 PyTorch thread pool，每個 decode step 花 1–2 ms。改成 decode 把 Q/K 的 RMSNorm 與 RoPE fuse 成一個 operation，host 另用單一 PyTorch thread 建立 `model.decode` 的輸入。兩項改動合計，batch size 16 以 `model.decode` 計時的 decode latency 為 **56.05 → 49.81 ms**。[紀錄][round3]
+- **Router top-k 分散到多核心**：Tracy captures 中，batch size 16 的 router operation 需 145 µs。改由多個 router cores 分擔 top-k，輸出不變，batch size 16 以 `model.decode` 計時的 decode latency 為 **49.80 → 47.56 ms**。[紀錄][round3]
+- **SDPA K chunk size**：原本 decode SDPA 每次從 KV cache 讀 64 個 positions。改為在 page table entries 數乘上 KV block size 可被 128 整除時，每次讀 128 個 positions，否則仍讀 64 個。Batch size 1、2,048 positions 時，以 `model.decode` 計時的 decode latency 為 **18.33 → 18.03 ms**。[紀錄][round3]
+- **各 chip 依自己的 DRAM bank 位置選擇讀取 cores**：`ttnn` 的 DRAM-sharded matmul 與原本的 expert kernels 都依 chip 0 的 DRAM bank 位置選擇讀取權重的 cores。兩顆 chips 的 harvesting 不同，所以 chip 1 讀得較慢，all-gather 又讓兩顆 chips 都等待較慢的 chip 1。Tracy captures 中，chip 1 的 LM head 每個 decode step 比 chip 0 慢 0.55 ms。LM head 改用依各 chip 配置的讀取 kernels 後，batch size 1 以 `model.decode` 計時的 decode latency 為 **16.95 → 15.84 ms**。[配置調查][r2] [改動後量測][round3]
+- **Attention output projection 直接輸出 3-tile hidden state**：原本 output projection 的結果要再經一個 pack operation，轉成 hidden state 的 3-tile 排列，batch size 16 時 pack operation 需 36 µs。Output projection 改用 MLP down projection 的按 bank 讀取 kernels，直接寫成 3-tile 排列，並移除 pack operation，batch size 16 以 `model.decode` 計時的 decode latency 為 **47.48 → 46.49 ms**。[紀錄][round3]
+- **Greedy decoding 時，device 只傳回每段 vocabulary 的最高 logit**：原本 `LmHead.read` 每個 decode step 都把完整 logits 從 device 讀回 host，再由 host 執行 argmax，batch size 16 讀回完整 logits 需 3.683 ms。改成 LM head 的每個 worker 先在 device 上找出每個 request 在自己那段 vocabulary 的最高 logit 與 token ID，只把這些值傳回 host，host 再從中選出分數最高的 token。只有所有 active requests 都使用 greedy decoding 且未要求 logprobs 時，adapter 才走這條路徑，checkpoint 預設的 sampling 設定下沒有收益。Batch size 16 含 token selection 的 decode latency 為 **41.24 → 36.01 ms**，兩種做法選出的 token 都一致。[分段計時][reassessment] [Audit][audit]
+- **RoPE input reuse**：Code review 發現，每個 request 的 host 輸入含 21 個 FP32 tiles，其中有內容相同的 RoPE tiles。每個 request 的輸入改為相同的 RoPE tiles 只存一份後，降為 11 個 tiles。Batch size 16 只計到完整 logits、不含 argmax 的 decode latency 為 **37.68 → 37.18 ms**。[分析紀錄][reassessment] [Audit][audit]
+- **Small all-gather**：3 tiles 與 6 tiles 的小型 all-gather 原本每條 link 使用兩個 fabric workers。改為小型 all-gather 每條 link 只用一個 fabric worker，更大的資料仍用兩個。Batch size 1 只計到完整 logits、不含 argmax 的 decode latency 為 **15.39 → 15.21 ms**。[分析紀錄][reassessment] [Audit][audit]
 
 [head]: https://github.com/Stanley5249/tt-models/commit/342e751a47665fda8e52bf407cb13f7f544d10a1
 [summary]: ../experiments/2026-11-23-results-summary.md
-[findings]: ../experiments/2026-11-19-tt-scope-findings.md
-[breakdown]: ../../scripts/profile/trace_breakdown.py
 [reassessment]: ../experiments/2026-11-25-gemma4-decode-readback.md
 [rowdiff]: https://github.com/Stanley5249/tt-models/commit/af22fec026acd72a26439f0d46bd2cf118da8473
 [r1]: ../experiments/2026-11-17-decode-round-1/report.md
 [r2]: ../experiments/2026-11-19-decode-round-2/report.md
 [expertcode]: ../../src/tt_models/models/gemma4/expert_stream.py
 [batched]: ../experiments/2026-11-21-batched-expert-streams.md
-[rawbatch]: ../experiments/2026-11-21-batched-expert-streams/decode-b4-before.txt
-[rawbatchafter]: ../experiments/2026-11-21-batched-expert-streams/decode-b4-after.txt
 [boundarycode]: ../../src/tt_models/models/gemma4/boundary.py
 [boundaries]: ../experiments/2026-11-21-compact-boundaries-multi-row.md
-[boundarycompare]: https://github.com/Stanley5249/tt-models/compare/d565603...333c5e8
-[rawboundary]: ../experiments/2026-11-21-compact-boundaries-multi-row/decode-b4-main.txt
-[rawboundaryafter]: ../experiments/2026-11-21-compact-boundaries-multi-row/decode-b4-compact.txt
-[expertcheck]: https://github.com/Stanley5249/tt-models/blob/342e751a47665fda8e52bf407cb13f7f544d10a1/scripts/kernels/expert_stream_check.py#L82-L106
 [round3]: ../experiments/2026-11-23-decode-serving-round-3.md
 [prefillcode]: https://github.com/Stanley5249/tt-models/blob/342e751a47665fda8e52bf407cb13f7f544d10a1/src/tt_models/models/gemma4/vllm_adapter.py#L332
 [shared]: ../experiments/2026-11-23-shared-expert-reads.md
-[greedycode]: https://github.com/Stanley5249/tt-models/blob/342e751a47665fda8e52bf407cb13f7f544d10a1/src/tt_models/models/gemma4/lm_head.py#L226
-[adaptercode]: https://github.com/Stanley5249/tt-models/blob/342e751a47665fda8e52bf407cb13f7f544d10a1/src/tt_models/models/gemma4/vllm_adapter.py#L400
 [audit]: ../experiments/2026-11-25-decode-readback-audit.md
-[stack]: ../experiments/2026-11-22-shared-stack.md
 [multirouter]: ../experiments/2026-11-21-router-op-multi-row.md
 [softcap]: ../experiments/2026-11-21-lazy-softcap.md
-[f32639d]: https://github.com/Stanley5249/tt-models/commit/f32639d
-[ea2e6a0]: https://github.com/Stanley5249/tt-models/commit/ea2e6a0
-[1573ed6]: https://github.com/Stanley5249/tt-models/commit/1573ed6
-[b85f4ab]: https://github.com/Stanley5249/tt-models/commit/b85f4ab
-[807f056]: https://github.com/Stanley5249/tt-models/commit/807f056
-[99cc25a]: https://github.com/Stanley5249/tt-models/commit/99cc25a
-[2104d70]: https://github.com/Stanley5249/tt-models/commit/2104d70
-[350a68c]: https://github.com/Stanley5249/tt-models/commit/350a68c
-[7a3ccaf]: https://github.com/Stanley5249/tt-models/commit/7a3ccaf
-[8aa505e]: https://github.com/Stanley5249/tt-models/commit/8aa505e
-[87f99ff]: https://github.com/Stanley5249/tt-models/commit/87f99ff
-[7c565e5]: https://github.com/Stanley5249/tt-models/commit/7c565e5
-[0875726]: https://github.com/Stanley5249/tt-models/commit/0875726
-[41ef565]: https://github.com/Stanley5249/tt-models/commit/41ef565
-[ed12310]: https://github.com/Stanley5249/tt-models/commit/ed12310
-[1b4b150]: https://github.com/Stanley5249/tt-models/commit/1b4b150
-[9d2b250]: https://github.com/Stanley5249/tt-models/commit/9d2b250
-[e87dbd9]: https://github.com/Stanley5249/tt-models/commit/e87dbd9
+[expertcheck]: https://github.com/Stanley5249/tt-models/blob/342e751a47665fda8e52bf407cb13f7f544d10a1/scripts/kernels/expert_stream_check.py#L82-L106
