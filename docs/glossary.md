@@ -2,7 +2,7 @@
 
 本頁是 tt-models 新文件中可重用術語的單一維護來源，不依賴 tt-home。報告首次使用術語時可提供簡短說明，完整定義與計時範圍集中在本頁。歷史實驗保留當時用語，引用時依本頁說明其含義。
 
-數值與格式的例子以 Gemma 4 的 N300d 實驗為限，不代表所有模型或裝置。模型設定與量測脈絡見 [階段紀錄](experiments/2026-11-23-results-summary.md)與[模型設定](../src/tt_models/models/gemma4/config.py)。
+數值與格式的例子以 Gemma 4 的 N300d 實驗為限，不代表所有模型或裝置。模型設定與量測脈絡見 [結果摘要](experiments/2026-11-23-results-summary.md)與[模型設定](../src/tt_models/models/gemma4/config.py)。
 
 | Term | 本文定義 |
 | --- | --- |

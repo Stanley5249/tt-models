@@ -30,6 +30,7 @@ Reports in `reports/` summarize work across experiments. Raw data and dated deci
 
 - Use the terms in [the glossary](glossary.md), and add a reusable term there before using it. A report may define a term briefly on first use.
 - Don't invent names for techniques. Describe what the change does.
+- Refer to an experiment by the date in its record's file name, such as 2026-11-17, and link the record. Don't use round, stage, early, or late, because the experiment records, the slides, and the agent prompts give these words different meanings.
 - Keep formal technical terms in American English.
 - Link files that should stay current, such as source files, scripts, and experiment records, with relative paths. Link a past state, such as a commit, a comparison, or a specific line in source code, with a GitHub URL pinned to a commit, because line numbers move.
 - Cut filler, recaps, notes about how the report was written, and repeated cross references. Keep every number, condition, and limit.

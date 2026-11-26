@@ -12,9 +12,9 @@ Batch size 4 調查當時執行的命令：
 pixi run tt-scope tracy scripts/profile_workload.py --programs 8000 -- --batch 4 --decode-steps 2 --trace
 ```
 
-現行腳本已移到 `scripts/profile/workload.py`。後期的 batch size 4 captures 要用 `--programs 20000`，8,000 與 12,000 時有 cores 遺失 markers，所以不能把同一個 buffer 大小套用到所有工作。[原始命令][rawbatch] [現行腳本][workload] [後期 capture][stack]
+現行腳本已移到 `scripts/profile/workload.py`。2026-11-22 起的 batch size 4 captures 要用 `--programs 20000`，8,000 與 12,000 時有 cores 遺失 markers，所以不能把同一個 buffer 大小套用到所有工作。[原始命令][rawbatch] [現行腳本][workload] [2026-11-22 capture][stack]
 
-當時 tt-scope 的平面報表沒有提供全部分組，operation 數改變時，`trace_breakdown.py` 的分組也要跟著更新。自訂 `ttnn.generic_op` 在報表中名稱相同，要再以 tensor shape 與 core count 辨認。最新調查也錄了 Memory capture 和 NoC trace，但現有紀錄無法說明主文哪一項加速來自這兩種 capture。[分析腳本][breakdown] [後期調查][round3] [Capture 與分段測試][reassessment]
+當時 tt-scope 的平面報表沒有提供全部分組，operation 數改變時，`trace_breakdown.py` 的分組也要跟著更新。自訂 `ttnn.generic_op` 在報表中名稱相同，要再以 tensor shape 與 core count 辨認。最新調查也錄了 Memory capture 和 NoC trace，但現有紀錄無法說明主文哪一項加速來自這兩種 capture。[分析腳本][breakdown] [2026-11-23 調查][round3] [Capture 與分段測試][reassessment]
 
 ## 服務穩定性改動
 
@@ -53,7 +53,7 @@ Output throughput 以整個測試耗時為分母，包含 prefill，所以不能
 
 ## 正確性與驗證限制
 
-較早階段用 FP32 reference 檢查模型品質。[初始品質][r1] [單請求品質][r2] 最新 audit 確認受測的完整 logits hashes 一致，6,048 次 greedy token 比對一致。128 筆單獨送出的服務回覆與改動前逐 token 一致。同條件的並行 chat 有 **78／80** 筆新舊回覆一致，並行 raw-text 測試在兩版各自重跑時也會變動。並行與單獨執行可能因 batch 的數值捨入而不同，所以這些測試不能證明所有輸入都完全等價。[最新 audit][audit]
+2026-11-17 與 2026-11-19 的實驗用 FP32 reference 檢查模型品質。[初始品質][r1] [單請求品質][r2] 最新 audit 確認受測的完整 logits hashes 一致，6,048 次 greedy token 比對一致。128 筆單獨送出的服務回覆與改動前逐 token 一致。同條件的並行 chat 有 **78／80** 筆新舊回覆一致，並行 raw-text 測試在兩版各自重跑時也會變動。並行與單獨執行可能因 batch 的數值捨入而不同，所以這些測試不能證明所有輸入都完全等價。[最新 audit][audit]
 
 最新 audit 未重測約 300 個 token 位置之後的速度，也未重跑 preemption。獨立程式審查另指出兩項待裝置驗證的風險：批次 prefill 可能產生 warm-up 未涵蓋的新 shape，router 在極端 exp underflow 時可能產生重複的 expert IDs。這兩項尚未在目前 checkpoint 的裝置執行中重現，不能視為已修復。[批次分組][groupcode] [Warm-up code][warmupcode] [Router code][routercode]
 
